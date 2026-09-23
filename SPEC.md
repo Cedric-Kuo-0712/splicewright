@@ -204,7 +204,7 @@ Undo/redo: the history is an op log with inverse snapshots, persisted to `.splic
 **One op = one undo step.** The UI sends one op when the drag ends, not one per pointer move; during
 the drag it previews locally.
 
-Snapping (UI and `at: "snap"` for agents): playhead, item edges, markers, caption boundaries.
+Snapping, the adaptive ruler, and beat points are specified in §15.
 
 ---
 
@@ -282,6 +282,7 @@ ids or paths), and invokes them from the CLI. Steps, each cached by fingerprint:
 | waveform | `waveforms/*.json` | peaks for UI |
 | transcript | `transcripts/*.json` | faster-whisper / mlx-whisper, asset time |
 | scenes | `scenes/*.json` | optional |
+| beats | `beats/*.json` | audio assets only; see §15.3 |
 
 Concurrency is configurable (default: cores − 2). Hardware acceleration is detected, not assumed,
 so the tool also runs on Linux.
@@ -364,8 +365,9 @@ explained, not hidden.
 | M1 | `core`: schema, ops, validate, history, persistence + tests | invariant property test green |
 | M2 | `cli` + `mcp` over core; `migrate video-cut` | agent can split/trim the migrated project via MCP; `validate` passes |
 | M3 | `render`: generic composition, config loader, captions, ducking | §11 acceptance comparison |
-| M4 | `apps/web` ported to core ops, file watching, edit proxies, thumbs/waveforms | manual pass over §7.3 checklist |
+| M4 | `apps/web` ported to core ops, file watching, edit proxies, thumbs/waveforms; adaptive ruler + snapping (§15.1–15.2) | manual pass over §7.3 checklist; `rulerTicks`/`snap` unit tests |
 | M5 | `ingest` generic port | fresh project from raw files → first render with no manual steps |
+| M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow |
 
 ---
 
@@ -386,3 +388,142 @@ migration.
    Current proposal: from the filename, with the fingerprint stored alongside to detect renames.
 5. **Where the UI runs.** A Vite dev server started by `splicewright open` (simple), or a prebuilt static
    bundle with a small Node server (faster startup, needed for npm distribution)?
+6. **Beat detector.** Start with librosa (§15.3). Evaluate a learned model (madmom or Beat This!) only if
+   librosa misses too many beats on real project music. License and maintenance status of both are
+   *unverified*.
+7. **Beat offset calibration.** Editors often cut a frame before the beat so it feels tight. Add a
+   per-project `beatOffsetFrames` knob if real use shows the cuts feel late. Not in v1.
+
+---
+
+## 15. Timing aids: adaptive ruler, snapping, beat points
+
+Three features that make fine timing adjustments fast, modelled on CapCut (剪映). They share one idea:
+the timeline has a set of **snap points**, and every drag, whether a human's or an agent's, can be pulled
+onto them.
+
+All timeline positions are already integer frames (§2), so frame-level quantization is built in.
+Snapping here means being *attracted* to meaningful points, not rounding to frames.
+
+### 15.1 Adaptive ruler
+
+The ruler above the tracks picks its tick spacing from the current zoom, so labels never crowd
+together and never get too sparse.
+
+- **Zoom is measured in px per frame**, on a log scale. The range runs from "fit the whole project" to
+  about 24 px/frame, where single frames are easy to target. (The current video-cut editor tops out at
+  180 px/s, which is 6 px/frame at 30 fps: too coarse for frame edits.)
+- **Candidate steps**, in frames: `1, 2, 5, 10, 15` (only those below `fps`), then `1, 2, 5, 10, 15, 30 s`,
+  `1, 2, 5, 10 min` (multiplied by `fps`).
+- **Major tick** = the smallest candidate whose on-screen width is ≥ 80 px. It gets a label.
+- **Minor tick** = the largest candidate that divides the major step evenly and is ≥ 8 px wide. No label.
+- **Label format** follows the major step: below 1 s → `mm:ss:ff`; 1 s or more → `mm:ss`; 1 h or more → `hh:mm:ss`.
+- Zoom anchors on the mouse cursor (pinch, or Cmd + scroll) or on the playhead (`+` / `-`).
+  `Shift+Z` fits the whole project.
+- Implemented as a pure function `rulerTicks(fps, pxPerFrame, visibleRange) → {major[], minor[], labels[]}`
+  in core, with unit tests at several fps/zoom combinations (no two labels overlap, and ticks line up with
+  frames exactly).
+
+### 15.2 Snapping
+
+**Snap targets**, in priority order (when two are equally close, the higher one wins):
+
+1. Playhead (UI only)
+2. Edges of other items on any track
+3. Markers
+4. Beat points (§15.3)
+5. Caption boundaries
+6. Major ruler ticks: off by default. Useful for evenly timed slideshows; toggled separately.
+
+**Behaviour:**
+- The threshold is set in **screen pixels** (default 8 px) and converted to frames at the current zoom,
+  so snapping feels the same at every zoom level. It is never less than 1 frame.
+- Moving an item tests both of its edges. Moving an audio item also tests its own beat points, so
+  dragging the music can land a beat exactly on a video cut, and dragging a clip can land its edge on a beat.
+- Trimming tests only the edge being dragged.
+- While snapped, a vertical guide line appears with a short label (`beat`, `clip edge`, `marker`, …).
+
+**Overrides:**
+- A magnet toggle in the toolbar (key `N`) turns snapping on or off.
+- Holding `Alt/Option` during a drag bypasses snapping for that drag only.
+- Keyboard nudges ignore snapping: `,` / `.` move the selected item by 1 frame, `Shift` makes it 10.
+
+**Core API**, shared by the UI and agents:
+```ts
+snapPoints(project, range, opts) → SnapPoint[]            // { frame, kind, ref }, cached per revision
+snap(points, frame, thresholdFrames, exclude?) → { frame, target: SnapPoint | null }
+```
+For agents, any op argument that takes a frame (`at`, `to`) also accepts
+`{ near: Frames, snapTo?: ("edge" | "marker" | "beat")[], within?: Frames }`. The core resolves it with the
+same `snap()` the UI uses, so "put the photo on the beat near 12 s" means exactly one thing.
+
+### 15.3 Beat detection (自動踩點)
+
+**How automatic beat marking works.** This is the standard music-information-retrieval pipeline that
+tools like librosa implement. CapCut's own implementation is not public.
+
+1. **Onset strength.** Compute a spectrogram and measure, frame by frame, how much energy *increases*
+   (spectral flux). The result peaks wherever a drum hits or a note starts.
+2. **Tempo.** Autocorrelating the onset curve shows which spacing between peaks repeats most, which gives
+   the BPM.
+3. **Beat tracking.** Dynamic programming (Ellis, 2007) chooses a sequence of beat times that sit on strong
+   onsets while keeping the spacing close to the tempo. This produces a steady grid that holds up through
+   quiet passages, instead of just marking every loud sound.
+4. **Downbeats (the "1" of each bar)** need the meter. Learned models detect them directly. The v1
+   heuristic: assume 4/4 and pick the one-in-four phase whose beats have the most low-frequency onset energy.
+   *(Known ceiling: wrong for 3/4 and for songs whose bass does not land on the one. The fix is a learned
+   downbeat model, see §14.6.)*
+5. **Strength.** Each beat keeps its onset strength, so the UI can offer densities.
+
+CapCut offers two beat modes. As far as I recall, one marks every beat and the other a sparser set of
+stronger beats *(unverified)*. Splicewright exposes this as an explicit density setting:
+
+| Density | Keeps |
+|---|---|
+| `all` | every tracked beat |
+| `strong` | beats whose onset strength is above the track's 60th percentile |
+| `downbeat` | the first beat of each bar |
+| `every:N` | every Nth beat, counted from the first downbeat |
+
+**Implementation:**
+- Ingest step `beats` (Python, in `ingest/`). v1 uses **librosa** (`onset.onset_strength`,
+  `beat.beat_track`). It is pip-installable and fits the existing Python ingest. Output goes to
+  `.splicewright/beats/<fingerprint>.json` as
+  `{ algo, version, tempo, beats: [{ t, strength }], downbeats: [t] }`, in **asset seconds**.
+  Avoid GPL/AGPL analyzers (aubio, essentia, per my understanding; *verify*) if the repo is MIT.
+- **Schema extension** (optional field, so no `schemaVersion` bump):
+  `AudioItem.beats?: Seconds[]`. This is the chosen beat list in **asset time**, sorted. It lives in
+  `project.json` so that manual edits persist and snapping never depends on the cache.
+- Like anchored captions (§4.1), beats are mapped to the timeline on the fly:
+  `frame = start + round((t − sourceIn) × fps)`, keeping only the ones inside the item's visible range.
+  Moving, trimming or slipping the music carries its beats along. Rounding to frames shifts a beat by at
+  most half a frame (16.7 ms at 30 fps). *(Inferred: that is well below audible/visible sync error.)*
+- **Display:** small ticks on the audio item's top edge (downbeats taller). When the item is selected,
+  faint full-height guide lines run across all tracks.
+
+### 15.4 Beat ops
+
+| Op | Args | Semantics |
+|---|---|---|
+| `detectBeats` | itemId, density | Copies beats from the ingest cache into `item.beats`. Fails with a clear message if the `beats` ingest has not run. |
+| `addBeat` / `removeBeat` | itemId, at (frame) | Manual correction. In the UI, pressing `B` during playback taps a beat at the playhead (tap-along). |
+| `clearBeats` | itemId | |
+| `fitToBeats` | trackId, audioItemId, { every?: N, range?, from? } | Beat sync (卡點). Walks consecutive items on a magnetic track and sets each cut onto the next beat (every Nth). Images: set the duration directly. Video: trim the end, never past the source. If a clip is too short to reach the next beat, it uses the nearest reachable beat and reports it. Runs as one `batch`, so it is one undo step. Returns a list of changed and skipped items. |
+
+On the MCP side:
+- `get_range` includes each audio item's beat frames within the range, as a compact integer list.
+- `detect_beats` and `fit_to_beats` are write tools.
+- Typical agent flow: "make the Day 2 photos change on every second beat of the Sneakers track" becomes
+  `detect_beats(density: "all")` → `fit_to_beats(every: 2, range: marker "Day 2")`.
+
+### 15.5 Acceptance checks
+- `rulerTicks` and `snap`: unit tests (tick alignment, no label overlap, pixel-threshold behaviour at
+  three zoom levels, priority ordering, Alt bypass is a UI concern and is not tested in core).
+- Beats: `examples/` gains a synthetic click track generated by ffmpeg at a known BPM (e.g. 120 BPM with an
+  accent every 4th click). Detected beats must be within ±1 frame of the truth, and downbeats must fall on
+  the accents.
+- Real music: tap a reference beat list by hand for one project song and report F-measure at a ±70 ms
+  tolerance, the usual MIR evaluation window. This is a reported number, not a pass/fail gate, until we
+  know what "good enough" feels like in the editor.
+- `fitToBeats`: unit test on a slideshow of 8 images plus a synthetic beat list, checking that every cut
+  lands on a beat and the total duration is correct.

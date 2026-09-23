@@ -1,0 +1,21 @@
+{
+  "name": "@splicewright/render",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./node": "./src/node.ts"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.520",
+    "@remotion/renderer": "4.0.520",
+    "@splicewright/core": "*",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.520"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.7"
+  }
+}

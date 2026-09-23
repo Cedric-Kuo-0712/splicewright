@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@splicewright/core": "*",
-    "@splicewright/mcp": "*"
+    "@splicewright/mcp": "*",
+    "@splicewright/render": "*"
   }
 }

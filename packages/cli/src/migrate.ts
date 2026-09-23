@@ -30,6 +30,14 @@ const PUBLIC = "my-video/public";
 const DUCK_LEVEL = 0.3;
 // Render order of the overlay tracks, matching the JSX order inside Vlog.tsx's clip sequence.
 const OVERLAYS = ["FilmStrip", "LocationCard", "NowPlayingCard", "Polaroid", "IntroTitleCard"];
+// Overlay component → [my-video/src file, export]; copied into components/ (spec §11).
+const COMPONENTS: Record<string, [string, string]> = {
+  FilmStrip: ["FilmStripDemo", "FilmStripDemoComposition"],
+  LocationCard: ["LocationCard", "LocationCard"],
+  NowPlayingCard: ["NowPlayingCard", "NowPlayingCard"],
+  Polaroid: ["PolaroidOverlay", "PolaroidOverlay"],
+  IntroTitleCard: ["IntroTitleCard", "IntroTitleCard"],
+};
 const IGNORED_CLIP_FIELDS = ["shoutouts", "enhanced_audio"]; // unused by Vlog.tsx
 
 const readJson = (f: string) => JSON.parse(readFileSync(f, "utf8"));
@@ -155,6 +163,7 @@ export function migrateVideoCut(src: string, outDir: string, opts: { force?: boo
   writeFileSync(join(outDir, "project.json"), JSON.stringify(p, null, 2) + "\n");
   writeFileSync(join(outDir, ".splicewright", "assets.json"), JSON.stringify(Object.fromEntries(Object.entries(assetDurations).map(([k, d]) => [k, { duration: d }])), null, 2) + "\n");
   for (const [a, t] of Object.entries(transcripts)) writeFileSync(join(outDir, ".splicewright", "transcripts", `${a}.json`), JSON.stringify(t) + "\n");
+  writeComponents(src, outDir);
 
   return {
     out: join(outDir, "project.json"),
@@ -167,6 +176,36 @@ export function migrateVideoCut(src: string, outDir: string, opts: { force?: boo
     guesses: plan.music_tracks?.some((m) => m.duck_under_speech && m.duck_level === undefined) ? [`duck level ${DUCK_LEVEL} (never implemented in video-cut)`] : [],
     captions: captionReport,
   };
+}
+
+/** Copies the vlog components into components/ and registers them in splicewright.config.ts. */
+function writeComponents(src: string, outDir: string) {
+  mkdirSync(join(outDir, "components"), { recursive: true });
+  for (const [file] of Object.values(COMPONENTS)) {
+    let code = readFileSync(join(src, "my-video/src", `${file}.tsx`), "utf8");
+    if (file === "FilmStripDemo") {
+      // Its frames are relative to my-video/public; the project folder is the static root now.
+      const from = "staticFile(item.src)";
+      if (!code.includes(from)) throw new Error(`FilmStripDemo.tsx no longer contains ${from}`);
+      code = code.replace(from, `staticFile(\`${PUBLIC}/\${item.src}\`)`);
+    }
+    writeFileSync(join(outDir, "components", `${file}.tsx`), code);
+  }
+  const entries = Object.entries(COMPONENTS);
+  writeFileSync(
+    join(outDir, "splicewright.config.ts"),
+    [
+      `import { defineConfig } from "splicewright";`,
+      ...entries.map(([, [file, name]]) => `import { ${name} } from "./components/${file}";`),
+      ``,
+      `export default defineConfig({`,
+      `  components: {`,
+      ...entries.map(([c, [, name]]) => `    ${c === name ? c : `${c}: ${name}`},`),
+      `  },`,
+      `});`,
+      ``,
+    ].join("\n"),
+  );
 }
 
 /**

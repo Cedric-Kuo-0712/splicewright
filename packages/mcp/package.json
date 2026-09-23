@@ -7,8 +7,9 @@
     ".": "./src/server.ts"
   },
   "dependencies": {
-    "@splicewright/core": "*",
     "@modelcontextprotocol/sdk": "*",
+    "@splicewright/core": "*",
+    "@splicewright/render": "*",
     "zod": "*"
   }
 }

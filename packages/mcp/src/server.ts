@@ -1,13 +1,13 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { find, getItem, getRange, getSummary, ops, type OpResult } from "@splicewright/core";
 import { load, loadCtx, redo, run, undo } from "@splicewright/core/node";
+import { renderStatus, startRender, still } from "@splicewright/render/node";
 
 // Spec §7.2. Write tools map 1:1 to core ops; read tools return compact JSON.
-// still / render / render_status arrive with the render package (M3).
 
 const json = (o: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(o) }] });
 
@@ -74,9 +74,42 @@ export function createServer(dir: string): McpServer {
       });
     },
   );
+  server.registerTool(
+    "still",
+    { description: "JPEG (≤ 960 px wide) of what the composition shows at a timeline frame.", inputSchema: { frame: z.number().int().min(0) } },
+    async ({ frame }) => {
+      try {
+        const { buffer } = await still(dir, frame, null, 960);
+        return { content: [{ type: "image" as const, data: buffer!.toString("base64"), mimeType: "image/jpeg" }] };
+      } catch (e) {
+        return { ...json({ code: "render_failed", message: (e as Error).message }), isError: true };
+      }
+    },
+  );
+  server.registerTool(
+    "render",
+    {
+      description: "Start rendering to an mp4 in the background → job id; poll render_status. Range is timeline frames [from, to).",
+      inputSchema: {
+        output: z.string().default("out/final.mp4").describe("Path relative to the project folder."),
+        preset: z.string().default("master").describe("draft, master, or one from splicewright.config.ts"),
+        range: z.tuple([z.number().int().min(0), z.number().int().min(1)]).optional(),
+      },
+    },
+    async ({ output, preset, range }) => json(startRender(dir, { output: resolve(dir, output), preset, range })),
+  );
+  server.registerTool(
+    "render_status",
+    { description: "Status and progress (0..1) of a render job.", inputSchema: { jobId: z.string() } },
+    async ({ jobId }) => {
+      const job = renderStatus(jobId);
+      return job ? json(job) : { ...json({ code: "not_found", message: `job ${jobId} not found` }), isError: true };
+    },
+  );
   return server;
 }
 
 export async function serve(dir: string) {
+  console.log = console.error; // stdout is the MCP transport; keep Remotion's logs off it
   await createServer(dir).connect(new StdioServerTransport());
 }

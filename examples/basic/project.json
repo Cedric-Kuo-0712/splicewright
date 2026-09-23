@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "revision": 6,
+  "meta": {
+    "title": "basic",
+    "fps": 30,
+    "width": 320,
+    "height": 180
+  },
+  "assets": {
+    "a_clip": {
+      "id": "a_clip",
+      "path": "clip.mp4",
+      "kind": "video"
+    }
+  },
+  "tracks": [
+    {
+      "id": "t_1",
+      "name": "V1",
+      "kind": "video",
+      "magnetic": true,
+      "items": [
+        {
+          "id": "i_1",
+          "start": 0,
+          "duration": 60,
+          "assetId": "a_clip",
+          "sourceIn": 0
+        }
+      ]
+    },
+    {
+      "id": "t_2",
+      "name": "A1",
+      "kind": "audio",
+      "items": []
+    },
+    {
+      "id": "t_3",
+      "name": "C1",
+      "kind": "caption",
+      "items": [
+        {
+          "id": "c_1",
+          "start": 10,
+          "duration": 40,
+          "mode": "free",
+          "text": "hello"
+        }
+      ]
+    },
+    {
+      "id": "t_4",
+      "name": "O1",
+      "kind": "overlay",
+      "items": [
+        {
+          "id": "i_2",
+          "start": 0,
+          "duration": 60,
+          "component": "Box",
+          "props": {
+            "color": "#ff0000"
+          }
+        }
+      ]
+    }
+  ]
+}

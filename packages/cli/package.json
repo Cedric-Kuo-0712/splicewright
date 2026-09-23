@@ -1,0 +1,13 @@
+{
+  "name": "@splicewright/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "splicewright": "./src/main.ts"
+  },
+  "dependencies": {
+    "@splicewright/core": "*",
+    "@splicewright/mcp": "*"
+  }
+}

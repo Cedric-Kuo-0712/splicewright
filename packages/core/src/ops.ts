@@ -1,6 +1,6 @@
 import { z } from "zod";
-import type { CaptionItem, Ctx, Item, Project, Track, TrackKind } from "./schema.ts";
-import { captionSpan, validate } from "./validate.ts";
+import type { Anchor, CaptionItem, Ctx, Item, Project, Track, TrackKind } from "./schema.ts";
+import { anchorOf, itemSpan, validate, videoItems } from "./validate.ts";
 
 // Spec §5. Every op mutates a private clone; `apply` bumps the revision and validates.
 
@@ -16,12 +16,13 @@ export type OpResult =
   | { project: Project; changes: { summary: string } }
   | { error: { code: string; message: string } };
 
-interface OpDef<S extends z.ZodType = z.ZodType> {
+export interface OpDef<S extends z.ZodType = z.ZodType> {
+  doc: string;
   args: S;
   run: (p: Project, args: z.infer<S>, ctx: Ctx) => string;
 }
 
-const def = <S extends z.ZodType>(args: S, run: OpDef<S>["run"]): OpDef<S> => ({ args, run });
+const def = <S extends z.ZodType>(doc: string, args: S, run: OpDef<S>["run"]): OpDef<S> => ({ doc, args, run });
 
 // Explicitly typed so TypeScript narrows after `if (...) fail(...)`.
 const fail: (code: string, message: string) => never = (code, message) => {
@@ -69,9 +70,17 @@ function locate(p: Project, itemId: string): { track: Track; item: Item } {
   return fail("not_found", `item ${itemId} not found`);
 }
 
-function assertAuthored(item: Item) {
-  if ("mode" in item && item.mode === "anchored")
-    fail("invalid", `${item.id} is an anchored caption; its timing follows ${item.itemId}`);
+const allItems = (p: Project): Item[] => p.tracks.flatMap((t): Item[] => t.items);
+
+/** Timeline frame → source seconds of the anchor's target. */
+function toSource(p: Project, anchor: Anchor, frame: number): number {
+  const target = videoItems(p).get(anchor.itemId) ?? fail("not_found", `anchor target ${anchor.itemId} not found`);
+  return target.sourceIn + (frame - target.start) / p.meta.fps;
+}
+
+function spanText(p: Project, item: Item): string {
+  const s = itemSpan(p, item);
+  return s ? `[${s.start}, ${s.start + s.duration})` : "hidden (outside its anchor item)";
 }
 
 /** `<prefix>_<base36 counter>`, one past the highest existing id with that prefix (§4.3). */
@@ -125,6 +134,7 @@ function patch(target: Record<string, unknown>, changes: Record<string, unknown>
 
 export const ops: Record<string, OpDef<any>> = {
   importAsset: def(
+    "Register a media file (path relative to the project root). Idempotent by path.",
     z.object({ path: z.string().min(1), kind: z.enum(["video", "audio", "image"]).optional() }),
     (p, a) => {
       if (/^([/\\]|[a-zA-Z]:)/.test(a.path)) fail("invalid", `asset path must be relative to the project root: ${a.path}`);
@@ -142,6 +152,7 @@ export const ops: Record<string, OpDef<any>> = {
   ),
 
   insertItem: def(
+    "Insert one item at frame `at`: pass assetId (video/audio/image), component (overlay), or text (free caption). Omitted trackId picks the first track of the right kind with room, else creates one. Ripple defaults to the track's magnetic flag.",
     z
       .object({
         trackId: Id.optional(),
@@ -189,42 +200,51 @@ export const ops: Record<string, OpDef<any>> = {
     },
   ),
 
-  split: def(z.object({ itemId: Id, at: Frames }), (p, a) => {
-    const { track: t, item } = locate(p, a.itemId);
-    assertAuthored(item);
-    if (a.at <= item.start || a.at >= end(item))
-      fail("invalid", `split point ${a.at} is not inside ${item.id} [${item.start}, ${end(item)})`);
-    const offset = a.at - item.start;
-    const second = structuredClone(item);
-    second.id = nextId(p, t.kind === "caption" ? "c" : "i");
-    second.start = a.at;
-    second.duration = item.duration - offset;
-    item.duration = offset;
-    if ("sourceIn" in second) second.sourceIn += offset / p.meta.fps;
-    delete (second as { fadeIn?: number }).fadeIn;
-    delete (item as { fadeOut?: number }).fadeOut;
-    (t.items as Item[]).splice(t.items.indexOf(item as never) + 1, 0, second);
+  split: def(
+    "Split an item at timeline frame `at`. The second half gets a new id; items anchored to it follow whichever half holds their first frame.",
+    z.object({ itemId: Id, at: Frames }),
+    (p, a) => {
+      const { track: t, item } = locate(p, a.itemId);
+      if (anchorOf(item)) fail("invalid", `${item.id} is anchored; detach it first (attach with to: null)`);
+      if (a.at <= item.start || a.at >= end(item))
+        fail("invalid", `split point ${a.at} is not inside ${item.id} [${item.start}, ${end(item)})`);
+      const offset = a.at - item.start;
+      const second = structuredClone(item);
+      second.id = nextId(p, t.kind === "caption" ? "c" : "i");
+      second.start = a.at;
+      second.duration = item.duration - offset;
+      item.duration = offset;
+      if ("sourceIn" in second) second.sourceIn += offset / p.meta.fps;
+      delete (second as { fadeIn?: number }).fadeIn;
+      delete (item as { fadeOut?: number }).fadeOut;
+      (t.items as Item[]).splice(t.items.indexOf(item as never) + 1, 0, second);
 
-    let moved = 0;
-    if ("sourceIn" in second && t.kind === "video") {
-      // ponytail: a caption spanning the cut goes wholly to the half holding its midpoint and is
-      // clipped at the cut; duplicate it into both halves if that proves visible.
-      for (const ct of p.tracks)
-        if (ct.kind === "caption")
-          for (const c of ct.items)
-            if (c.mode === "anchored" && c.itemId === item.id && (c.sourceStart + c.sourceEnd) / 2 >= second.sourceIn) {
-              c.itemId = second.id;
-              moved++;
-            }
-    }
-    return `split ${item.id} at ${a.at} → ${item.id}, ${second.id}` + (moved ? `; ${moved} captions re-pointed` : "");
-  }),
+      let moved = 0;
+      if ("sourceIn" in second && t.kind === "video")
+        // ponytail: an anchored item spanning the cut stays with the first half and is clipped at
+        // the cut; duplicate it into both halves if that proves visible.
+        for (const other of allItems(p)) {
+          const anchor = anchorOf(other);
+          if (anchor?.itemId === item.id && anchor.sourceStart >= second.sourceIn - 1e-9) {
+            anchor.itemId = second.id;
+            moved++;
+          }
+        }
+      return `split ${item.id} at ${a.at} → ${item.id}, ${second.id}` + (moved ? `; ${moved} anchored items re-pointed` : "");
+    },
+  ),
 
   trim: def(
+    "Move an item's start or end edge to frame `to`. Trimming start moves start and sourceIn together; with ripple the later items follow instead. On an anchored item this fine-tunes its anchor, and it stays anchored.",
     z.object({ itemId: Id, edge: z.enum(["start", "end"]), to: Frames.min(0), ripple: z.boolean().optional() }),
     (p, a) => {
       const { track: t, item } = locate(p, a.itemId);
-      assertAuthored(item);
+      const anchor = anchorOf(item);
+      if (anchor) {
+        if (a.edge === "start" ? a.to >= end(item) : a.to <= item.start) fail("invalid", `trim leaves ${item.id} with no duration`);
+        anchor[a.edge === "start" ? "sourceStart" : "sourceEnd"] = toSource(p, anchor, a.to);
+        return `re-anchored ${item.id} ${a.edge} → ${spanText(p, item)}`;
+      }
       const oldEnd = end(item);
       const ripple = a.ripple ?? t.magnetic ?? false;
       if (a.edge === "end") {
@@ -245,71 +265,127 @@ export const ops: Record<string, OpDef<any>> = {
   ),
 
   move: def(
+    "Move an item to frame `to`, optionally onto another track of the same kind. Overlap is rejected unless ripple (then `to` is read after the source gap closes). On an anchored item this shifts its anchor, and it stays anchored.",
     z.object({ itemId: Id, to: Frames.min(0), trackId: Id.optional(), ripple: z.boolean().optional() }),
     (p, a) => {
       const { track: src, item } = locate(p, a.itemId);
-      assertAuthored(item);
       const dst = a.trackId ? findTrack(p, a.trackId) : src;
       if (dst.kind !== src.kind) fail("invalid", `cannot move a ${src.kind} item to ${dst.kind} track ${dst.id}`);
       src.items.splice(src.items.indexOf(item as never), 1);
+      (dst.items as Item[]).push(item);
+      const anchor = anchorOf(item);
+      if (anchor) {
+        const delta = (a.to - item.start) / p.meta.fps;
+        anchor.sourceStart += delta;
+        anchor.sourceEnd += delta;
+        return `re-anchored ${item.id} on ${dst.id} → ${spanText(p, item)}`;
+      }
       // With ripple, `to` is read after the source gap has closed.
       if (a.ripple ?? src.magnetic) shift(src, end(item), -item.duration);
       if (a.ripple ?? dst.magnetic) shift(dst, a.to, item.duration);
       item.start = a.to;
-      (dst.items as Item[]).push(item);
       return `moved ${item.id} to ${dst.id} at ${a.to}`;
     },
   ),
 
-  delete: def(z.object({ itemIds: z.array(Id).min(1), ripple: z.boolean().optional() }), (p, a) => {
-    const ids = [...new Set<string>(a.itemIds)];
-    // Latest first, so a ripple never shifts an item that is still to be deleted.
-    const targets = ids.map((id) => locate(p, id)).sort((x, y) => y.item.start - x.item.start);
-    for (const { track: t, item } of targets) {
-      t.items.splice(t.items.indexOf(item as never), 1);
-      if (a.ripple ?? t.magnetic) shift(t, end(item), -item.duration);
-    }
-    let orphans = 0;
-    for (const t of p.tracks)
-      if (t.kind === "caption") {
-        const keep = t.items.filter((c) => !(c.mode === "anchored" && ids.includes(c.itemId)));
-        orphans += t.items.length - keep.length;
-        t.items = keep;
+  delete: def(
+    "Delete items. Ripple (default on magnetic tracks) closes the gap. Captions anchored to a deleted item go too; overlays attached to it are detached in place.",
+    z.object({ itemIds: z.array(Id).min(1), ripple: z.boolean().optional() }),
+    (p, a) => {
+      const ids = [...new Set<string>(a.itemIds)];
+      // Latest first, so a ripple never shifts an item that is still to be deleted.
+      const targets = ids.map((id) => locate(p, id)).sort((x, y) => y.item.start - x.item.start);
+      for (const { track: t, item } of targets) {
+        t.items.splice(t.items.indexOf(item as never), 1);
+        if (a.ripple ?? t.magnetic) shift(t, end(item), -item.duration);
       }
-    return `deleted ${ids.join(", ")}` + (orphans ? ` and ${orphans} anchored captions` : "");
-  }),
+      let orphans = 0;
+      let detached = 0;
+      for (const t of p.tracks) {
+        if (t.kind === "caption") {
+          const keep = t.items.filter((c) => !(c.mode === "anchored" && ids.includes(c.itemId)));
+          orphans += t.items.length - keep.length;
+          t.items = keep;
+        }
+        // Overlays are hand-authored: keep them at their last position rather than lose them.
+        if (t.kind === "overlay")
+          for (const o of t.items)
+            if (o.anchor && ids.includes(o.anchor.itemId)) {
+              delete o.anchor;
+              detached++;
+            }
+      }
+      return (
+        `deleted ${ids.join(", ")}` +
+        (orphans ? `; removed ${orphans} anchored captions` : "") +
+        (detached ? `; detached ${detached} overlays in place` : "")
+      );
+    },
+  ),
 
-  setProps: def(z.object({ itemId: Id, patch: Patch }), (p, a) => {
+  attach: def(
+    "Anchor an overlay or caption to a video item's source time at its current position, so it follows that item through trims, ripples and moves. to: null detaches it, freezing it at its current timeline position.",
+    z.object({ itemId: Id, to: Id.nullable() }),
+    (p, a) => {
+      const { track: t, item } = locate(p, a.itemId);
+      if (t.kind !== "overlay" && t.kind !== "caption") fail("invalid", `only overlay and caption items can be anchored`);
+      const { start, duration } = item; // current span (last known, if hidden)
+      const it = item as Record<string, unknown>;
+      if (t.kind === "caption") {
+        it.mode = "free";
+        delete it.itemId;
+        delete it.sourceStart;
+        delete it.sourceEnd;
+      } else delete it.anchor;
+      if (a.to === null) return `detached ${item.id} at [${start}, ${start + duration})`;
+
+      const target = videoItems(p).get(a.to) ?? fail("not_found", `video item ${a.to} not found`);
+      const anchor = { itemId: target.id, sourceStart: 0, sourceEnd: 0 };
+      anchor.sourceStart = toSource(p, anchor, start);
+      anchor.sourceEnd = toSource(p, anchor, start + duration);
+      if (t.kind === "caption") Object.assign(it, { mode: "anchored", ...anchor });
+      else it.anchor = anchor;
+      return `attached ${item.id} to ${target.id} → ${spanText(p, item)}`;
+    },
+  ),
+
+  setProps: def(
+    'Patch item fields: volume, fit, transform (video); volume, fadeIn, fadeOut (audio); props (overlay); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
     const { track: t, item } = locate(p, a.itemId);
     patch(item as Record<string, unknown>, a.patch, ITEM_PROPS[t.kind], `${t.kind} item ${item.id}`);
     return `updated ${item.id}: ${Object.keys(a.patch).join(", ")}`;
   }),
 
-  slip: def(z.object({ itemId: Id, deltaSec: z.number() }), (p, a) => {
+  slip: def(
+    'Shift which source media an item shows by deltaSec; timeline position unchanged.',z.object({ itemId: Id, deltaSec: z.number() }), (p, a) => {
     const { item } = locate(p, a.itemId);
     if (!("sourceIn" in item)) fail("invalid", `${item.id} has no source media to slip`);
     item.sourceIn += a.deltaSec;
     return `slipped ${item.id} to sourceIn ${item.sourceIn.toFixed(3)}s`;
   }),
 
-  addTrack: def(z.object({ kind: z.enum(KINDS), name: z.string().optional(), magnetic: z.boolean().optional() }), (p, a) => {
+  addTrack: def(
+    'Add an empty track of a kind.',z.object({ kind: z.enum(KINDS), name: z.string().optional(), magnetic: z.boolean().optional() }), (p, a) => {
     const t = addTrack(p, a.kind, a.name, a.magnetic);
     return `added ${a.kind} track ${t.id} (${t.name})`;
   }),
 
-  removeTrack: def(z.object({ trackId: Id }), (p, a) => {
+  removeTrack: def(
+    'Remove a track and its items.',z.object({ trackId: Id }), (p, a) => {
     const t = findTrack(p, a.trackId);
     p.tracks.splice(p.tracks.indexOf(t), 1);
     return `removed track ${t.id} with ${t.items.length} items`;
   }),
 
-  setTrack: def(z.object({ trackId: Id, patch: Patch }), (p, a) => {
+  setTrack: def(
+    'Patch track fields: name, muted, hidden, locked, magnetic, volume (audio), style (caption). null unsets.',z.object({ trackId: Id, patch: Patch }), (p, a) => {
     const t = findTrack(p, a.trackId);
     patch(t as Record<string, unknown>, a.patch, TRACK_PROPS[t.kind], `${t.kind} track ${t.id}`);
     return `updated track ${t.id}: ${Object.keys(a.patch).join(", ")}`;
   }),
 
-  addCaptionsFromTranscript: def(z.object({ itemId: Id, trackId: Id.optional() }), (p, a, ctx) => {
+  addCaptionsFromTranscript: def(
+    "Create captions anchored to a video item's source time from its asset transcript (visible segments only).",z.object({ itemId: Id, trackId: Id.optional() }), (p, a, ctx) => {
     const { track: src, item } = locate(p, a.itemId);
     if (src.kind !== "video" || !("assetId" in item)) fail("invalid", `${a.itemId} is not a video item`);
     const assetId = (item as { assetId: string }).assetId;
@@ -321,14 +397,15 @@ export const ops: Record<string, OpDef<any>> = {
       const text = s.text.trim();
       const cap: CaptionItem = { id: nextId(p, "c"), start: 0, duration: 1, mode: "anchored", itemId: item.id, sourceStart: s.start, sourceEnd: s.end, text };
       // Only segments visible now; a later trim that extends the item won't pull in the others.
-      if (!text || !captionSpan(p, cap)) continue;
+      if (!text || !itemSpan(p, cap)) continue;
       (t.items as Item[]).push(cap);
       n++;
     }
     return `added ${n} captions for ${item.id} on ${t.id}`;
   }),
 
-  editCaption: def(z.object({ captionId: Id, text: z.string() }), (p, a) => {
+  editCaption: def(
+    "Replace a caption's text. Empty text hides it.",z.object({ captionId: Id, text: z.string() }), (p, a) => {
     const { item } = locate(p, a.captionId);
     if (!("mode" in item)) fail("invalid", `${a.captionId} is not a caption`);
     (item as CaptionItem).text = a.text;
@@ -336,6 +413,7 @@ export const ops: Record<string, OpDef<any>> = {
   }),
 
   addMarker: def(
+    "Add a named marker (point or range) on the timeline.",
     z.object({ label: z.string(), start: Frames.min(0), duration: Frames.min(1).optional(), color: z.string().optional() }),
     (p, a) => {
       const id = nextId(p, "m");
@@ -345,14 +423,16 @@ export const ops: Record<string, OpDef<any>> = {
     },
   ),
 
-  removeMarker: def(z.object({ markerId: Id }), (p, a) => {
+  removeMarker: def(
+    'Remove a marker.',z.object({ markerId: Id }), (p, a) => {
     const i = (p.markers ?? []).findIndex((m) => m.id === a.markerId);
     if (i === -1) fail("not_found", `marker ${a.markerId} not found`);
     p.markers!.splice(i, 1);
     return `removed marker ${a.markerId}`;
   }),
 
-  batch: def(z.object({ ops: z.array(z.object({ op: z.string(), args: z.unknown() })).min(1) }), (p, a, ctx) => {
+  batch: def(
+    'Apply several ops atomically: all or nothing, one revision, one undo step. ops: [{op, args}].',z.object({ ops: z.array(z.object({ op: z.string(), args: z.unknown() })).min(1) }), (p, a, ctx) => {
     // Intermediate states may be invalid (e.g. swapping two items); only the end result is validated.
     const summaries = a.ops.map(({ op, args }: { op: string; args: unknown }) => {
       const d = ops[op] ?? fail("unknown_op", `unknown op ${op}`);
@@ -367,14 +447,13 @@ function parseArgs(d: OpDef, args: unknown) {
   return r.success ? r.data : fail("invalid_args", z.prettifyError(r.error));
 }
 
-/** Recompute derived anchored-caption timing and keep items ordered by start. */
+/** Recompute derived anchored-item timing and keep items ordered by start. */
 function refresh(p: Project) {
   for (const t of p.tracks) {
-    if (t.kind === "caption")
-      for (const c of t.items) {
-        const span = c.mode === "anchored" ? captionSpan(p, c) : null;
-        if (span) Object.assign(c, span); // hidden captions keep their last timing
-      }
+    for (const i of t.items) {
+      const span = anchorOf(i) ? itemSpan(p, i) : null;
+      if (span) Object.assign(i, span); // hidden items keep their last timing
+    }
     (t.items as Item[]).sort((x, y) => x.start - y.start);
   }
 }

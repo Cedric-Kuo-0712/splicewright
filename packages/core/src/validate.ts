@@ -1,17 +1,24 @@
 import { Project as ProjectSchema } from "./schema.ts";
-import type { CaptionItem, Ctx, Project, Track, VideoItem } from "./schema.ts";
+import type { Anchor, Ctx, Item, Project, Track, VideoItem } from "./schema.ts";
+
+/** The anchor of an anchored caption (the caption itself) or of an attached overlay; else undefined. */
+export function anchorOf(item: Item): Anchor | undefined {
+  if ("mode" in item) return item.mode === "anchored" ? item : undefined;
+  return "anchor" in item ? item.anchor : undefined;
+}
 
 /**
- * Timeline span of an anchored caption (§4.1): the intersection of its source range with the
- * referenced item's visible source range, mapped to timeline frames. null = hidden.
+ * Timeline span of an item. Anchored items (§4.1) get the intersection of their source range with
+ * the referenced item's visible source range, mapped to timeline frames; null = hidden.
  */
-export function captionSpan(project: Project, cap: CaptionItem): { start: number; duration: number } | null {
-  if (cap.mode === "free") return { start: cap.start, duration: cap.duration };
-  const item = videoItems(project).get(cap.itemId);
+export function itemSpan(project: Project, it: Item): { start: number; duration: number } | null {
+  const anchor = anchorOf(it);
+  if (!anchor) return { start: it.start, duration: it.duration };
+  const item = videoItems(project).get(anchor.itemId);
   if (!item) return null;
   const fps = project.meta.fps;
-  const lo = Math.max(cap.sourceStart, item.sourceIn);
-  const hi = Math.min(cap.sourceEnd, item.sourceIn + item.duration / fps);
+  const lo = Math.max(anchor.sourceStart, item.sourceIn);
+  const hi = Math.min(anchor.sourceEnd, item.sourceIn + item.duration / fps);
   const start = item.start + Math.round((lo - item.sourceIn) * fps);
   const end = item.start + Math.round((hi - item.sourceIn) * fps);
   return end - start >= 1 ? { start, duration: end - start } : null;
@@ -49,11 +56,12 @@ export function validate(project: unknown, prev?: Project, ctx: Ctx = {}): strin
         if (dur !== undefined && i.sourceIn + i.duration / p.meta.fps > dur + 1e-6)
           errs.push(`${i.id}: source range ends past asset duration ${dur}s`);
       }
-      if ("mode" in i && i.mode === "anchored" && !vids.has(i.itemId))
-        errs.push(`${i.id}: anchored to missing video item ${i.itemId}`);
+      const anchor = anchorOf(i);
+      if (anchor && !vids.has(anchor.itemId)) errs.push(`${i.id}: anchored to missing video item ${anchor.itemId}`);
     }
     if (t.kind !== "caption") {
-      const sorted = [...t.items].sort((a, b) => a.start - b.start);
+      // Anchored items are exempt: their timing is derived and they only ever stack, like captions.
+      const sorted = t.items.filter((i) => !anchorOf(i)).sort((a, b) => a.start - b.start);
       for (let k = 1; k < sorted.length; k++)
         if (sorted[k - 1].start + sorted[k - 1].duration > sorted[k].start)
           errs.push(`${t.id}: ${sorted[k - 1].id} overlaps ${sorted[k].id}`);
@@ -71,8 +79,8 @@ export function validate(project: unknown, prev?: Project, ctx: Ctx = {}): strin
   return errs;
 }
 
-// Locking freezes items only; track settings (mute, name, ...) stay editable. Anchored caption
+// Locking freezes items only; track settings (mute, name, ...) stay editable. Anchored item
 // timing is derived, so it may follow edits on other tracks even when locked.
 function lockKey(t: Track): string {
-  return JSON.stringify(t.items.map((i) => ("mode" in i && i.mode === "anchored" ? { ...i, start: 0, duration: 1 } : i)));
+  return JSON.stringify(t.items.map((i) => (anchorOf(i) ? { ...i, start: 0, duration: 1 } : i)));
 }

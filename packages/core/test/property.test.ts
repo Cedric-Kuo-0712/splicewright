@@ -42,6 +42,7 @@ function randomOp(p: Project, r: () => number): [string, unknown] {
     ["setTrack", { trackId: pick(p.tracks)?.id, patch: { locked: r() < 0.3 } }],
     ["removeTrack", { trackId: pick(p.tracks)?.id }],
     ["addMarker", { label: "m", start: int(600) }],
+    ["attach", { itemId: id, to: r() < 0.3 ? null : (pick(all.filter((i) => "sourceIn" in i && !("fadeIn" in i || "duck" in i)))?.id ?? "missing") }],
   ];
   const [op, args] = pick(choices)!;
   return r() < 0.1 ? ["batch", { ops: [{ op, args }, (([o, a]) => ({ op: o, args: a }))(pick(choices)!)] }] : [op, args];

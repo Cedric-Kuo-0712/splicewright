@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { apply, captionSpan, createProject, validate, type Ctx, type OpResult, type Project } from "../src/index.ts";
+import { apply, createProject, itemSpan, validate, type Ctx, type OpResult, type Project } from "../src/index.ts";
 
 const ctx: Ctx = {
   assetDurations: { a_clip: 10, a_song: 60 },
@@ -135,13 +135,53 @@ describe("ops", () => {
     expect(item(p, cap.id)).toMatchObject({ start: 5, duration: 30 });
     // Trim past the caption's source range: hidden, not deleted.
     p = ok(apply(p, "trim", { itemId: "i_1", edge: "start", to: 50 }, ctx));
-    expect(captionSpan(p, item(p, cap.id))).toBeNull();
+    expect(itemSpan(p, item(p, cap.id))).toBeNull();
     expect(item(p, cap.id)).toBeDefined();
 
     let q = ok(apply(fixture(), "addCaptionsFromTranscript", { itemId: "i_1" }, ctx));
     q = ok(apply(q, "split", { itemId: "i_1", at: 10 }, ctx));
     expect(item(q, cap.id).itemId).toBe("i_3");
-    expect(err(apply(q, "trim", { itemId: cap.id, edge: "end", to: 99 }, ctx))).toBe("invalid");
+  });
+
+  it("anchored items can be fine-tuned by trim/move and stay anchored", () => {
+    let p = ok(apply(fixture(), "addCaptionsFromTranscript", { itemId: "i_1" }, ctx));
+    const id = (items(p, "t_3")[0] as any).id; // [15, 45) ← source 0.5–1.5s
+    p = ok(apply(p, "trim", { itemId: id, edge: "end", to: 60 }, ctx));
+    expect(item(p, id)).toMatchObject({ mode: "anchored", start: 15, duration: 45, sourceEnd: 2 });
+    p = ok(apply(p, "move", { itemId: id, to: 5 }, ctx));
+    expect(item(p, id)).toMatchObject({ start: 5, duration: 45 });
+    expect(item(p, id).sourceStart).toBeCloseTo(1 / 6);
+    // Still anchored: a ripple trim on i_1 carries the fine-tuned caption along.
+    p = ok(apply(p, "trim", { itemId: "i_1", edge: "start", to: 3 }, ctx));
+    expect(item(p, id)).toMatchObject({ start: 2, duration: 45 });
+    expect(err(apply(p, "trim", { itemId: id, edge: "end", to: 2 }, ctx))).toBe("invalid");
+  });
+
+  it("attached overlays follow ripple edits; detaching freezes them for manual placement", () => {
+    let p = ok(apply(fixture(), "insertItem", { component: "Card", props: {}, at: 100, duration: 30 }, ctx)); // i_3 over i_2
+    p = ok(apply(p, "attach", { itemId: "i_3", to: "i_2" }, ctx));
+    expect(item(p, "i_3").anchor).toMatchObject({ itemId: "i_2" });
+    p = ok(apply(p, "trim", { itemId: "i_1", edge: "end", to: 60 }, ctx)); // i_2 ripples 90 → 60
+    expect(item(p, "i_3")).toMatchObject({ start: 70, duration: 30 });
+    // Split i_2 before the card: the card's first frame lies in the second half.
+    p = ok(apply(p, "split", { itemId: "i_2", at: 65 }, ctx));
+    expect(item(p, "i_3").anchor.itemId).toBe("i_4");
+    // Detach, then place by hand: now it ignores edits to i_4.
+    p = ok(apply(p, "attach", { itemId: "i_3", to: null }, ctx));
+    expect(item(p, "i_3").anchor).toBeUndefined();
+    p = ok(apply(p, "move", { itemId: "i_3", to: 200 }, ctx));
+    p = ok(apply(p, "delete", { itemIds: ["i_1"] }, ctx));
+    expect(item(p, "i_3").start).toBe(200);
+    expect(err(apply(p, "attach", { itemId: "i_2", to: "i_4" }, ctx))).toBe("invalid");
+  });
+
+  it("deleting an anchor target detaches overlays in place and removes its captions", () => {
+    let p = ok(apply(fixture(), "insertItem", { component: "Card", props: {}, at: 100, duration: 30 }, ctx));
+    p = ok(apply(p, "attach", { itemId: "i_3", to: "i_2" }, ctx));
+    const r = apply(p, "delete", { itemIds: ["i_2"] }, ctx);
+    expect("changes" in r && r.changes.summary).toContain("detached 1 overlays");
+    expect(item(ok(r), "i_3")).toMatchObject({ start: 100, duration: 30 });
+    expect(item(ok(r), "i_3").anchor).toBeUndefined();
   });
 
   it("editCaption with empty text hides; markers add and remove", () => {

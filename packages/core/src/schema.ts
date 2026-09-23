@@ -70,10 +70,14 @@ export const CaptionItem = z.discriminatedUnion("mode", [
   z.object({ ...itemBase, mode: z.literal("free"), text: z.string() }),
 ]);
 
+/** Ties an item to a video item's source time; the item's start/duration are then derived. */
+export const Anchor = z.object({ itemId: Id, sourceStart: Seconds, sourceEnd: Seconds });
+
 export const OverlayItem = z.object({
   ...itemBase,
   component: z.string().min(1),
   props: z.record(z.string(), z.unknown()),
+  anchor: Anchor.optional(),
 });
 
 export const Track = z.discriminatedUnion("kind", [
@@ -107,6 +111,7 @@ export const Project = z.object({
 });
 
 export type Asset = z.infer<typeof Asset>;
+export type Anchor = z.infer<typeof Anchor>;
 export type VideoItem = z.infer<typeof VideoItem>;
 export type AudioItem = z.infer<typeof AudioItem>;
 export type CaptionItem = z.infer<typeof CaptionItem>;

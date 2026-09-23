@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Anchor, CaptionItem, Ctx, Item, Project, Track, TrackKind } from "./schema.ts";
+import { snap, snapPoints, snapSpan } from "./timing.ts";
 import { anchorOf, itemSpan, validate, videoItems } from "./validate.ts";
 
 // Spec §5. Every op mutates a private clone; `apply` bumps the revision and validates.
@@ -31,6 +32,18 @@ const fail: (code: string, message: string) => never = (code, message) => {
 
 const Id = z.string().min(1);
 const Frames = z.number().int();
+const Near = z.object({
+  near: Frames.min(0),
+  snapTo: z.array(z.enum(["edge", "marker", "beat"])).optional(),
+  within: Frames.min(0).optional(),
+});
+/** A frame arg that also takes { near } (§15.2). resolveNear() swaps the object for a frame before
+ * parsing; the identity transform only narrows the type, because the MCP SDK parses the raw input too. */
+const frameArg = (base: z.ZodNumber) =>
+  z
+    .union([base, Near])
+    .transform((v) => v as number)
+    .describe("Frame, or { near, snapTo?: (edge|marker|beat)[], within? } to snap to the closest target");
 const Patch = z.record(z.string(), z.unknown()); // null value = unset the field
 const KINDS = ["video", "audio", "caption", "overlay"] as const;
 
@@ -160,7 +173,7 @@ export const ops: Record<string, OpDef<any>> = {
         component: z.string().min(1).optional(),
         props: Patch.optional(),
         text: z.string().optional(),
-        at: Frames.min(0),
+        at: frameArg(Frames.min(0)),
         duration: Frames.min(1).optional(),
         sourceIn: z.number().min(0).optional(),
         ripple: z.boolean().optional(),
@@ -202,7 +215,7 @@ export const ops: Record<string, OpDef<any>> = {
 
   split: def(
     "Split an item at timeline frame `at`. The second half gets a new id; items anchored to it follow whichever half holds their first frame.",
-    z.object({ itemId: Id, at: Frames }),
+    z.object({ itemId: Id, at: frameArg(Frames) }),
     (p, a) => {
       const { track: t, item } = locate(p, a.itemId);
       if (anchorOf(item)) fail("invalid", `${item.id} is anchored; detach it first (attach with to: null)`);
@@ -236,7 +249,7 @@ export const ops: Record<string, OpDef<any>> = {
 
   trim: def(
     "Move an item's start or end edge to frame `to`. Trimming start moves start and sourceIn together; with ripple the later items follow instead. On an anchored item this fine-tunes its anchor, and it stays anchored.",
-    z.object({ itemId: Id, edge: z.enum(["start", "end"]), to: Frames.min(0), ripple: z.boolean().optional() }),
+    z.object({ itemId: Id, edge: z.enum(["start", "end"]), to: frameArg(Frames.min(0)), ripple: z.boolean().optional() }),
     (p, a) => {
       const { track: t, item } = locate(p, a.itemId);
       const anchor = anchorOf(item);
@@ -266,7 +279,7 @@ export const ops: Record<string, OpDef<any>> = {
 
   move: def(
     "Move an item to frame `to`, optionally onto another track of the same kind. Overlap is rejected unless ripple (then `to` is read after the source gap closes). On an anchored item this shifts its anchor, and it stays anchored.",
-    z.object({ itemId: Id, to: Frames.min(0), trackId: Id.optional(), ripple: z.boolean().optional() }),
+    z.object({ itemId: Id, to: frameArg(Frames.min(0)), trackId: Id.optional(), ripple: z.boolean().optional() }),
     (p, a) => {
       const { track: src, item } = locate(p, a.itemId);
       const dst = a.trackId ? findTrack(p, a.trackId) : src;
@@ -436,7 +449,7 @@ export const ops: Record<string, OpDef<any>> = {
     // Intermediate states may be invalid (e.g. swapping two items); only the end result is validated.
     const summaries = a.ops.map(({ op, args }: { op: string; args: unknown }) => {
       const d = ops[op] ?? fail("unknown_op", `unknown op ${op}`);
-      return d.run(p, parseArgs(d, args), ctx);
+      return d.run(p, parseArgs(d, resolveNear(p, args)), ctx);
     });
     return `batch of ${summaries.length}: ${summaries.join("; ")}`;
   }),
@@ -445,6 +458,28 @@ export const ops: Record<string, OpDef<any>> = {
 function parseArgs(d: OpDef, args: unknown) {
   const r = d.args.safeParse(args ?? {});
   return r.success ? r.data : fail("invalid_args", z.prettifyError(r.error));
+}
+
+/**
+ * Replaces { near } in `at` / `to` with the snapped frame. `within` defaults to 1 s. A move snaps
+ * either edge of the item; the item's own edges never count. No target in reach is an error, so an
+ * agent asking for "the beat near 12 s" never silently gets 12 s.
+ */
+function resolveNear(p: Project, args: unknown): unknown {
+  if (!args || typeof args !== "object") return args;
+  const a = { ...(args as Record<string, unknown>) };
+  for (const key of ["at", "to"]) {
+    const n = Near.safeParse(a[key]);
+    if (!n.success) continue; // plain frames, and malformed objects that parseArgs will report
+    const { near, snapTo = ["edge", "marker", "beat"], within = Math.round(p.meta.fps) } = n.data;
+    const own = typeof a.itemId === "string" ? [a.itemId] : [];
+    const points = snapPoints(p, [0, Infinity], { kinds: snapTo });
+    const moving = key === "to" && !("edge" in a) && own.length ? locate(p, own[0]).item : undefined;
+    const r = moving ? snapSpan(points, near, moving.duration, within, own) : snap(points, near, within, own);
+    if (!r.target) fail("no_snap_target", `no ${snapTo.join("/")} within ${within} frames of ${near}`);
+    a[key] = r.frame;
+  }
+  return a;
 }
 
 /** Recompute derived anchored-item timing and keep items ordered by start. */
@@ -462,7 +497,7 @@ function refresh(p: Project) {
 export function apply(project: Project, name: string, args: unknown, ctx: Ctx = {}): OpResult {
   try {
     const d = ops[name] ?? fail("unknown_op", `unknown op ${name}; one of: ${Object.keys(ops).join(", ")}`);
-    const parsed = parseArgs(d, args);
+    const parsed = parseArgs(d, resolveNear(project, args));
     const next = structuredClone(project);
     const summary = d.run(next, parsed, ctx);
     refresh(next);

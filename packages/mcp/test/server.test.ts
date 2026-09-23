@@ -34,10 +34,14 @@ it("an agent can read and edit a project over stdio MCP", async () => {
     expect(await call("get_range", { from: 0, to: 1000 })).toHaveLength(2);
     expect(await call("splicewright_undo")).toMatchObject({ revision: 5 });
     expect((await call("get_summary")).durationFrames).toBe(90);
+    const trim = (await client.listTools()).tools.find((t) => t.name === "splicewright_trim")!;
+    expect(JSON.stringify(trim.inputSchema.properties!.to)).toContain("near");
+    await call("splicewright_addMarker", { label: "m", start: 45 });
+    expect(await call("splicewright_split", { itemId: "i_2", at: { near: 50 } })).toMatchObject({ revision: 7, summary: expect.stringContaining("at 45") });
   } finally {
     await client.close();
   }
-  expect(load(dir).revision).toBe(5);
+  expect(load(dir).revision).toBe(7);
 });
 
 it("still returns an image and render runs as a polled job", { timeout: 300_000 }, async () => {

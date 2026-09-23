@@ -8,7 +8,7 @@ import { render, still } from "@splicewright/render/node";
 import { migrateVideoCut } from "./migrate.ts";
 
 // Spec §7.1. Every command prints one JSON object on stdout; errors exit 1.
-// open / ingest arrive with M4–M5.
+// ingest arrives with M5.
 
 const USAGE = `usage: splicewright <command>
   init [--title T] [--fps 30] [--size 1920x1080]
@@ -18,6 +18,7 @@ const USAGE = `usage: splicewright <command>
   undo | redo
   still --at <frame|[hh:]mm:ss[.s]> [-o out/still-<frame>.jpg]
   render [-o out/final.mp4] [--preset draft|master] [--range a-b]
+  open [--port 5190]
   mcp
   migrate video-cut <path> [--out <dir>] [--force]`;
 
@@ -40,6 +41,7 @@ const { values: flags, positionals } = parseArgs({
     output: { type: "string", short: "o" },
     preset: { type: "string", default: "master" },
     range: { type: "string" },
+    port: { type: "string", default: "5190" },
   },
 });
 const [cmd, ...args] = positionals;
@@ -101,6 +103,12 @@ switch (cmd) {
     };
     const r = await render(dir, { output: resolve(flags.output ?? "out/final.mp4"), preset: flags.preset, range, onProgress }).catch(fail);
     out({ ...r, output: relative(dir, r.output) });
+  }
+  case "open": {
+    // Long-running: prints the URL once listening, then serves until killed.
+    const { open } = await import("@splicewright/web/server");
+    console.log(JSON.stringify(await open(dir, { port: Number(flags.port) })));
+    break;
   }
   case "mcp":
     await serve(dir);

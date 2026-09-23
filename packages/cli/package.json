@@ -9,6 +9,7 @@
   "dependencies": {
     "@splicewright/core": "*",
     "@splicewright/mcp": "*",
-    "@splicewright/render": "*"
+    "@splicewright/render": "*",
+    "@splicewright/web": "*"
   }
 }

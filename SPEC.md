@@ -3,7 +3,7 @@
 > A file-first, agent-native video editor. One project file, one pure core,
 > three surfaces: a timeline UI for humans, a CLI for scripts, an MCP server for agents.
 
-Status: draft for review. Nothing here is implemented yet.
+Status: draft for review. M1–M4 implemented (see §12); M5–M6 not started.
 Origin: extracted from the `video-cut` Kaohsiung vlog project (`apps/editor` + `my-video` + `scripts/`).
 
 ---
@@ -360,14 +360,14 @@ explained, not hidden.
 
 ## 12. Milestones
 
-| # | Deliverable | Exit check |
-|---|---|---|
-| M1 | `core`: schema, ops, validate, history, persistence + tests | invariant property test green |
-| M2 | `cli` + `mcp` over core; `migrate video-cut` | agent can split/trim the migrated project via MCP; `validate` passes |
-| M3 | `render`: generic composition, config loader, captions, ducking | §11 acceptance comparison |
-| M4 | `apps/web` ported to core ops, file watching, edit proxies, thumbs/waveforms; adaptive ruler + snapping (§15.1–15.2) | manual pass over §7.3 checklist; `rulerTicks`/`snap` unit tests |
-| M5 | `ingest` generic port | fresh project from raw files → first render with no manual steps |
-| M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow |
+| # | Deliverable | Exit check | Status |
+|---|---|---|---|
+| M1 | `core`: schema, ops, validate, history, persistence + tests | invariant property test green | ✅ done |
+| M2 | `cli` + `mcp` over core; `migrate video-cut` | agent can split/trim the migrated project via MCP; `validate` passes | ✅ done |
+| M3 | `render`: generic composition, config loader, captions, ducking | §11 acceptance comparison | ✅ done (frames; audio not compared) |
+| M4 | `apps/web` ported to core ops, file watching, edit proxies, thumbs/waveforms; adaptive ruler + snapping (§15.1–15.2) | manual pass over §7.3 checklist; `rulerTicks`/`snap` unit tests | ✅ done (UI plays edit proxies if present; generating them is M5) |
+| M5 | `ingest` generic port | fresh project from raw files → first render with no manual steps | not started |
+| M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow | not started |
 
 ---
 

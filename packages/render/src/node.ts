@@ -9,6 +9,8 @@ import { load, loadCtx } from "@splicewright/core/node";
 import type { Preset } from "./config.ts";
 import { duckRanges } from "./duck.ts";
 
+export { duckRanges };
+
 const here = dirname(fileURLToPath(import.meta.url));
 /** Folder holding the node_modules Remotion is installed in. Remotion keys its Chrome download and
  * webpack cache on cwd; pinning both here keeps ~100 MB of cache out of every project folder. */

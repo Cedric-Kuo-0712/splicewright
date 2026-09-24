@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
-import { anchorOf, beatFrames, durationFrames, formatFrame, itemSpan, snapPoints, type AudioItem, type Item, type Project, type Track } from "@splicewright/core";
+import { anchorOf, beatFrames, durationFrames, formatFrame, itemSpan, snapPoints, type AudioItem, type Item, type Project } from "@splicewright/core";
 import { SplicewrightProject, type Props } from "@splicewright/render";
-import { app, dnd, history, op, player, playhead, seek } from "./store.ts";
+import { addMarker, copy, duplicate, findItem, loopRange, markerNear, nudge, openMenu, paste, rippleDelete, setIO, slipBy, split, tapBeat, upload } from "./edit.ts";
+import { app, dnd, history, ioRange, op, player, playhead, say, seek } from "./store.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 
 // Spec §7.3 panels: media bin, player, inspector, timeline.
@@ -13,10 +14,16 @@ const Composition: React.FC<Props> = (props) => <SplicewrightProject {...props} 
 export function App() {
   const p = app.use((s) => s.project);
   const message = app.use((s) => s.message);
+  const io = app.use((s) => s.io);
   useEffect(() => {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+  // The I/O range lives in the URL, so a reload keeps it and it can be pasted to an agent.
+  useEffect(() => {
+    const h = new URLSearchParams(Object.entries(io).flatMap(([k, v]) => (v === null ? [] : [[k, String(v)]]))).toString();
+    window.history.replaceState(null, "", h ? `#${h}` : location.pathname);
+  }, [io]);
   if (!p) return <div className="loading">loading project…</div>;
   return (
     <div className="app">
@@ -26,6 +33,43 @@ export function App() {
       <Inspector p={p} />
       <Timeline />
       <div className={`status ${message?.error ? "error" : ""}`}>{message?.text ?? ""}</div>
+      <ContextMenu />
+    </div>
+  );
+}
+
+function ContextMenu() {
+  const menu = app.use((s) => s.menu);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => app.set({ menu: null });
+    const key = (e: KeyboardEvent) => e.key === "Escape" && close();
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", key);
+    window.addEventListener("blur", close);
+    window.addEventListener("wheel", close);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", key);
+      window.removeEventListener("blur", close);
+      window.removeEventListener("wheel", close);
+    };
+  }, [menu]);
+  if (!menu) return null;
+  // Keep it on screen: open upwards / leftwards near the bottom and right edges.
+  const style = { left: Math.min(menu.x, innerWidth - 240), top: menu.y, ...(menu.y > innerHeight - 320 && { top: undefined, bottom: innerHeight - menu.y }) };
+  return (
+    <div className="menu" style={style} onPointerDown={(e) => e.stopPropagation()} onContextMenu={(e) => e.preventDefault()}>
+      {menu.entries.map((e, k) =>
+        e === "-" ? (
+          <hr key={k} />
+        ) : (
+          <button key={k} disabled={e.disabled} onClick={() => (app.set({ menu: null }), e.run())}>
+            <span>{e.label}</span>
+            {e.hint && <kbd>{e.hint}</kbd>}
+          </button>
+        ),
+      )}
     </div>
   );
 }
@@ -36,6 +80,8 @@ function Toolbar({ p }: { p: Project }) {
   const proxies = app.use((s) => s.proxies);
   const selection = app.use((s) => s.selection);
   const gap = app.use((s) => s.gap);
+  app.use((s) => s.io);
+  const range = ioRange();
   return (
     <div className="toolbar">
       <strong>{p.meta.title}</strong>
@@ -44,8 +90,24 @@ function Toolbar({ p }: { p: Project }) {
       </span>
       <Timecode fps={p.meta.fps} />
       <span className="spacer" />
-      <button onClick={() => split(p, app.get().selection, playhead.get().frame)} title="Split selection at the playhead; all items under it if nothing is selected (S / Cmd+B)">Split</button>
-      <button disabled={!selection.length && !gap} onClick={() => rippleDelete(true)} title="Delete the selection and close its gap, or close a clicked gap (Shift+Delete)">Ripple delete</button>
+      {range && (
+        <span className="io-label" title="I/O range: I and O set it, Alt+X clears it, / plays it in a loop">
+          I/O {formatFrame(range[0], p.meta.fps)}–{formatFrame(range[1], p.meta.fps)}
+          <button onClick={() => app.set({ io: { in: null, out: null } })} title="Clear (Alt+X)">×</button>
+        </span>
+      )}
+      {range ? (
+        <button onClick={() => split(range)} title="Cut at I and O: the selection, or everything crossing them (S still splits at the playhead)">Split I/O</button>
+      ) : (
+        <button onClick={() => split([playhead.get().frame])} title="Split selection at the playhead; all items under it if nothing is selected (S / Cmd+B)">Split</button>
+      )}
+      <button
+        disabled={!selection.length && !gap && !range}
+        onClick={() => rippleDelete(true)}
+        title="Delete the selection and close its gap; or close a clicked gap; or, with nothing selected, extract the I/O range (Shift+Delete). Delete alone lifts the range."
+      >
+        {selection.length || gap || !range ? "Ripple delete" : "Extract I/O"}
+      </button>
       <button onClick={() => history("undo")} title="Cmd+Z">Undo</button>
       <button onClick={() => history("redo")} title="Cmd+Shift+Z">Redo</button>
       <button className={snapping ? "on" : ""} onClick={() => app.set({ snapping: !snapping })} title="Snapping (N); hold Alt to bypass">
@@ -75,16 +137,26 @@ function Preview({ p }: { p: Project }) {
   const proxies = app.use((s) => s.proxies);
   const useProxies = app.use((s) => s.useProxies);
   const rate = app.use((s) => s.rate);
+  const slip = app.use((s) => s.slip);
+  const looping = app.use((s) => s.looping);
   const shown = useMemo(() => {
-    if (!useProxies || !proxies.length) return p;
-    const assets = { ...p.assets };
-    for (const id of proxies) assets[id] = { ...assets[id], path: `.splicewright/proxies/edit/${id}.mp4` };
-    return { ...p, assets };
-  }, [p, proxies, useProxies]);
+    let out = p;
+    if (useProxies && proxies.length) {
+      const assets = { ...p.assets };
+      for (const id of proxies) assets[id] = { ...assets[id], path: `.splicewright/proxies/edit/${id}.mp4` };
+      out = { ...p, assets };
+    }
+    // A slip drag previews its new source range before the op commits.
+    if (slip) out = { ...out, tracks: out.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === slip.itemId ? { ...i, sourceIn: slip.sourceIn } : i)) })) as Project["tracks"] };
+    return out;
+  }, [p, proxies, useProxies, slip]);
+  const total = Math.max(1, durationFrames(p));
+  const range = looping ? (ioRange() ?? [0, total]) : null;
   const ref = useCallback((r: PlayerRef | null) => {
     player.ref = r;
     r?.addEventListener("frameupdate", (e) => playhead.set({ frame: e.detail.frame }));
     r?.addEventListener("seeked", (e) => playhead.set({ frame: e.detail.frame }));
+    r?.addEventListener("pause", () => app.get().looping && app.set({ looping: false }));
   }, []);
   return (
     <div className="preview">
@@ -92,7 +164,10 @@ function Preview({ p }: { p: Project }) {
         ref={ref}
         component={Composition}
         inputProps={{ project: shown, duck }}
-        durationInFrames={Math.max(1, durationFrames(p))}
+        durationInFrames={total}
+        inFrame={range?.[0]}
+        outFrame={range ? Math.min(total - 1, range[1] - 1) : undefined}
+        loop={looping}
         compositionWidth={p.meta.width}
         compositionHeight={p.meta.height}
         fps={p.meta.fps}
@@ -108,16 +183,56 @@ function Preview({ p }: { p: Project }) {
 }
 
 function MediaBin({ p }: { p: Project }) {
+  const uploads = app.use((s) => s.uploads);
+  const ingesting = app.use((s) => s.ingesting);
+  const reveal = app.use((s) => s.reveal);
+  const [over, setOver] = React.useState(false);
+  const input = React.useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!reveal) return;
+    document.querySelector(`[data-asset="${reveal}"]`)?.scrollIntoView({ block: "nearest" });
+    const t = setTimeout(() => app.set({ reveal: null }), 1500);
+    return () => clearTimeout(t);
+  }, [reveal]);
+  const files = (e: React.DragEvent) => e.dataTransfer.types.includes("Files");
   return (
-    <div className="bin">
-      <h3>Media</h3>
+    <div
+      className={`bin ${over ? "drop" : ""}`}
+      onDragOver={(e) => files(e) && (e.preventDefault(), setOver(true))}
+      onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node) && setOver(false)}
+      onDrop={(e) => files(e) && (e.preventDefault(), setOver(false), upload([...e.dataTransfer.files]))}
+    >
+      <h3>
+        Media{" "}
+        <button onClick={() => input.current!.click()} title="Import files into raw/ (or drop them here or on the timeline)">
+          Import…
+        </button>
+        <input ref={input} type="file" multiple hidden accept="video/*,audio/*,image/*" onChange={(e) => (upload([...e.currentTarget.files!]), (e.currentTarget.value = ""))} />
+      </h3>
       {Object.values(p.assets).map((a) => (
-        <div key={a.id} className="asset" draggable onDragStart={(e) => (e.dataTransfer.setData("application/x-splicewright-asset", a.id), (dnd.assetId = a.id))} onDragEnd={() => (dnd.assetId = null)} title={`${a.id} — drag onto the timeline`}>
+        <div
+          key={a.id}
+          data-asset={a.id}
+          className={`asset ${reveal === a.id ? "reveal" : ""}`}
+          draggable
+          onDragStart={(e) => (e.dataTransfer.setData("application/x-splicewright-asset", a.id), (dnd.assetId = a.id))}
+          onDragEnd={() => (dnd.assetId = null)}
+          onContextMenu={(e) => openMenu(e, [{ label: "Insert at playhead", run: () => op("insertItem", { assetId: a.id, at: playhead.get().frame }) }])}
+          title={`${a.id} — drag onto the timeline`}
+        >
           {a.kind === "audio" ? <div className="thumb audio">♪</div> : <img className="thumb" src={`/api/thumb?asset=${a.id}&t=0`} alt="" draggable={false} />}
           <span>{a.path.split("/").pop()}</span>
+          {ingesting[a.id] && <em className="badge">{ingesting[a.id]}…</em>}
         </div>
       ))}
-      {!Object.keys(p.assets).length && <p className="dim">No assets. Run `splicewright import &lt;files&gt;`.</p>}
+      {uploads.map((name) => (
+        <div key={name} className="asset pending">
+          <div className="thumb">⇪</div>
+          <span>{name}</span>
+          <em className="badge">uploading…</em>
+        </div>
+      ))}
+      {!Object.keys(p.assets).length && !uploads.length && <p className="dim">No assets yet. Drop files here or use Import….</p>}
     </div>
   );
 }
@@ -196,6 +311,8 @@ function BeatFields({ p, item }: { p: Project; item: AudioItem }) {
   const targets = p.tracks.filter((t) => t.kind === "video" && t.magnetic);
   const [trackId, setTrackId] = React.useState(targets[0]?.id ?? "");
   const n = beatFrames(p, item).length;
+  app.use((s) => s.io);
+  const range = ioRange();
   return (
     <div className="beats">
       <p className="dim">
@@ -222,8 +339,8 @@ function BeatFields({ p, item }: { p: Project; item: AudioItem }) {
         <input type="number" min={1} value={every} onChange={(e) => setEvery(Math.max(1, Number(e.target.value) || 1))} />
       </label>
       <div className="buttons">
-        <button disabled={!n || !trackId} onClick={() => op("fitToBeats", { trackId, audioItemId: item.id, every })} title="Beat sync (卡點): one undo step">
-          Fit to beats
+        <button disabled={!n || !trackId} onClick={() => op("fitToBeats", { trackId, audioItemId: item.id, every, ...(range && { range }) })} title="Beat sync (卡點): one undo step; limited to items starting in the I/O range when one is set">
+          Fit to beats{range ? " (I/O)" : ""}
         </button>
       </div>
     </div>
@@ -275,11 +392,6 @@ function PropsField({ value, onCommit }: { value: unknown; onCommit: (v: unknown
   );
 }
 
-function findItem(p: Project, id: string): { track: Track; item: Item } | null {
-  for (const track of p.tracks) for (const item of track.items) if (item.id === id) return { track, item };
-  return null;
-}
-
 // ---- keyboard (§7.3, §15.2) ----
 
 const SHUTTLE = [1, 2, 4, 8];
@@ -299,7 +411,7 @@ function onKey(e: KeyboardEvent) {
   if (key === "arrowleft" || key === "arrowright") return handled(), player.ref?.pause(), seek(frame + (key === "arrowleft" ? -1 : 1) * (e.shiftKey ? 10 : 1));
   if (key === "arrowup" || key === "arrowdown") {
     handled();
-    const edges = [...new Set(snapPoints(p, [0, Infinity], { kinds: ["edge"] }).map((pt) => pt.frame))].sort((a, b) => a - b);
+    const edges = [...new Set(snapPoints(p, [0, Infinity], { kinds: ["edge", "marker"] }).map((pt) => pt.frame))].sort((a, b) => a - b);
     const to = key === "arrowup" ? edges.filter((f) => f < frame).at(-1) : edges.find((f) => f > frame);
     return to !== undefined && seek(to);
   }
@@ -315,57 +427,32 @@ function onKey(e: KeyboardEvent) {
     return player.ref?.play();
   }
   if (mod && key === "z") return handled(), history(e.shiftKey ? "redo" : "undo");
-  if ((!mod && key === "s") || (mod && key === "b")) return handled(), split(p, s.selection, frame);
+  if (mod && key === "c") return s.selection.length ? (handled(), copy()) : undefined;
+  if (mod && key === "v") return handled(), paste(frame, e.shiftKey);
+  if (mod && key === "d") return handled(), s.selection.length ? duplicate() : say("select items to duplicate", true);
+  if ((!mod && key === "s") || (mod && key === "b")) return handled(), split([frame]);
   if (key === "delete" || key === "backspace") {
-    if (!s.selection.length && !s.gap) return;
+    if (!s.selection.length && !s.gap && !ioRange()) return;
     handled();
     return rippleDelete(e.shiftKey);
   }
-  if (!mod && key === "b") return handled(), tapBeat(p, s.selection, frame);
+  if (key === "escape") return app.set({ selection: [], gap: null });
+  // Alt letters: match the physical key, since macOS turns Alt+X into "≈".
+  if (e.altKey && e.code === "KeyX") return handled(), app.set({ io: { in: null, out: null } });
+  if (e.altKey && e.code === "KeyM") {
+    handled();
+    const m = markerNear(frame, Math.max(1, Math.round(8 / s.pxPerFrame)));
+    return m ? op("removeMarker", { markerId: m.id }) : say("no marker at the playhead", true);
+  }
+  if (e.altKey && (e.code === "Comma" || e.code === "Period")) return handled(), slipBy((e.code === "Comma" ? -1 : 1) * (e.shiftKey ? 10 : 1));
+  if (!mod && key === "i") return setIO("in", frame);
+  if (!mod && key === "o") return setIO("out", frame);
+  if (!mod && key === "/") return handled(), s.looping ? player.ref?.pause() : loopRange();
+  if (!mod && key === "m") return addMarker(frame);
+  if (!mod && key === "b") return handled(), tapBeat(frame);
   if (!mod && key === "n") return app.set({ snapping: !s.snapping, message: { text: `snapping ${s.snapping ? "off" : "on"}` } });
-  if (!mod && (e.key === "," || e.key === "." || e.key === "<" || e.key === ">")) return handled(), nudge(p, s.selection, (e.key === "," || e.key === "<" ? -1 : 1) * (e.shiftKey ? 10 : 1));
+  if (!mod && (e.key === "," || e.key === "." || e.key === "<" || e.key === ">")) return handled(), nudge((e.key === "," || e.key === "<" ? -1 : 1) * (e.shiftKey ? 10 : 1));
   if (!mod && (e.key === "+" || e.key === "=")) return zoom(1.5);
   if (!mod && (e.key === "-" || e.key === "_")) return zoom(1 / 1.5);
   if (!mod && e.shiftKey && key === "z") return app.set({ pxPerFrame: fitZoom(p) });
-}
-
-/** Deletes the selection (ripple: close its gap), or closes the clicked gap. */
-function rippleDelete(ripple: boolean) {
-  const { selection, gap } = app.get();
-  if (selection.length) return op("delete", { itemIds: selection, ...(ripple && { ripple: true }) }).then((ok) => ok && app.set({ selection: [] }));
-  if (gap) return op("closeGap", gap).then((ok) => ok && app.set({ gap: null }));
-}
-
-/** Split the selection at the playhead, or every unlocked item under it when nothing is selected
- *  (anchored items are left out then; they follow the half they start in). */
-function split(p: Project, selection: string[], frame: number) {
-  const ids = p.tracks.flatMap((t) =>
-    t.locked
-      ? []
-      : t.items.filter((i) => {
-          const span = itemSpan(p, i);
-          return span && frame > span.start && frame < span.start + span.duration && (selection.length ? selection.includes(i.id) : !anchorOf(i));
-        }),
-  );
-  if (!ids.length) return app.set({ message: { text: "nothing to split under the playhead", error: true } });
-  const ops = ids.map((i) => ({ op: "split", args: { itemId: i.id, at: frame } }));
-  return ops.length === 1 ? op("split", ops[0].args) : op("batch", { ops });
-}
-
-/** Tap-along (§15.4): a beat at the playhead on the selected audio item, else the audio item under the playhead. */
-function tapBeat(p: Project, selection: string[], frame: number) {
-  const items = p.tracks.flatMap((t) => (t.kind === "audio" ? t.items : [])).filter((i) => frame >= i.start && frame < i.start + i.duration);
-  const target = items.find((i) => selection.includes(i.id)) ?? items[0];
-  if (!target) return app.set({ message: { text: "no audio item under the playhead", error: true } });
-  return op("addBeat", { itemId: target.id, at: frame });
-}
-
-/** Keyboard nudge: ignores snapping (§15.2). */
-function nudge(p: Project, selection: string[], delta: number) {
-  const ops = selection.flatMap((id) => {
-    const found = findItem(p, id);
-    const span = found && itemSpan(p, found.item);
-    return span && !found.track.locked ? [{ op: "move", args: { itemId: id, to: Math.max(0, span.start + delta) } }] : [];
-  });
-  if (ops.length) return ops.length === 1 ? op("move", ops[0].args) : op("batch", { ops });
 }

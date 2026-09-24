@@ -1,11 +1,12 @@
-import { createReadStream, existsSync, readFileSync, statSync, watch } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, watch } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { createServer, type Plugin } from "vite";
-import { load, loadCtx, readAssets, redo, run, undo } from "@splicewright/core/node";
-import { limiter, thumb, waveform } from "@splicewright/ingest";
+import { fingerprint, load, loadCtx, readAssets, redo, run, undo } from "@splicewright/core/node";
+import { ingest, limiter, thumb, waveform } from "@splicewright/ingest";
 import { duckRanges } from "@splicewright/render/node";
 
 // Spec §7.3. `splicewright open` runs this: a Vite dev server for the UI (open question 5, the simple
@@ -48,15 +49,36 @@ const TYPES: Record<string, string> = { mp4: "video/mp4", mov: "video/quicktime"
 // ponytail: at most 4 lazy ffmpeg jobs at once, FIFO; thumbs of 4K footage cost ~0.2 s each.
 const limited = limiter(4);
 
+/** A safe file name in raw/ for an upload; same content as an existing file reuses it. */
+function rawPath(dir: string, name: string, tmp: string): string {
+  const clean = basename(name).replace(/[^\w.\- ]/g, "_").replace(/^\.+/, "") || "upload";
+  const ext = extname(clean);
+  const stem = clean.slice(0, clean.length - ext.length);
+  for (let n = 1; ; n++) {
+    const rel = join("raw", n === 1 ? clean : `${stem}-${n}${ext}`);
+    const file = join(dir, rel);
+    if (!existsSync(file)) return renameSync(tmp, file), rel;
+    if (fingerprint(file) === fingerprint(tmp)) return unlinkSync(tmp), rel;
+  }
+}
+
 function api(dir: string): Plugin {
   const clients = new Set<ServerResponse>();
+  const broadcast = (m: unknown) => clients.forEach((c) => c.write(`data: ${JSON.stringify(m)}\n\n`));
+  // One ingest at a time: concurrent runs would each rewrite assets.json from their own snapshot.
+  let queue = Promise.resolve();
+  const background = (id: string) =>
+    (queue = queue.then(async () => {
+      await ingest(dir, { assets: [id], log: (line) => broadcast({ ingest: { id, step: line.split(" ")[0] } }) }).catch(() => {});
+      broadcast({ ingest: { id, step: null } });
+    }));
   let timer: NodeJS.Timeout | undefined;
   // project.json is replaced by rename, so watch the folder, not the file.
   watch(dir, (_, name) => {
     if (name !== "project.json") return;
     clearTimeout(timer);
     timer = setTimeout(() => {
-      for (const c of clients) c.write(`data: ${JSON.stringify({ revision: load(dir).revision })}\n\n`);
+      broadcast({ revision: load(dir).revision });
     }, 30);
   });
 
@@ -90,6 +112,27 @@ function api(dir: string): Plugin {
           if (route === "POST /api/op") {
             const b = await body(req);
             return result(res, run(dir, b.op, b.args, b.baseRevision));
+          }
+          if (route === "POST /api/import") {
+            // It writes files: refuse cross-site requests (a page elsewhere can POST to localhost).
+            if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) return send(res, 403, { error: "cross-origin import refused" });
+            mkdirSync(join(dir, "raw"), { recursive: true });
+            const tmp = join(dir, "raw", `.upload-${process.pid}-${Date.now()}`);
+            await pipeline(req, createWriteStream(tmp));
+            if (!statSync(tmp).size) return unlinkSync(tmp), send(res, 400, { error: "empty upload" });
+            const path = rawPath(dir, url.searchParams.get("name") ?? "upload", tmp);
+            const r = run(dir, "importAsset", { path });
+            if ("error" in r) {
+              if (!Object.values(load(dir).assets).some((a) => a.path === path)) unlinkSync(join(dir, path));
+              return send(res, 400, r);
+            }
+            // "already imported as <id>" when another file in the project has the same content.
+            const asset = Object.values(r.project.assets).find((a) => a.path === path) ?? r.project.assets[/as (\S+)/.exec(r.changes.summary)![1]];
+            if (asset.path !== path) unlinkSync(join(dir, path));
+            await queue;
+            await ingest(dir, { assets: [asset.id], only: [] }); // probe now, so the answer carries the duration
+            background(asset.id);
+            return send(res, 200, { assetId: asset.id, summary: r.changes.summary, ...snapshot() });
           }
           if (route === "POST /api/undo") return result(res, undo(dir));
           if (route === "POST /api/redo") return result(res, redo(dir));

@@ -1,0 +1,413 @@
+import { anchorOf, durationFrames, itemSpan, nextId, type Item, type Project, type Track, type TrackKind } from "@splicewright/core";
+import { app, ioRange, op, player, playhead, refresh, say, seek, type MenuEntry } from "./store.ts";
+
+// Editing commands shared by the keyboard, the toolbar, and the context menus. Multi-op edits go out
+// as one batch, so each is one undo step.
+
+type Op = { op: string; args: Record<string, unknown> };
+
+export function findItem(p: Project, id: string): { track: Track; item: Item } | null {
+  for (const track of p.tracks) for (const item of track.items) if (item.id === id) return { track, item };
+  return null;
+}
+
+const send = (ops: Op[]) => (ops.length === 1 ? op(ops[0].op, ops[0].args) : op("batch", { ops }));
+
+/** Ids the ops in one batch will create, in order: core numbers each prefix `<prefix>_<max+1>`. */
+function idMaker(p: Project) {
+  const next: Record<string, number> = {};
+  return (prefix: string) => {
+    next[prefix] ??= parseInt(nextId(p, prefix).split("_")[1], 36);
+    return `${prefix}_${(next[prefix]++).toString(36)}`;
+  };
+}
+
+const prefixOf = (t: Track) => (t.kind === "caption" ? "c" : "i");
+const end = (s: { start: number; duration: number }) => s.start + s.duration;
+
+// ---- cut, lift, extract ----
+
+type Piece = { id: string; track: Track; start: number; end: number };
+
+/** Split ops cutting the chosen items at each frame, plus the pieces they leave (ids predicted). */
+function cuts(p: Project, frames: number[], pick: (t: Track, i: Item) => boolean) {
+  const id = idMaker(p);
+  const ops: Op[] = [];
+  const pieces: Piece[] = [];
+  for (const t of p.tracks) {
+    if (t.locked) continue;
+    for (const i of t.items) {
+      if (anchorOf(i) || !pick(t, i)) continue;
+      let cur: Piece = { id: i.id, track: t, start: i.start, end: end(i) };
+      for (const f of [...frames].sort((a, b) => a - b)) {
+        if (f <= cur.start || f >= cur.end) continue;
+        ops.push({ op: "split", args: { itemId: cur.id, at: f } });
+        pieces.push({ ...cur, end: f });
+        cur = { id: id(prefixOf(t)), track: t, start: f, end: cur.end };
+      }
+      pieces.push(cur);
+    }
+  }
+  return { ops, pieces };
+}
+
+/** Split the selection, or every unlocked unanchored item, at the given frames (the playhead, or I and O). */
+export function split(frames: number[]) {
+  const { project: p, selection } = app.get();
+  const { ops } = cuts(p!, frames, (_, i) => !selection.length || selection.includes(i.id));
+  if (!ops.length) return say(`nothing to split at ${frames.join(" and ")}`, true);
+  return send(ops);
+}
+
+/** Lift removes what is inside [a, b) on unlocked tracks; extract also pulls everything after it left. */
+export function cutRange([a, b]: [number, number], extract: boolean) {
+  const p = app.get().project!;
+  const { ops, pieces } = cuts(p, [a, b], () => true);
+  const inside = pieces.filter((x) => x.start >= a && x.end <= b);
+  if (inside.length) ops.push({ op: "delete", args: { itemIds: inside.map((x) => x.id), ripple: false } });
+  if (extract) for (const x of pieces) if (x.start >= b) ops.push({ op: "move", args: { itemId: x.id, to: x.start - (b - a), ripple: false } });
+  if (!ops.length) return say(`nothing in [${a}, ${b})`, true);
+  return send(ops).then((ok) => ok && app.set({ selection: [], gap: null }));
+}
+
+/** Delete key and the Ripple delete button: the selection, else a clicked gap, else the I/O range. */
+export function rippleDelete(ripple: boolean) {
+  const { selection, gap } = app.get();
+  if (selection.length) return op("delete", { itemIds: selection, ...(ripple && { ripple: true }) }).then((ok) => ok && app.set({ selection: [] }));
+  if (gap) return op("closeGap", gap).then((ok) => ok && app.set({ gap: null }));
+  const r = ioRange();
+  if (r) return cutRange(r, ripple);
+}
+
+// ---- copy, paste, duplicate ----
+
+interface Clip {
+  item: Item;
+  track: Track;
+  start: number;
+  duration: number;
+}
+
+let clipboard: Clip[] = [];
+
+function clips(p: Project, ids: string[]): Clip[] {
+  return ids
+    .flatMap((id) => {
+      const f = findItem(p, id);
+      const span = f && itemSpan(p, f.item);
+      return span ? [{ item: structuredClone(f.item), track: f.track, ...span }] : [];
+    })
+    .sort((a, b) => a.start - b.start);
+}
+
+export function copy() {
+  const { project, selection } = app.get();
+  clipboard = clips(project!, selection);
+  say(`copied ${clipboard.length} item${clipboard.length === 1 ? "" : "s"}`);
+}
+
+export const paste = (at = playhead.get().frame, insert = false) => place(clipboard, at, insert);
+
+/** A copy right after the last selected item; the clipboard is left alone. */
+export function duplicate() {
+  const { project, selection } = app.get();
+  const c = clips(project!, selection);
+  if (c.length) return place(c, Math.max(...c.map(end)));
+}
+
+/** Nearest item edge when `f` falls inside an item on `t`, so inserts never land mid-clip. */
+function edgeNear(t: Track, f: number) {
+  const i = t.items.find((i) => !anchorOf(i) && i.start < f && f < end(i));
+  return !i ? f : f - i.start < end(i) - f ? i.start : end(i);
+}
+
+// Fields insertItem doesn't take; setProps copies them.
+// ponytail: beats, downbeats and duck aren't copied; add a pasteItems op if pasted songs need them.
+const EXTRA = ["volume", "fit", "transform", "fadeIn", "fadeOut", "label", "note"];
+
+/**
+ * Paste clips with their relative timing at `at`. Each lands on its own track if it still exists and is
+ * unlocked, else the first unlocked track of its kind. Magnetic tracks (all tracks with `insert`) take
+ * the clips back to back and push later items; other tracks keep the gaps and reject overlaps.
+ * Items anchored to a pasted video item are re-anchored to the copy.
+ */
+function place(list: Clip[], at: number, insert = false) {
+  const p = app.get().project!;
+  if (!list.length) return say("clipboard is empty", true);
+  const id = idMaker(p);
+  const ops: Op[] = [];
+  const made = new Map<string, { id: string; start: number }>();
+  const cursor = new Map<string, number>();
+  const copied = new Set(list.map((c) => c.item.id));
+  const anchorIn = (c: Clip) => (anchorOf(c.item)?.itemId && copied.has(anchorOf(c.item)!.itemId) ? anchorOf(c.item)!.itemId : undefined);
+  const origin = list[0].start;
+  let skipped = 0;
+  // Anchor targets first, so their copies' positions are known.
+  for (const c of [...list.filter((c) => !anchorIn(c)), ...list.filter(anchorIn)]) {
+    const own = p.tracks.find((t) => t.id === c.track.id);
+    const t = own && !own.locked ? own : p.tracks.find((t) => t.kind === c.track.kind && !t.locked);
+    if (!t) {
+      skipped++;
+      continue;
+    }
+    const parent = made.has(anchorIn(c) ?? "") ? anchorIn(c) : undefined; // its anchor may have been skipped
+    const ripple = !parent && t.kind !== "caption" && (insert || !!t.magnetic);
+    let start: number;
+    if (parent) {
+      const src = list.find((x) => x.item.id === parent)!;
+      start = made.get(parent)!.start + c.start - src.start;
+    } else if (ripple) {
+      start = cursor.get(t.id) ?? edgeNear(t, at + c.start - origin);
+      cursor.set(t.id, start + c.duration);
+    } else start = at + c.start - origin;
+    const it = c.item;
+    const base = { trackId: t.id, at: start, duration: c.duration, ripple };
+    ops.push({
+      op: "insertItem",
+      args: "assetId" in it ? { ...base, assetId: it.assetId, sourceIn: it.sourceIn } : "component" in it ? { ...base, component: it.component, props: it.props } : { ...base, text: it.text },
+    });
+    const nid = id(prefixOf(t));
+    made.set(it.id, { id: nid, start });
+    const extra = Object.fromEntries(EXTRA.filter((k) => k in it).map((k) => [k, (it as Record<string, unknown>)[k]]));
+    if (Object.keys(extra).length) ops.push({ op: "setProps", args: { itemId: nid, patch: extra } });
+    if (parent) ops.push({ op: "attach", args: { itemId: nid, to: made.get(parent)!.id } });
+  }
+  if (!ops.length) return say("no unlocked track to paste into", true);
+  return send(ops).then((ok) => {
+    if (ok) return app.set({ selection: [...made.values()].map((m) => m.id), gap: null, ...(skipped && { message: { text: `pasted ${made.size}; ${skipped} skipped (no unlocked track of their kind)` } }) });
+    const m = app.get().message;
+    if (!insert && m?.text.includes("overlaps")) say(`${m.text} — Cmd+Shift+V inserts and pushes later items`, true);
+  });
+}
+
+// ---- small edits ----
+
+/** Tap-along (§15.4): a beat at the playhead on the selected audio item, else the audio item under the playhead. */
+export function tapBeat(frame: number) {
+  const { project: p, selection } = app.get();
+  const items = p!.tracks.flatMap((t) => (t.kind === "audio" ? t.items : [])).filter((i) => frame >= i.start && frame < end(i));
+  const target = items.find((i) => selection.includes(i.id)) ?? items[0];
+  if (!target) return say("no audio item under the playhead", true);
+  return op("addBeat", { itemId: target.id, at: frame });
+}
+
+/** Keyboard nudge: ignores snapping (§15.2). */
+export function nudge(delta: number) {
+  const { project: p, selection } = app.get();
+  const ops = selection.flatMap((id) => {
+    const found = findItem(p!, id);
+    const span = found && itemSpan(p!, found.item);
+    return span && !found.track.locked ? [{ op: "move", args: { itemId: id, to: Math.max(0, span.start + delta) } }] : [];
+  });
+  if (ops.length) return send(ops);
+}
+
+/** Keyboard slip by whole frames. Positive shows earlier source, like dragging the film strip right. */
+export function slipBy(frames: number) {
+  const { project: p, selection } = app.get();
+  const ops = selection.flatMap((id) => {
+    const f = findItem(p!, id);
+    return f && "sourceIn" in f.item && p!.assets[f.item.assetId]?.kind !== "image" ? [{ op: "slip", args: { itemId: id, deltaSec: -frames / p!.meta.fps } }] : [];
+  });
+  if (!ops.length) return say("select a video or audio item to slip", true);
+  return send(ops);
+}
+
+export function addMarker(at: number) {
+  const p = app.get().project!;
+  return op("addMarker", { label: `M${(p.markers?.length ?? 0) + 1}`, start: at });
+}
+
+/** The marker nearest `at` within `within` frames. */
+export function markerNear(at: number, within: number) {
+  const m = [...(app.get().project!.markers ?? [])].sort((a, b) => Math.abs(a.start - at) - Math.abs(b.start - at))[0];
+  return m && Math.abs(m.start - at) <= within ? m : undefined;
+}
+
+export function setIO(which: "in" | "out", at: number) {
+  app.set(({ io }) => {
+    const next = { ...io, [which]: at };
+    // A new point that crosses the other one drops the other one.
+    if (next.in !== null && next.out !== null && next.out <= next.in) next[which === "in" ? "out" : "in"] = null;
+    return { io: next, selection: [], gap: null };
+  });
+}
+
+/** `/`: play the I/O range in a loop (or the whole project); pausing ends it. */
+export function loopRange() {
+  const r = ioRange() ?? [0, durationFrames(app.get().project!)];
+  app.set({ looping: true, rate: 1 });
+  seek(r[0]);
+  player.ref?.play();
+}
+
+/** The video item on the topmost visible video track under `frame`: the target of attach. */
+export function videoUnder(p: Project, frame: number) {
+  for (const t of [...p.tracks].reverse()) {
+    if (t.kind !== "video" || t.hidden) continue;
+    const i = t.items.find((i) => i.start <= frame && frame < end(i));
+    if (i) return i;
+  }
+}
+
+// ---- context menus ----
+
+export function openMenu(e: { clientX: number; clientY: number; preventDefault(): void; stopPropagation(): void }, entries: MenuEntry[]) {
+  e.preventDefault();
+  e.stopPropagation();
+  app.set({ menu: { x: e.clientX, y: e.clientY, entries } });
+}
+
+const MOD = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
+
+export function itemMenu(p: Project, t: Track, item: Item, frame: number): MenuEntry[] {
+  const span = itemSpan(p, item);
+  const inside = !!span && frame > span.start && frame < end(span);
+  const anchor = anchorOf(item);
+  const out: MenuEntry[] = [
+    { label: "Split here", hint: "S", run: () => split([frame]), disabled: !inside || !!anchor || t.locked },
+    { label: "Copy", hint: `${MOD}C`, run: copy },
+    { label: "Duplicate", hint: `${MOD}D`, run: duplicate },
+    { label: "Delete", hint: "⌫", run: () => rippleDelete(false), disabled: t.locked },
+    { label: "Ripple delete", hint: "⇧⌫", run: () => rippleDelete(true), disabled: t.locked },
+  ];
+  if (t.kind === "video" && "assetId" in item) {
+    out.push("-", { label: "Captions from transcript", run: () => op("addCaptionsFromTranscript", { itemId: item.id }) });
+    out.push({ label: "Show in media bin", run: () => app.set({ reveal: item.assetId }) });
+    if (p.assets[item.assetId]?.kind !== "image") out.push({ label: "Slip…", hint: "⌥drag, ⌥, ⌥.", run: () => say("hold Alt and drag the item, or press Alt+, / Alt+. to slip a frame") });
+  }
+  if (t.kind === "audio") {
+    const fit = p.tracks.find((x) => x.kind === "video" && x.magnetic && !x.locked);
+    out.push(
+      "-",
+      { label: "Detect beats", run: () => op("detectBeats", { itemId: item.id }) },
+      { label: "Clear beats", run: () => op("clearBeats", { itemId: item.id }), disabled: !(item as { beats?: number[] }).beats?.length },
+      { label: `Fit ${fit?.name ?? "video track"} to beats`, run: () => op("fitToBeats", { trackId: fit!.id, audioItemId: item.id, ...(ioRange() && { range: ioRange() }) }), disabled: !fit || !(item as { beats?: number[] }).beats?.length },
+    );
+  }
+  if (t.kind === "caption" || t.kind === "overlay") {
+    const under = span && videoUnder(p, span.start);
+    out.push(
+      "-",
+      anchor
+        ? { label: `Detach from ${anchor.itemId} (freeze in place)`, run: () => op("attach", { itemId: item.id, to: null }), disabled: t.locked }
+        : { label: under ? `Attach to ${under.id}` : "Attach (no video under its start)", run: () => op("attach", { itemId: item.id, to: under!.id }), disabled: !under || t.locked },
+    );
+    if (t.kind === "caption") out.push({ label: "Edit text", hint: "double-click", run: () => app.set({ editing: { kind: "caption", id: item.id } }), disabled: t.locked });
+  }
+  return out;
+}
+
+export function laneMenu(t: Track, frame: number, gap: boolean): MenuEntry[] {
+  return [
+    { label: "Paste here", hint: `${MOD}V`, run: () => paste(frame), disabled: !clipboard.length },
+    { label: "Close gap", hint: "⌫", run: () => op("closeGap", { trackId: t.id, at: frame }), disabled: !gap },
+    "-",
+    ...rulerMenu(frame),
+  ];
+}
+
+export function rulerMenu(frame: number): MenuEntry[] {
+  const m = markerNear(frame, 0);
+  return [
+    { label: "Add marker here", hint: "M", run: () => addMarker(frame) },
+    ...(m ? [{ label: `Rename marker ${m.label}`, run: () => app.set({ editing: { kind: "marker", id: m.id } }) }, { label: `Delete marker ${m.label}`, hint: "⌥M", run: () => op("removeMarker", { markerId: m.id }) }] : []),
+    { label: "Set In here", hint: "I", run: () => setIO("in", frame) },
+    { label: "Set Out here", hint: "O", run: () => setIO("out", frame) },
+    { label: "Clear In/Out", hint: "⌥X", run: () => app.set({ io: { in: null, out: null } }), disabled: !ioRange() },
+  ];
+}
+
+export function markerMenu(markerId: string): MenuEntry[] {
+  const m = app.get().project!.markers?.find((x) => x.id === markerId);
+  if (!m) return [];
+  return [
+    { label: "Rename", hint: "double-click", run: () => app.set({ editing: { kind: "marker", id: m.id } }) },
+    { label: "Delete", hint: "⌥M", run: () => op("removeMarker", { markerId: m.id }) },
+    { label: "Set In/Out to this range", run: () => app.set({ io: { in: m.start, out: m.start + m.duration! } }), disabled: !m.duration },
+  ];
+}
+
+const KIND_NAME: Record<TrackKind, string> = { video: "video", audio: "audio", caption: "caption", overlay: "overlay" };
+
+export function trackMenu(p: Project, t: Track): MenuEntry[] {
+  const i = p.tracks.indexOf(t);
+  const flag = (key: "muted" | "hidden" | "locked" | "magnetic", label: string) => ({ label: `${t[key] ? "✓ " : ""}${label}`, run: () => op("setTrack", { trackId: t.id, patch: { [key]: t[key] ? null : true } }) });
+  return [
+    { label: "Rename", hint: "double-click", run: () => app.set({ editing: { kind: "track", id: t.id } }) },
+    ...(t.kind === "caption" || t.kind === "overlay" ? [] : [flag("muted", "Mute")]),
+    flag("hidden", "Hide"),
+    flag("locked", "Lock"),
+    flag("magnetic", "Magnetic (ripple edits)"),
+    "-",
+    { label: "Move up", run: () => op("moveTrack", { trackId: t.id, to: i + 1 }), disabled: i === p.tracks.length - 1 },
+    { label: "Move down", run: () => op("moveTrack", { trackId: t.id, to: i - 1 }), disabled: i === 0 },
+    { label: `Add ${KIND_NAME[t.kind]} track`, run: () => op("addTrack", { kind: t.kind }) },
+    "-",
+    { label: "Delete track", run: () => removeTrack(t), disabled: t.locked },
+  ];
+}
+
+export function removeTrack(t: Track) {
+  if (t.items.length && !confirm(`Delete track ${t.name} and its ${t.items.length} items?`)) return;
+  return op("removeTrack", { trackId: t.id });
+}
+
+/** New track of `kind` holding one asset: addTrack and insertItem as one step. */
+export function insertOnNewTrack(kind: TrackKind, assetId: string, at: number, duration?: number) {
+  const p = app.get().project!;
+  const trackId = idMaker(p)("t");
+  return send([
+    { op: "addTrack", args: { kind } },
+    { op: "insertItem", args: { trackId, assetId, at, ...(duration && { duration }) } },
+  ]);
+}
+
+// ---- import from the UI ----
+
+/** Uploads files into raw/ and imports them; the server probes before answering, then ingests in the
+ * background. Resolves to the asset ids, in order, of the files that imported. */
+export async function upload(files: File[]): Promise<string[]> {
+  const ids: string[] = [];
+  for (const f of files) {
+    app.set(({ uploads }) => ({ uploads: [...uploads, f.name] }));
+    try {
+      const res = await fetch(`/api/import?name=${encodeURIComponent(f.name)}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: f });
+      const data = await res.json();
+      if (data.error) say(`import ${f.name}: ${data.error.message ?? data.error}`, true);
+      else ids.push(data.assetId), say(data.summary);
+    } catch (e) {
+      say(`import ${f.name}: ${(e as Error).message}`, true);
+    } finally {
+      app.set(({ uploads }) => ({ uploads: uploads.filter((n) => n !== f.name) }));
+    }
+  }
+  await refresh();
+  return ids;
+}
+
+/** Files dropped on the timeline: import, then place them one after another from `at`. No `trackId`
+ * means a new track per kind (the drop row under the tracks). */
+export async function dropFiles(files: File[], at: number, trackId?: string) {
+  const ids = await upload(files);
+  const { project: p, durations } = app.get();
+  if (!ids.length || !p) return;
+  const fps = p.meta.fps;
+  const target = p.tracks.find((t) => t.id === trackId);
+  const id = idMaker(p);
+  const ops: Op[] = [];
+  const fresh: Record<string, string> = {};
+  for (const assetId of ids) {
+    const a = p.assets[assetId];
+    const kind = a.kind === "audio" ? "audio" : "video";
+    const duration = a.kind === "image" ? 5 * fps : Math.floor((durations[assetId] ?? 5) * fps);
+    let tid = target?.kind === kind ? target.id : undefined;
+    if (!target) {
+      if (!fresh[kind]) ops.push({ op: "addTrack", args: { kind } }), (fresh[kind] = id("t"));
+      tid = fresh[kind];
+    }
+    ops.push({ op: "insertItem", args: { assetId, at, duration, ...(tid && { trackId: tid }) } });
+    at += duration;
+  }
+  return send(ops);
+}

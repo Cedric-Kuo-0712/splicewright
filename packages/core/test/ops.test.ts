@@ -204,8 +204,18 @@ describe("ops", () => {
     expect(item(p, "c_1").text).toBe("");
     p = ok(apply(p, "addMarker", { label: "Day 1", start: 0 }, ctx));
     expect(p.markers).toEqual([{ id: "m_1", label: "Day 1", start: 0 }]);
+    p = ok(apply(p, "addMarker", { label: "B", start: 60 }, ctx));
+    p = ok(apply(p, "setMarker", { markerId: "m_2", patch: { label: "Chorus", start: 10 } }, ctx));
+    expect(p.markers!.map((m) => [m.id, m.label, m.start])).toEqual([["m_1", "Day 1", 0], ["m_2", "Chorus", 10]]);
+    expect(err(apply(p, "setMarker", { markerId: "m_2", patch: { id: "x" } }, ctx))).toBe("invalid");
     p = ok(apply(p, "removeMarker", { markerId: "m_1" }, ctx));
-    expect(p.markers).toEqual([]);
+    expect(p.markers!.map((m) => m.id)).toEqual(["m_2"]);
+  });
+
+  it("moveTrack reorders layers", () => {
+    const p = ok(apply(fixture(), "moveTrack", { trackId: "t_3", to: 0 }, ctx));
+    expect(p.tracks.map((t) => t.id)).toEqual(["t_3", "t_1", "t_2"]);
+    expect(ok(apply(p, "moveTrack", { trackId: "t_3", to: 99 }, ctx)).tracks.map((t) => t.id)).toEqual(["t_1", "t_2", "t_3"]);
   });
 
   it("batch is atomic: all or nothing, one revision", () => {

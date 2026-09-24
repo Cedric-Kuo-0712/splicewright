@@ -196,9 +196,11 @@ The adapters (UI/CLI/MCP) only call ops and persist the result.
 | `setProps` | itemId, patch | Whitelisted fields only (volume, fit, transform, fades, props, label, note). |
 | `slip` | itemId, deltaSec | Changes `sourceIn` only; timeline position unchanged. |
 | `addTrack` / `removeTrack` / `setTrack` | … | Empty tracks are allowed (unlike OpenCut). |
+| `moveTrack` | trackId, to | Moves a track to layer index `to` (0 = bottom). |
 | `addCaptionsFromTranscript` | itemId, trackId? | Creates anchored captions from the asset transcript. |
 | `editCaption` | captionId, text \| "" | Empty text hides the caption (replaces the `----` convention). |
 | `addMarker` / `removeMarker` | … | |
+| `setMarker` | markerId, patch | label, start, duration, color; keeps markers sorted by start. |
 | `batch` | ops[] | Atomic: all or nothing, one revision, one undo step. |
 
 Undo/redo: the history is an op log with inverse snapshots, persisted to `.splicewright/history/`.
@@ -268,6 +270,22 @@ Evolves from `video-cut/apps/editor`. Every mutation goes through core ops.
 - Keyboard: Space, ←/→ (±1 frame), Shift+←/→ (±10), J/K/L shuttle, Up/Down (previous/next edit),
   S or Cmd+B split (plain `C` is not used, so Cmd+C stays copy), Delete / Shift+Delete (ripple),
   Cmd+Z / Cmd+Shift+Z.
+- Editing (all through ops, one undo step per gesture):
+  - Cmd+C / Cmd+V paste at the playhead (Cmd+Shift+V inserts and pushes later items), Cmd+D duplicates after the selection.
+    Items go back to their track, else the first unlocked track of the same kind; anchored captions follow their video.
+  - Drag on an empty lane draws a selection box (Shift adds, Cmd toggles); a click seeks and selects the gap there.
+    Only the ruler scrubs. Dragging one of several selected items moves them all in time, never across tracks.
+  - I / O set a range (mirrored in the URL hash, handles on the ruler), Alt+X clears it, `/` loops it.
+    With a range and no selection: Split cuts at both ends, Delete lifts it, Shift+Delete extracts it; Fit to beats uses it.
+  - Right-click menus on items, lanes, ruler, markers and track headers.
+  - Import… button, or drop files on the bin or timeline: `POST /api/import?name=` streams into `raw/`
+    (same-origin only, empty bodies refused, duplicate content resolves to the existing asset), probes, then ingests in the background.
+  - Tracks: double-click to rename, magnet toggle, drag the header to reorder, +V/+A/+C/+O row; dropping media below the tracks makes a new one.
+  - Markers: M adds, Alt+M removes the one at the playhead, click jumps, double-click renames; Up/Down also stop at markers.
+  - Alt-drag a video item's body slips it (the player shows the new first frame; stops at the source edges); Alt+, / Alt+. slip one frame.
+    Alt-drag a caption or overlay re-attaches it to the video under its new start.
+  - Double-click a caption to edit it in place: Enter saves, Shift+Enter breaks the line, Esc cancels, Tab saves and edits the next.
+  - Audio items show fade-in/out handles and a volume line (0–2, with dB) on hover or selection.
 
 ---
 

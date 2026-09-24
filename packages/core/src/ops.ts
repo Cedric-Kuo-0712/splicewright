@@ -435,6 +435,17 @@ export const ops: Record<string, OpDef<any>> = {
     return `updated track ${t.id}: ${Object.keys(a.patch).join(", ")}`;
   }),
 
+  moveTrack: def(
+    "Move a track to index `to` in the layer order (0 = bottom).",
+    z.object({ trackId: Id, to: z.number().int().min(0) }),
+    (p, a) => {
+      const t = findTrack(p, a.trackId);
+      p.tracks.splice(p.tracks.indexOf(t), 1);
+      p.tracks.splice(Math.min(a.to, p.tracks.length), 0, t);
+      return `moved track ${t.id} to layer ${p.tracks.indexOf(t)}`;
+    },
+  ),
+
   addCaptionsFromTranscript: def(
     "Create captions anchored to a video item's source time from its asset transcript (visible segments only).",z.object({ itemId: Id, trackId: Id.optional() }), (p, a, ctx) => {
     const { track: src, item } = locate(p, a.itemId);
@@ -481,6 +492,17 @@ export const ops: Record<string, OpDef<any>> = {
     p.markers!.splice(i, 1);
     return `removed marker ${a.markerId}`;
   }),
+
+  setMarker: def(
+    "Patch marker fields: label, start, duration, color. null unsets duration or color.",
+    z.object({ markerId: Id, patch: Patch }),
+    (p, a) => {
+      const m = (p.markers ?? []).find((m) => m.id === a.markerId) ?? fail("not_found", `marker ${a.markerId} not found`);
+      patch(m as Record<string, unknown>, a.patch, ["label", "start", "duration", "color"], `marker ${m.id}`);
+      p.markers!.sort((x, y) => x.start - y.start);
+      return `updated marker ${m.id}: ${Object.keys(a.patch).join(", ")}`;
+    },
+  ),
 
   detectBeats: def(
     "Copy beats from the ingest cache (splicewright ingest --only beats) into an audio item, replacing its current beats.",

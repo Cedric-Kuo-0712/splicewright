@@ -41,9 +41,32 @@ export interface State {
   message: { text: string; error?: boolean } | null;
   /** Shuttle speed (J/K/L); negative plays backwards. */
   rate: number;
+  /** I/O points; the range is [in, out) with a missing end meaning the project edge. Mirrored in the URL hash. */
+  io: { in: number | null; out: number | null };
+  /** `/` plays the I/O range in a loop until paused. */
+  looping: boolean;
+  menu: { x: number; y: number; entries: MenuEntry[] } | null;
+  /** What is being renamed or retyped in place. */
+  editing: { kind: "caption" | "marker" | "track"; id: string } | null;
+  /** Live slip drag: the preview shows this sourceIn before the op commits. */
+  slip: { itemId: string; sourceIn: number } | null;
+  /** Assets with ingest running on the server → the step last reported. */
+  ingesting: Record<string, string>;
+  /** File names being uploaded. */
+  uploads: string[];
+  /** Media-bin asset to scroll to and flash. */
+  reveal: string | null;
 }
 
-export const app = store<State>({ project: null, duck: {}, proxies: [], durations: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1 });
+export type MenuEntry = { label: string; hint?: string; run: () => unknown; disabled?: boolean } | "-";
+
+const hash = new URLSearchParams(location.hash.slice(1));
+const num = (v: string | null) => (v === null || v === "" || isNaN(Number(v)) ? null : Number(v));
+
+export const app = store<State>({
+  project: null, duck: {}, proxies: [], durations: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
+  io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, ingesting: {}, uploads: [], reveal: null,
+});
 export const playhead = store({ frame: 0 });
 
 type Snapshot = Pick<State, "project" | "duck" | "proxies" | "durations">;
@@ -81,12 +104,34 @@ export async function history(which: "undo" | "redo") {
   app.set({ message: { text: data.summary } });
 }
 
-/** Agents edit project.json too; the server pushes each new revision. */
+/** Agents edit project.json too; the server pushes each new revision, and ingest progress for UI imports. */
 export function listen() {
   new EventSource("/api/events").onmessage = (e) => {
-    if (JSON.parse(e.data).revision !== app.get().project?.revision) refresh();
+    const m = JSON.parse(e.data);
+    if (m.ingest) {
+      const { id, step } = m.ingest as { id: string; step: string | null };
+      app.set(({ ingesting }) => {
+        const next: Record<string, string> = { ...ingesting, [id]: step ?? "" };
+        if (!step) delete next[id];
+        return { ingesting: next };
+      });
+      // Probe results bring durations; the end brings proxies.
+      if (!step || step === "probe") refresh();
+      return;
+    }
+    if (m.revision !== app.get().project?.revision) refresh();
   };
 }
+
+/** The I/O range, or null when neither point is set or it is empty. */
+export function ioRange(): [number, number] | null {
+  const { io, project } = app.get();
+  if (io.in === null && io.out === null) return null;
+  const r: [number, number] = [io.in ?? 0, io.out ?? durationFrames(project!)];
+  return r[1] > r[0] ? r : null;
+}
+
+export const say = (text: string, error = false) => app.set({ message: { text, error } });
 
 /** The media-bin asset being dragged; dragover can't read dataTransfer, so the preview reads this. */
 export const dnd: { assetId: string | null } = { assetId: null };

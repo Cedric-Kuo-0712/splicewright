@@ -1,6 +1,6 @@
 import { z } from "zod";
-import type { Anchor, CaptionItem, Ctx, Item, Project, Track, TrackKind } from "./schema.ts";
-import { snap, snapPoints, snapSpan } from "./timing.ts";
+import type { Anchor, AudioItem, CaptionItem, Ctx, Item, Project, Track, TrackKind } from "./schema.ts";
+import { beatFrames, snap, snapPoints, snapSpan } from "./timing.ts";
 import { anchorOf, itemSpan, validate, videoItems } from "./validate.ts";
 
 // Spec §5. Every op mutates a private clone; `apply` bumps the revision and validates.
@@ -85,6 +85,15 @@ function locate(p: Project, itemId: string): { track: Track; item: Item } {
 
 const allItems = (p: Project): Item[] => p.tracks.flatMap((t): Item[] => t.items);
 
+function audioItem(p: Project, itemId: string): AudioItem {
+  const { track, item } = locate(p, itemId);
+  return track.kind === "audio" ? (item as AudioItem) : fail("invalid", `${itemId} is not an audio item`);
+}
+
+const DENSITY = z
+  .union([z.enum(["all", "strong", "downbeat"]), z.string().regex(/^every:[1-9]\d*$/)])
+  .describe("all | strong (onset strength above the 60th percentile) | downbeat | every:N (every Nth beat from the first downbeat)");
+
 /** Timeline frame → source seconds of the anchor's target. */
 function toSource(p: Project, anchor: Anchor, frame: number): number {
   const target = videoItems(p).get(anchor.itemId) ?? fail("not_found", `anchor target ${anchor.itemId} not found`);
@@ -147,12 +156,20 @@ function patch(target: Record<string, unknown>, changes: Record<string, unknown>
 
 export const ops: Record<string, OpDef<any>> = {
   importAsset: def(
-    "Register a media file (path relative to the project root). Idempotent by path.",
+    "Register a media file (path relative to the project root). Idempotent by path and by content fingerprint; a probed asset whose file moved is re-pointed to the new path.",
     z.object({ path: z.string().min(1), kind: z.enum(["video", "audio", "image"]).optional() }),
-    (p, a) => {
+    (p, a, ctx) => {
       if (/^([/\\]|[a-zA-Z]:)/.test(a.path)) fail("invalid", `asset path must be relative to the project root: ${a.path}`);
       const existing = Object.values(p.assets).find((x) => x.path === a.path);
       if (existing) return `already imported as ${existing.id}`;
+      const fp = ctx.fingerprint?.(a.path);
+      const same = fp && Object.values(p.assets).find((x) => ctx.fingerprints?.[x.id] === fp);
+      if (same) {
+        if (ctx.fingerprint!(same.path)) return `already imported as ${same.id} (same content as ${same.path})`;
+        const from = same.path;
+        same.path = a.path;
+        return `re-pointed ${same.id} from ${from} (missing) to ${a.path}`;
+      }
       const file = a.path.split(/[/\\]/).pop()!;
       const ext = file.includes(".") ? file.split(".").pop()!.toLowerCase() : "";
       const kind = a.kind ?? EXT_KIND[ext] ?? fail("invalid", `unknown media type ".${ext}"; pass kind`);
@@ -191,7 +208,7 @@ export const ops: Record<string, OpDef<any>> = {
         const len = asset.kind === "image" ? undefined : ctx.assetDurations?.[asset.id];
         const duration =
           a.duration ??
-          (len !== undefined ? Math.floor((len - sourceIn) * p.meta.fps) : fail("invalid", "duration required (asset duration unknown)"));
+          (len !== undefined ? Math.floor((len - sourceIn) * p.meta.fps) : fail("invalid", "duration required (asset duration unknown; run splicewright ingest)"));
         item = { id: nextId(p, "i"), start: a.at, duration, assetId: asset.id, sourceIn };
       } else if (a.component !== undefined) {
         kind = "overlay";
@@ -444,6 +461,122 @@ export const ops: Record<string, OpDef<any>> = {
     return `removed marker ${a.markerId}`;
   }),
 
+  detectBeats: def(
+    "Copy beats from the ingest cache (splicewright ingest --only beats) into an audio item, replacing its current beats.",
+    z.object({ itemId: Id, density: DENSITY.default("all") }),
+    (p, a, ctx) => {
+      const item = audioItem(p, a.itemId);
+      const r = ctx.beats?.(item.assetId) ?? fail("not_found", `no beat analysis for ${item.assetId}; run splicewright ingest --only beats`);
+      let beats = r.beats.map((b) => b.t);
+      if (a.density === "strong") {
+        const s = r.beats.map((b) => b.strength).sort((x, y) => x - y);
+        const cut = s[Math.floor(s.length * 0.6)] ?? 0;
+        beats = r.beats.filter((b) => b.strength > cut).map((b) => b.t);
+      } else if (a.density === "downbeat") beats = [...r.downbeats];
+      else if (a.density.startsWith("every:")) {
+        const n = Number(a.density.slice(6));
+        const first = Math.max(0, beats.findIndex((t) => Math.abs(t - (r.downbeats[0] ?? beats[0])) < 1e-6));
+        beats = beats.filter((_, i) => i >= first && (i - first) % n === 0);
+      }
+      if (beats.length) item.beats = beats.sort((x, y) => x - y);
+      else delete item.beats;
+      return `${item.id}: ${beats.length} beats (${a.density}, ${r.tempo.toFixed(1)} BPM); ${beatFrames(p, item).length} visible`;
+    },
+  ),
+
+  addBeat: def(
+    "Add a beat to an audio item at timeline frame `at` (manual correction, tap-along).",
+    z.object({ itemId: Id, at: frameArg(Frames.min(0)) }),
+    (p, a) => {
+      const item = audioItem(p, a.itemId);
+      if (a.at < item.start || a.at >= end(item)) fail("invalid", `frame ${a.at} is outside ${item.id} [${item.start}, ${end(item)})`);
+      if (beatFrames(p, item).includes(a.at)) return `${item.id} already has a beat at ${a.at}`;
+      item.beats = [...(item.beats ?? []), +(item.sourceIn + (a.at - item.start) / p.meta.fps).toFixed(4)].sort((x, y) => x - y);
+      return `added beat to ${item.id} at ${a.at}`;
+    },
+  ),
+
+  removeBeat: def(
+    "Remove an audio item's beat at timeline frame `at`.",
+    z.object({ itemId: Id, at: frameArg(Frames.min(0)) }),
+    (p, a) => {
+      const item = audioItem(p, a.itemId);
+      const frame = (t: number) => item.start + Math.round((t - item.sourceIn) * p.meta.fps);
+      const keep = (item.beats ?? []).filter((t) => frame(t) !== a.at);
+      if (keep.length === (item.beats ?? []).length) fail("not_found", `${item.id} has no beat at ${a.at}`);
+      if (keep.length) item.beats = keep;
+      else delete item.beats;
+      return `removed beat from ${item.id} at ${a.at}`;
+    },
+  ),
+
+  clearBeats: def("Remove all beats from an audio item.", z.object({ itemId: Id }), (p, a) => {
+    const item = audioItem(p, a.itemId);
+    const n = item.beats?.length ?? 0;
+    delete item.beats;
+    return `cleared ${n} beats from ${item.id}`;
+  }),
+
+  fitToBeats: def(
+    "Beat sync: walk consecutive items on a magnetic video track and put each cut on the next `every`-th beat of an audio item. Images get the duration directly; video is trimmed, never past its source (a clip too short for the next beat takes the nearest reachable one, or is skipped). range: [from, to) frames or a marker id/label with a duration picks the items by start; from: beats are counted from the last beat at or before this frame (default: the first item's start). One undo step.",
+    z.object({
+      trackId: Id,
+      audioItemId: Id,
+      every: z.number().int().min(1).default(1),
+      range: z.union([z.tuple([Frames.min(0), Frames.min(1)]), z.string()]).optional(),
+      from: Frames.min(0).optional(),
+    }),
+    (p, a, ctx) => {
+      const t = findTrack(p, a.trackId);
+      if (t.kind !== "video" || !t.magnetic) fail("invalid", `${t.id} is not a magnetic video track`);
+      const beats = beatFrames(p, audioItem(p, a.audioItemId));
+      if (!beats.length) fail("invalid", `${a.audioItemId} has no visible beats; run detectBeats first`);
+      let [lo, hi] = [0, Infinity];
+      if (typeof a.range === "string") {
+        const m = (p.markers ?? []).find((m) => m.id === a.range || m.label === a.range) ?? fail("not_found", `marker ${a.range} not found`);
+        if (!m.duration) fail("invalid", `marker ${m.id} is a point; range needs a marker with a duration`);
+        [lo, hi] = [m.start, m.start + m.duration];
+      } else if (a.range) [lo, hi] = a.range;
+      const items = t.items.filter((i) => i.start >= lo && i.start < hi);
+      if (!items.length) fail("not_found", `no items on ${t.id} start in [${lo}, ${hi})`);
+
+      const fps = p.meta.fps;
+      // Beat grid origin: the last beat at or before `from`; -1 makes the first beat after it beat 1.
+      let k = beats.findLastIndex((b) => b <= (a.from ?? items[0].start));
+      const changed: string[] = [];
+      const notes: string[] = [];
+      for (const item of items as (Item & { assetId: string; sourceIn: number })[]) {
+        const want = k + a.every;
+        if (want >= beats.length) {
+          notes.push(`${item.id} skipped (no more beats)`);
+          continue;
+        }
+        let j = want;
+        if (p.assets[item.assetId]?.kind === "video") {
+          const len = ctx.assetDurations?.[item.assetId];
+          const max = len === undefined ? undefined : Math.floor((len - item.sourceIn) * fps);
+          if (max === undefined) j = -1;
+          else while (j >= 0 && beats[j] - item.start > max) j--;
+          if (j === -1 || beats[j] <= item.start) {
+            notes.push(`${item.id} skipped (${max === undefined ? "source duration unknown; run ingest" : "source too short to reach a beat"})`);
+            k = beats.findLastIndex((b) => b <= end(item));
+            continue;
+          }
+          if (j !== want) notes.push(`${item.id} cut at beat ${beats[j]} (source too short for ${beats[want]})`);
+        }
+        const oldEnd = end(item);
+        const delta = beats[j] - oldEnd;
+        if (delta) {
+          item.duration += delta;
+          shift(t, oldEnd, delta);
+          changed.push(item.id);
+        }
+        k = j;
+      }
+      return `fitted ${changed.length} of ${items.length} items on ${t.id} to beats (every ${a.every})` + (changed.length ? `: ${changed.join(", ")}` : "") + (notes.length ? `; ${notes.join("; ")}` : "");
+    },
+  ),
+
   batch: def(
     'Apply several ops atomically: all or nothing, one revision, one undo step. ops: [{op, args}].',z.object({ ops: z.array(z.object({ op: z.string(), args: z.unknown() })).min(1) }), (p, a, ctx) => {
     // Intermediate states may be invalid (e.g. swapping two items); only the end result is validated.
@@ -472,10 +605,12 @@ function resolveNear(p: Project, args: unknown): unknown {
     const n = Near.safeParse(a[key]);
     if (!n.success) continue; // plain frames, and malformed objects that parseArgs will report
     const { near, snapTo = ["edge", "marker", "beat"], within = Math.round(p.meta.fps) } = n.data;
-    const own = typeof a.itemId === "string" ? [a.itemId] : [];
-    const points = snapPoints(p, [0, Infinity], { kinds: snapTo });
-    const moving = key === "to" && !("edge" in a) && own.length ? locate(p, own[0]).item : undefined;
-    const r = moving ? snapSpan(points, near, moving.duration, within, own) : snap(points, near, within, own);
+    const own = typeof a.itemId === "string" ? a.itemId : undefined;
+    const moving = key === "to" && !("edge" in a) && own ? locate(p, own).item : undefined;
+    // The item's own edges never count; its own beats do (trim to, or add/remove, a beat), unless it moves with them.
+    const points = snapPoints(p, [0, Infinity], { kinds: snapTo }).filter((pt) => pt.ref !== own || (pt.kind === "beat" && !moving));
+    const offsets = moving && "beats" in moving ? beatFrames(p, moving as AudioItem).map((f) => f - moving.start) : [];
+    const r = moving ? snapSpan(points, near, moving.duration, within, [], offsets) : snap(points, near, within);
     if (!r.target) fail("no_snap_target", `no ${snapTo.join("/")} within ${within} frames of ${near}`);
     a[key] = r.frame;
   }

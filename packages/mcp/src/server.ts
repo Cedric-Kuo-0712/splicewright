@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { find, getItem, getRange, getSummary, ops, type OpResult } from "@splicewright/core";
 import { load, loadCtx, redo, run, undo } from "@splicewright/core/node";
+import { ingest, STEPS } from "@splicewright/ingest";
 import { renderStatus, startRender, still } from "@splicewright/render/node";
 
 // Spec §7.2. Write tools map 1:1 to core ops; read tools return compact JSON.
@@ -32,6 +33,14 @@ export function createServer(dir: string): McpServer {
   server.registerTool("splicewright_undo", { description: "Undo the last op (one op = one step)." }, async () => writeResult(undo(dir)));
   server.registerTool("splicewright_redo", { description: "Redo the last undone op." }, async () => writeResult(redo(dir)));
 
+  server.registerTool(
+    "ingest",
+    {
+      description: "Probe assets and build caches (proxies, thumbs, contact sheets, waveforms, transcripts, beats). Cached by content fingerprint, so re-running is cheap. Needed before insertItem can default a duration, and before detectBeats / addCaptionsFromTranscript.",
+      inputSchema: { only: z.array(z.enum(STEPS)).optional(), assets: z.array(z.string()).optional().describe("Asset ids; default all.") },
+    },
+    async ({ only, assets }) => json(await ingest(dir, { only, assets })),
+  );
   server.registerTool(
     "get_summary",
     { description: "Tracks, item counts, total duration, markers, revision. No per-item detail." },

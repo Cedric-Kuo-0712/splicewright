@@ -1,11 +1,11 @@
-import { spawn } from "node:child_process";
-import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, watch, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, statSync, watch } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { createServer, type Plugin } from "vite";
-import { load, loadCtx, redo, run, undo } from "@splicewright/core/node";
+import { load, loadCtx, readAssets, redo, run, undo } from "@splicewright/core/node";
+import { limiter, thumb, waveform } from "@splicewright/ingest";
 import { duckRanges } from "@splicewright/render/node";
 
 // Spec §7.3. `splicewright open` runs this: a Vite dev server for the UI (open question 5, the simple
@@ -45,67 +45,8 @@ function sendFile(req: IncomingMessage, res: ServerResponse, file: string, type?
 
 const TYPES: Record<string, string> = { mp4: "video/mp4", mov: "video/quicktime", m4v: "video/mp4", webm: "video/webm", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", aac: "audio/aac", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml" };
 
-// ponytail: at most 4 ffmpeg jobs at once, FIFO; thumbs of 4K footage cost ~0.2 s each.
-let running = 0;
-const waiting: (() => void)[] = [];
-async function limited<T>(fn: () => Promise<T>): Promise<T> {
-  if (running >= 4) await new Promise<void>((r) => waiting.push(r));
-  running++;
-  try {
-    return await fn();
-  } finally {
-    running--;
-    waiting.shift()?.();
-  }
-}
-
-function ffmpeg(args: string[], onData?: (b: Buffer) => void): Promise<void> {
-  return new Promise((ok, fail) => {
-    const p = spawn("ffmpeg", ["-loglevel", "error", ...args], { stdio: ["ignore", onData ? "pipe" : "ignore", "pipe"] });
-    let err = "";
-    p.stdout?.on("data", onData!);
-    p.stderr!.on("data", (d) => (err += d));
-    p.on("error", fail);
-    p.on("close", (code) => (code === 0 ? ok() : fail(new Error(err.trim() || `ffmpeg exited ${code}`))));
-  });
-}
-
-const WAVE_RATE = 100; // peaks per second
-
-/** Lazily generated caches under .splicewright/ (M5 ingest will produce them ahead of time). */
-async function thumb(dir: string, assetId: string, path: string, t: number): Promise<string> {
-  const out = join(dir, ".splicewright", "thumbs", assetId, `${t}.jpg`);
-  if (!existsSync(out)) {
-    mkdirSync(dirname(out), { recursive: true });
-    await limited(() => ffmpeg(["-ss", String(t), "-i", join(dir, path), "-frames:v", "1", "-vf", "scale=-2:72", "-q:v", "6", "-y", out]));
-  }
-  return out;
-}
-
-async function waveform(dir: string, assetId: string, path: string): Promise<string> {
-  const out = join(dir, ".splicewright", "waveforms", `${assetId}.json`);
-  if (!existsSync(out)) {
-    const per = 4000 / WAVE_RATE;
-    const peaks: number[] = [];
-    let max = 0;
-    let n = 0;
-    let carry: Buffer | null = null;
-    await limited(() =>
-      ffmpeg(["-i", join(dir, path), "-vn", "-ac", "1", "-ar", "4000", "-f", "s16le", "pipe:1"], (chunk) => {
-        const b: Buffer = carry ? Buffer.concat([carry, chunk]) : chunk;
-        const whole = b.length & ~1;
-        for (let i = 0; i < whole; i += 2) {
-          max = Math.max(max, Math.abs(b.readInt16LE(i)));
-          if (++n === per) peaks.push(Math.round((max / 32768) * 255)), (max = 0), (n = 0);
-        }
-        carry = whole < b.length ? b.subarray(whole) : null;
-      }),
-    );
-    mkdirSync(dirname(out), { recursive: true });
-    writeFileSync(out, JSON.stringify({ rate: WAVE_RATE, peaks }));
-  }
-  return out;
-}
+// ponytail: at most 4 lazy ffmpeg jobs at once, FIFO; thumbs of 4K footage cost ~0.2 s each.
+const limited = limiter(4);
 
 function api(dir: string): Plugin {
   const clients = new Set<ServerResponse>();
@@ -122,7 +63,8 @@ function api(dir: string): Plugin {
   const snapshot = () => {
     const project = load(dir);
     const proxies = Object.keys(project.assets).filter((id) => existsSync(join(dir, ".splicewright", "proxies", "edit", `${id}.mp4`)));
-    return { project, duck: duckRanges(project, loadCtx(dir)), proxies };
+    const durations = Object.fromEntries(Object.entries(readAssets(dir)).flatMap(([id, a]) => (a.duration ? [[id, a.duration]] : [])));
+    return { project, duck: duckRanges(project, loadCtx(dir)), proxies, durations };
   };
   const result = (res: ServerResponse, r: ReturnType<typeof run>) =>
     "error" in r ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, { revision: r.project.revision, summary: r.changes.summary, ...snapshot() });
@@ -162,9 +104,9 @@ function api(dir: string): Plugin {
           if (route === "GET /api/thumb") {
             const t = Math.max(0, Math.round(Number(url.searchParams.get("t")) || 0));
             if (asset.kind === "image") return sendFile(req, res, join(dir, asset.path));
-            return sendFile(req, res, await thumb(dir, asset.id, asset.path, t), "image/jpeg");
+            return sendFile(req, res, await thumb(dir, asset.id, asset.path, t, limited), "image/jpeg");
           }
-          if (route === "GET /api/waveform") return res.end(readFileSync(await waveform(dir, asset.id, asset.path)));
+          if (route === "GET /api/waveform") return res.end(readFileSync(await waveform(dir, asset.id, asset.path, limited)));
           send(res, 404, { error: `no route ${route}` });
         } catch (e) {
           send(res, 500, { error: (e as Error).message });

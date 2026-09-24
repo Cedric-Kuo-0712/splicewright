@@ -1,4 +1,5 @@
-import type { Ctx, Item, Project } from "./schema.ts";
+import type { AudioItem, Ctx, Item, Project } from "./schema.ts";
+import { beatFrames } from "./timing.ts";
 import { itemSpan } from "./validate.ts";
 
 // Token-budget read views (§7.2). Pure; shared by `splicewright status` and the MCP read tools.
@@ -40,13 +41,17 @@ export function getSummary(p: Project) {
   };
 }
 
-/** Visible items and captions intersecting timeline frames [from, to). */
+/** Visible items and captions intersecting timeline frames [from, to). Audio beats come as frames in range. */
 export function getRange(p: Project, from: number, to: number) {
   return p.tracks.flatMap((t) =>
     t.items
       .map((i) => visible(p, i))
       .filter((i): i is Item => i !== null && i.start < to && end(i) > from)
-      .map((i) => ({ track: t.id, ...i })),
+      .map((i) => {
+        if (!("beats" in i && i.beats)) return { track: t.id, ...i };
+        const { beats, ...rest } = i as AudioItem;
+        return { track: t.id, ...rest, beatFrames: beatFrames(p, i as AudioItem).filter((f) => f >= from && f < to) };
+      }),
   );
 }
 

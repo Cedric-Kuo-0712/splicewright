@@ -3,16 +3,17 @@ import { relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { getSummary } from "@splicewright/core";
 import { init, load, redo, run, undo } from "@splicewright/core/node";
+import { ingest, STEPS, type Step } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
 import { render, still } from "@splicewright/render/node";
 import { migrateVideoCut } from "./migrate.ts";
 
 // Spec §7.1. Every command prints one JSON object on stdout; errors exit 1.
-// ingest arrives with M5.
 
 const USAGE = `usage: splicewright <command>
   init [--title T] [--fps 30] [--size 1920x1080]
-  import <paths...>
+  import <paths...> [--no-ingest]
+  ingest [--only proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
   status
   op <opName> '<json args>' [--base <revision>]
   undo | redo
@@ -42,6 +43,9 @@ const { values: flags, positionals } = parseArgs({
     preset: { type: "string", default: "master" },
     range: { type: "string" },
     port: { type: "string", default: "5190" },
+    only: { type: "string" },
+    jobs: { type: "string" },
+    "no-ingest": { type: "boolean" },
   },
 });
 const [cmd, ...args] = positionals;
@@ -54,6 +58,9 @@ function toFrame(at: string, fps: number): number | undefined {
   if (!/^(\d+:)?\d+:\d+(\.\d+)?$/.test(at)) return undefined;
   return Math.round(at.split(":").reduce((s, v) => s * 60 + Number(v), 0) * fps);
 }
+
+const log = (line: string) => console.error(line);
+const jobs = flags.jobs ? Number(flags.jobs) : undefined;
 
 const opResult = (r: ReturnType<typeof run>) =>
   "error" in r ? r : { revision: r.project.revision, summary: r.changes.summary };
@@ -68,7 +75,16 @@ switch (cmd) {
   }
   case "import": {
     if (!args.length) out({ error: { code: "usage", message: "import <paths...>" } });
-    out({ results: args.map((p) => opResult(run(dir, "importAsset", { path: relative(dir, resolve(p)) }))) });
+    const paths = args.map((p) => relative(dir, resolve(p)));
+    const results = paths.map((path) => opResult(run(dir, "importAsset", { path })));
+    const ids = Object.values(load(dir).assets).filter((a) => paths.includes(a.path)).map((a) => a.id);
+    out({ results, ...(!flags["no-ingest"] && ids.length && { ingest: await ingest(dir, { assets: ids, jobs, log }) }) });
+  }
+  case "ingest": {
+    const only = flags.only?.split(",") as Step[] | undefined;
+    const bad = only?.filter((s) => !STEPS.includes(s));
+    if (bad?.length) out({ error: { code: "usage", message: `unknown step ${bad.join(", ")}; one of ${STEPS.join(", ")}` } });
+    out(await ingest(dir, { only, jobs, log }));
   }
   case "status":
     out(getSummary(load(dir)));

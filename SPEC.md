@@ -3,7 +3,7 @@
 > A file-first, agent-native video editor. One project file, one pure core,
 > three surfaces: a timeline UI for humans, a CLI for scripts, an MCP server for agents.
 
-Status: draft for review. M1–M4 implemented (see §12); M5–M6 not started.
+Status: draft for review. M1–M6 implemented (see §12).
 Origin: extracted from the `video-cut` Kaohsiung vlog project (`apps/editor` + `my-video` + `scripts/`).
 
 ---
@@ -225,8 +225,8 @@ Snapping, the adaptive ruler, and beat points are specified in §15.
 ### 7.1 CLI (`splicewright`)
 ```
 splicewright init [--fps 30 --size 1920x1080]
-splicewright import <paths...>              # register + ingest
-splicewright ingest [--only proxy,transcript,thumbs,scenes]
+splicewright import <paths...> [--no-ingest]  # register + ingest
+splicewright ingest [--only probe,proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
 splicewright status                         # compact JSON summary (see get_summary)
 splicewright op <opName> '<json args>'      # any core op
 splicewright open                           # start the UI for the current folder
@@ -272,6 +272,12 @@ Evolves from `video-cut/apps/editor`. Every mutation goes through core ops.
 
 v1 ports the working Python scripts from `video-cut/scripts/` as-is, made generic (no hardcoded clip
 ids or paths), and invokes them from the CLI. Steps, each cached by fingerprint:
+
+> **As built (M5):** `@splicewright/ingest` runs the ffmpeg steps (probe, proxies, thumbs, waveform)
+> from Node; only transcript and beats are Python (`ingest/*.py`, venv per `ingest/requirements.txt`,
+> interpreter from `SPLICEWRIGHT_PYTHON` → `ingest/.venv` → `python3`). A missing Python module skips
+> that step with a hint instead of failing the run. Cache files are keyed by asset id; the fingerprint
+> lives in `assets.json` per step. `scenes` is not implemented (nothing consumes it yet).
 
 | Step | Output | Notes |
 |---|---|---|
@@ -366,8 +372,8 @@ explained, not hidden.
 | M2 | `cli` + `mcp` over core; `migrate video-cut` | agent can split/trim the migrated project via MCP; `validate` passes | ✅ done |
 | M3 | `render`: generic composition, config loader, captions, ducking | §11 acceptance comparison | ✅ done (frames; audio not compared) |
 | M4 | `apps/web` ported to core ops, file watching, edit proxies, thumbs/waveforms; adaptive ruler + snapping (§15.1–15.2) | manual pass over §7.3 checklist; `rulerTicks`/`snap` unit tests | ✅ done (UI plays edit proxies if present; generating them is M5) |
-| M5 | `ingest` generic port | fresh project from raw files → first render with no manual steps | not started |
-| M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow | not started |
+| M5 | `ingest` generic port | fresh project from raw files → first render with no manual steps | ✅ done (no `scenes` step) |
+| M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow | ✅ done (real-music F-measure §15.5 not yet reported) |
 
 ---
 
@@ -488,7 +494,7 @@ stronger beats *(unverified)*. Splicewright exposes this as an explicit density 
 **Implementation:**
 - Ingest step `beats` (Python, in `ingest/`). v1 uses **librosa** (`onset.onset_strength`,
   `beat.beat_track`). It is pip-installable and fits the existing Python ingest. Output goes to
-  `.splicewright/beats/<fingerprint>.json` as
+  `.splicewright/beats/<assetId>.json` (fingerprint tracked in `assets.json`) as
   `{ algo, version, tempo, beats: [{ t, strength }], downbeats: [t] }`, in **asset seconds**.
   Avoid GPL/AGPL analyzers (aubio, essentia, per my understanding; *verify*) if the repo is MIT.
 - **Schema extension** (optional field, so no `schemaVersion` bump):

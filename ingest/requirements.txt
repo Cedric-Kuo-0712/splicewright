@@ -1,0 +1,5 @@
+# Python ingest steps (§8). Install into ingest/.venv, which `splicewright ingest` picks up:
+#   python3 -m venv ingest/.venv && ingest/.venv/bin/pip install -r ingest/requirements.txt
+# or point SPLICEWRIGHT_PYTHON at another interpreter.
+librosa>=1.0
+faster-whisper>=1.0

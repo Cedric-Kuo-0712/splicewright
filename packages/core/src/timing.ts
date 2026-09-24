@@ -1,4 +1,4 @@
-import type { Project } from "./schema.ts";
+import type { AudioItem, Project } from "./schema.ts";
 import { itemSpan } from "./validate.ts";
 
 // Spec §15.1–15.2: adaptive ruler and snapping. Pure; shared by the UI and by op args ({ near }).
@@ -73,6 +73,16 @@ export interface SnapOptions {
   tickStep?: number;
 }
 
+/** An audio item's beats as timeline frames, inside its visible range, sorted and unique (§15.3). */
+export function beatFrames(p: Project, item: AudioItem): number[] {
+  const out: number[] = [];
+  for (const t of item.beats ?? []) {
+    const f = item.start + Math.round((t - item.sourceIn) * p.meta.fps);
+    if (f >= item.start && f < item.start + item.duration && f !== out.at(-1)) out.push(f);
+  }
+  return out;
+}
+
 const cache = new WeakMap<Project, SnapPoint[]>();
 
 /** Item edges, markers, and caption boundaries; computed once per project object (i.e. per revision). */
@@ -92,7 +102,7 @@ function projectPoints(p: Project): SnapPoint[] {
     pts.push({ frame: m.start, kind: "marker", ref: m.id });
     if (m.duration) pts.push({ frame: m.start + m.duration, kind: "marker", ref: m.id });
   }
-  // ponytail: no "beat" points until AudioItem.beats lands (M6, §15.3).
+  for (const t of p.tracks) if (t.kind === "audio") for (const item of t.items) for (const frame of beatFrames(p, item)) pts.push({ frame, kind: "beat", ref: item.id });
   cache.set(p, pts);
   return pts;
 }
@@ -126,10 +136,15 @@ export function snap(points: SnapPoint[], frame: number, thresholdFrames: number
   return { frame: best ? best.frame : frame, target: best };
 }
 
-/** Snap a span being moved: tests both edges and keeps the closer hit. Returns the new start. */
-export function snapSpan(points: SnapPoint[], start: number, duration: number, thresholdFrames: number, exclude: readonly string[] = []): Snapped {
-  const a = snap(points, start, thresholdFrames, exclude);
-  const b = snap(points, start + duration, thresholdFrames, exclude);
-  if (!b.target || (a.target && Math.abs(a.frame - start) <= Math.abs(b.frame - start - duration))) return a;
-  return { frame: b.frame - duration, target: b.target };
+/** Snap a span being moved: tests both edges, plus `offsets` from its start (a moving audio item's own
+ * beats), and keeps the closest hit; ties go to the edges. Returns the new start. */
+export function snapSpan(points: SnapPoint[], start: number, duration: number, thresholdFrames: number, exclude: readonly string[] = [], offsets: readonly number[] = []): Snapped {
+  let best: Snapped = { frame: start, target: null };
+  let bestD = Infinity;
+  for (const off of [0, duration, ...offsets]) {
+    const r = snap(points, start + off, thresholdFrames, exclude);
+    const d = Math.abs(r.frame - start - off);
+    if (r.target && d < bestD) [best, bestD] = [{ frame: r.frame - off, target: r.target }, d];
+  }
+  return best;
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { durationFrames, formatFrame, itemSpan, rulerTicks, snap, snapPoints, snapSpan, type Item, type Project, type SnapPoint, type Track } from "@splicewright/core";
+import { beatFrames, durationFrames, formatFrame, itemSpan, rulerTicks, snap, snapPoints, snapSpan, type AudioItem, type Item, type Project, type SnapPoint, type Track } from "@splicewright/core";
 import { app, op, playhead, seek } from "./store.ts";
 
 // Spec §7.3 timeline and §15.1–15.2 ruler and snapping.
@@ -94,13 +94,17 @@ export function Timeline() {
     if (!drag) return;
     const d = frameAt(lanes.current!, e.clientX, ppf) - drag.grab;
     const s = app.get();
-    const points = s.snapping && !e.altKey ? snapPoints(p, [0, Infinity], { playhead: playhead.get().frame }) : [];
+    const id = drag.item.id;
+    const moving = drag.mode === "move";
+    // Own edges never count; own beats count for trims, and travel with the item on a move (§15.2).
+    const points = s.snapping && !e.altKey ? snapPoints(p, [0, Infinity], { playhead: playhead.get().frame }).filter((pt) => pt.ref !== id || (pt.kind === "beat" && !moving)) : [];
     const threshold = Math.max(1, SNAP_PX / ppf);
-    const ex = [drag.item.id];
+    const ex: string[] = [];
     const { start, duration } = drag.span;
     let next: Pick<Drag, "start" | "duration" | "guide" | "trackId">;
-    if (drag.mode === "move") {
-      const r = snapSpan(points, Math.max(0, start + d), duration, threshold, ex);
+    if (moving) {
+      const beats = drag.track.kind === "audio" ? beatFrames(p, drag.item as AudioItem).map((f) => f - drag.item.start) : [];
+      const r = snapSpan(points, Math.max(0, start + d), duration, threshold, ex, beats);
       // Another row of the same kind under the pointer?
       const row = (document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null)?.closest<HTMLElement>("[data-track]");
       const over = p.tracks.find((t) => t.id === row?.dataset.track);
@@ -134,7 +138,9 @@ export function Timeline() {
     let at = frameAt(lanes.current!, e.clientX, ppf);
     if (app.get().snapping && !e.altKey) at = snap(snapPoints(p, [0, Infinity], { playhead: playhead.get().frame }), at, Math.max(1, SNAP_PX / ppf)).frame;
     const kind = asset.kind === "audio" ? "audio" : "video";
-    await op("insertItem", { assetId, at, duration: await assetFrames(asset.path, asset.kind, fps), ...(track.kind === kind && { trackId: track.id }) });
+    // Probed assets let the core default the duration; otherwise read it from the media here.
+    const probed = asset.kind !== "image" && app.get().durations[assetId] !== undefined;
+    await op("insertItem", { assetId, at, ...(!probed && { duration: await assetFrames(asset.path, asset.kind, fps) }), ...(track.kind === kind && { trackId: track.id }) });
   }
 
   return (
@@ -193,6 +199,7 @@ export function Timeline() {
                     >
                       {"assetId" in item && t.kind === "video" && <Thumbs p={p} item={item} width={duration * ppf} viewLeft={view.left - start * ppf} viewWidth={view.width} />}
                       {"assetId" in item && t.kind === "audio" && <Wave assetId={item.assetId} sourceIn={item.sourceIn} fps={fps} ppf={ppf} duration={duration} />}
+                      {t.kind === "audio" && !(live && live.mode !== "move") && beatFrames(p, item as AudioItem).map((f) => <div key={f} className="beat" style={{ left: (f - item.start) * ppf }} />)}
                       <span className="name">{"text" in item ? item.text : "component" in item ? item.component : (item.label ?? p.assets[item.assetId]?.path)}</span>
                     </div>
                   );
@@ -207,6 +214,7 @@ export function Timeline() {
                 <span>{GUIDE[drag.guide.kind]}</span>
               </div>
             )}
+            <BeatGuides p={p} selection={selection} ppf={ppf} />
             <Playhead ppf={ppf} />
           </div>
         </div>
@@ -235,6 +243,12 @@ function TrackHeader({ t }: { t: Track }) {
       {flag("locked", "L")}
     </div>
   );
+}
+
+/** Faint full-height lines at the selected audio items' beats (§15.3). */
+function BeatGuides({ p, selection, ppf }: { p: Project; selection: string[]; ppf: number }) {
+  const frames = p.tracks.flatMap((t) => (t.kind === "audio" ? t.items.filter((i) => selection.includes(i.id)).flatMap((i) => beatFrames(p, i)) : []));
+  return frames.map((f) => <div key={f} className="beat-guide" style={{ left: f * ppf }} />);
 }
 
 /** Video thumbnails at whole source seconds, only across the visible part of the item. */
@@ -280,7 +294,7 @@ function Wave({ assetId, sourceIn, fps, ppf, duration }: { assetId: string; sour
   return <canvas ref={ref} className="wave" width={w} height={ROW - 8} style={{ width: duration * ppf }} />;
 }
 
-// ponytail: duration read by the browser from media metadata; switch to .splicewright/assets.json once M5 ingest writes it.
+/** Fallback for assets not yet probed by `splicewright ingest`. */
 async function assetFrames(path: string, kind: string, fps: number): Promise<number> {
   if (kind === "image") return 5 * fps;
   const el = document.createElement(kind === "audio" ? "audio" : "video");

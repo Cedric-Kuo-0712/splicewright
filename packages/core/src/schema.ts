@@ -56,6 +56,8 @@ export const AudioItem = z.object({
   fadeIn: Frames.min(0).optional(),
   fadeOut: Frames.min(0).optional(),
   duck: z.object({ under: z.array(Id), level: z.number().min(0).max(1) }).optional(),
+  /** Chosen beats in asset seconds, sorted (§15.3); mapped to frames on the fly like anchored captions. */
+  beats: z.array(Seconds.min(0)).optional(),
 });
 
 export const CaptionItem = z.discriminatedUnion("mode", [
@@ -128,4 +130,18 @@ export interface Ctx {
   assetDurations?: Record<string, number>;
   /** Transcript segments in asset time, from .splicewright/transcripts/. */
   transcript?: (assetId: string) => { start: number; end: number; text: string }[] | undefined;
+  /** Beat analysis in asset seconds, from .splicewright/beats/ (§15.3). */
+  beats?: (assetId: string) => BeatAnalysis | undefined;
+  /** Content fingerprints recorded by the last probe, by asset id. */
+  fingerprints?: Record<string, string>;
+  /** Live fingerprint of a project-relative file; undefined if it doesn't exist. */
+  fingerprint?: (path: string) => string | undefined;
+}
+
+export interface BeatAnalysis {
+  algo: string;
+  version: string;
+  tempo: number;
+  beats: { t: number; strength: number }[];
+  downbeats: number[];
 }

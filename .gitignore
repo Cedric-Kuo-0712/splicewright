@@ -1,1 +1,3 @@
 node_modules/
+ingest/.venv/
+__pycache__/

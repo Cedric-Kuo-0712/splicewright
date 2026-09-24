@@ -29,6 +29,8 @@ export interface State {
   duck: Record<string, Ranges>;
   /** Asset ids with an edit proxy in .splicewright/proxies/edit/. */
   proxies: string[];
+  /** Probed durations in seconds, from .splicewright/assets.json. */
+  durations: Record<string, number>;
   useProxies: boolean;
   selection: string[];
   snapping: boolean;
@@ -39,11 +41,11 @@ export interface State {
   rate: number;
 }
 
-export const app = store<State>({ project: null, duck: {}, proxies: [], useProxies: true, selection: [], snapping: true, pxPerFrame: 2, message: null, rate: 1 });
+export const app = store<State>({ project: null, duck: {}, proxies: [], durations: {}, useProxies: true, selection: [], snapping: true, pxPerFrame: 2, message: null, rate: 1 });
 export const playhead = store({ frame: 0 });
 
-type Snapshot = Pick<State, "project" | "duck" | "proxies">;
-const take = ({ project, duck, proxies }: Snapshot) => app.set({ project, duck, proxies });
+type Snapshot = Pick<State, "project" | "duck" | "proxies" | "durations">;
+const take = ({ project, duck, proxies, durations }: Snapshot) => app.set({ project, duck, proxies, durations });
 
 async function call(path: string, body?: unknown) {
   const res = await fetch(path, body === undefined ? undefined : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });

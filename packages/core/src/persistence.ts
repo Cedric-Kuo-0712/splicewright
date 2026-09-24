@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { apply, createProject, type OpResult } from "./ops.ts";
 import type { Ctx, Project } from "./schema.ts";
@@ -9,9 +10,9 @@ import { validate } from "./validate.ts";
 type Err = { error: { code: string; message: string } };
 interface HistoryEntry { op: string; args: unknown; project: Project }
 
-const cacheDir = (dir: string, ...parts: string[]) => join(dir, ".splicewright", ...parts);
+export const cacheDir = (dir: string, ...parts: string[]) => join(dir, ".splicewright", ...parts);
 
-function writeAtomic(file: string, data: unknown) {
+export function writeAtomic(file: string, data: unknown) {
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n");
   renameSync(tmp, file);
@@ -29,19 +30,58 @@ export function load(dir: string): Project {
   return JSON.parse(readFileSync(join(dir, "project.json"), "utf8"));
 }
 
-/** Adapter context: probed durations and transcripts from the ingest cache. */
+/** One entry of .splicewright/assets.json, keyed by asset id (§8 probe). */
+export interface Probe {
+  path: string;
+  fingerprint: string;
+  kind: "video" | "audio" | "image";
+  duration?: number;
+  width?: number;
+  height?: number;
+  fps?: number;
+  /** Display-matrix rotation as ffprobe reports it. */
+  rotation?: number;
+  audio?: boolean;
+}
+
+export function readAssets(dir: string): Record<string, Probe> {
+  const f = cacheDir(dir, "assets.json");
+  return existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : {};
+}
+
+/** size + mtime + first and last 64 KB, hashed (§3); undefined if the file is missing. */
+export function fingerprint(file: string): string | undefined {
+  if (!existsSync(file)) return undefined;
+  const { size, mtimeMs } = statSync(file);
+  const h = createHash("sha256").update(`${size}_${mtimeMs}`);
+  const buf = Buffer.alloc(Math.min(size, 65536));
+  const fd = openSync(file, "r");
+  try {
+    h.update(buf.subarray(0, readSync(fd, buf, 0, buf.length, 0)));
+    if (size > 65536) h.update(buf.subarray(0, readSync(fd, buf, 0, buf.length, size - buf.length)));
+  } finally {
+    closeSync(fd);
+  }
+  return h.digest("hex").slice(0, 16);
+}
+
+const readJson = (f: string) => (existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : undefined);
+
+/** Adapter context: probe results, transcripts and beats from the ingest cache. */
 export function loadCtx(dir: string): Ctx {
-  const assetsFile = cacheDir(dir, "assets.json");
-  // ponytail: cache file formats are provisional until the M5 ingest port defines them.
-  const probed: Record<string, { duration?: number }> = existsSync(assetsFile) ? JSON.parse(readFileSync(assetsFile, "utf8")) : {};
+  const probed = readAssets(dir);
   const assetDurations: Record<string, number> = {};
-  for (const [id, a] of Object.entries(probed)) if (typeof a.duration === "number") assetDurations[id] = a.duration;
+  const fingerprints: Record<string, string> = {};
+  for (const [id, a] of Object.entries(probed)) {
+    if (typeof a.duration === "number") assetDurations[id] = a.duration;
+    fingerprints[id] = a.fingerprint;
+  }
   return {
     assetDurations,
-    transcript: (assetId) => {
-      const f = cacheDir(dir, "transcripts", `${assetId}.json`);
-      return existsSync(f) ? JSON.parse(readFileSync(f, "utf8")).segments : undefined;
-    },
+    fingerprints,
+    fingerprint: (path) => fingerprint(join(dir, path)),
+    transcript: (assetId) => readJson(cacheDir(dir, "transcripts", `${assetId}.json`))?.segments,
+    beats: (assetId) => readJson(cacheDir(dir, "beats", `${assetId}.json`)),
   };
 }
 

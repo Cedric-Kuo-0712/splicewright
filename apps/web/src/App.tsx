@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
-import { anchorOf, durationFrames, formatFrame, itemSpan, snapPoints, type Item, type Project, type Track } from "@splicewright/core";
+import { anchorOf, beatFrames, durationFrames, formatFrame, itemSpan, snapPoints, type AudioItem, type Item, type Project, type Track } from "@splicewright/core";
 import { SplicewrightProject, type Props } from "@splicewright/render";
 import { app, history, op, player, playhead, seek } from "./store.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
@@ -47,7 +47,7 @@ function Toolbar({ p }: { p: Project }) {
       <button className={snapping ? "on" : ""} onClick={() => app.set({ snapping: !snapping })} title="Snapping (N); hold Alt to bypass">
         Snap
       </button>
-      <button className={useProxies && proxies.length ? "on" : ""} disabled={!proxies.length} onClick={() => app.set({ useProxies: !useProxies })} title={proxies.length ? "Use edit proxies" : "No edit proxies yet (M5 ingest)"}>
+      <button className={useProxies && proxies.length ? "on" : ""} disabled={!proxies.length} onClick={() => app.set({ useProxies: !useProxies })} title={proxies.length ? "Use edit proxies" : "No edit proxies yet; run splicewright ingest"}>
         Proxy
       </button>
       <button onClick={() => zoom(1 / 1.5)} title="-">−</button>
@@ -169,10 +169,52 @@ function Inspector({ p }: { p: Project }) {
         <>
           <Field label="fade in (f)" type="number" value={(item as { fadeIn?: number }).fadeIn} onCommit={(v) => set({ fadeIn: v })} />
           <Field label="fade out (f)" type="number" value={(item as { fadeOut?: number }).fadeOut} onCommit={(v) => set({ fadeOut: v })} />
+          <BeatFields p={p} item={item as AudioItem} />
         </>
       )}
       {t.kind === "video" && "assetId" in item && <VideoFields item={item as Item & { fit?: string; transform?: Record<string, number> }} set={set} />}
       {"component" in item && <PropsField value={item.props} onCommit={(props) => set({ props })} />}
+    </div>
+  );
+}
+
+/** §15.4: detect, clear, and fit a magnetic video track to this item's beats. B taps a beat at the playhead. */
+function BeatFields({ p, item }: { p: Project; item: AudioItem }) {
+  const [density, setDensity] = React.useState("all");
+  const [every, setEvery] = React.useState(1);
+  const targets = p.tracks.filter((t) => t.kind === "video" && t.magnetic);
+  const [trackId, setTrackId] = React.useState(targets[0]?.id ?? "");
+  const n = beatFrames(p, item).length;
+  return (
+    <div className="beats">
+      <p className="dim">
+        {n} beats visible · B taps one at the playhead
+      </p>
+      <label className="field">
+        <span>density</span>
+        <select value={density} onChange={(e) => setDensity(e.target.value)}>
+          {["all", "strong", "downbeat", "every:2", "every:4"].map((d) => <option key={d}>{d}</option>)}
+        </select>
+      </label>
+      <div className="buttons">
+        <button onClick={() => op("detectBeats", { itemId: item.id, density })}>Detect beats</button>
+        <button disabled={!item.beats?.length} onClick={() => op("clearBeats", { itemId: item.id })}>Clear</button>
+      </div>
+      <label className="field">
+        <span>fit track</span>
+        <select value={trackId} onChange={(e) => setTrackId(e.target.value)}>
+          {targets.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+        </select>
+      </label>
+      <label className="field">
+        <span>every N beats</span>
+        <input type="number" min={1} value={every} onChange={(e) => setEvery(Math.max(1, Number(e.target.value) || 1))} />
+      </label>
+      <div className="buttons">
+        <button disabled={!n || !trackId} onClick={() => op("fitToBeats", { trackId, audioItemId: item.id, every })} title="Beat sync (卡點): one undo step">
+          Fit to beats
+        </button>
+      </div>
     </div>
   );
 }
@@ -268,6 +310,7 @@ function onKey(e: KeyboardEvent) {
     handled();
     return op("delete", { itemIds: s.selection, ...(e.shiftKey && { ripple: true }) }).then((ok) => ok && app.set({ selection: [] }));
   }
+  if (!mod && key === "b") return handled(), tapBeat(p, s.selection, frame);
   if (!mod && key === "n") return app.set({ snapping: !s.snapping, message: { text: `snapping ${s.snapping ? "off" : "on"}` } });
   if (!mod && (e.key === "," || e.key === "." || e.key === "<" || e.key === ">")) return handled(), nudge(p, s.selection, (e.key === "," || e.key === "<" ? -1 : 1) * (e.shiftKey ? 10 : 1));
   if (!mod && (e.key === "+" || e.key === "=")) return zoom(1.5);
@@ -288,6 +331,14 @@ function split(p: Project, selection: string[], frame: number) {
   if (!ids.length) return app.set({ message: { text: "nothing to split under the playhead", error: true } });
   const ops = ids.map((i) => ({ op: "split", args: { itemId: i.id, at: frame } }));
   return ops.length === 1 ? op("split", ops[0].args) : op("batch", { ops });
+}
+
+/** Tap-along (§15.4): a beat at the playhead on the selected audio item, else the audio item under the playhead. */
+function tapBeat(p: Project, selection: string[], frame: number) {
+  const items = p.tracks.flatMap((t) => (t.kind === "audio" ? t.items : [])).filter((i) => frame >= i.start && frame < i.start + i.duration);
+  const target = items.find((i) => selection.includes(i.id)) ?? items[0];
+  if (!target) return app.set({ message: { text: "no audio item under the playhead", error: true } });
+  return op("addBeat", { itemId: target.id, at: frame });
 }
 
 /** Keyboard nudge: ignores snapping (§15.2). */

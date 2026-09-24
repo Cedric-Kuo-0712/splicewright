@@ -9,6 +9,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "*",
     "@splicewright/core": "*",
+    "@splicewright/ingest": "*",
     "@splicewright/render": "*",
     "zod": "*"
   }

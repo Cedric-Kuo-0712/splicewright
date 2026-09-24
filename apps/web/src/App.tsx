@@ -42,6 +42,7 @@ function Toolbar({ p }: { p: Project }) {
       </span>
       <Timecode fps={p.meta.fps} />
       <span className="spacer" />
+      <button onClick={() => split(p, app.get().selection, playhead.get().frame)} title="Split selection at the playhead; all items under it if nothing is selected (S / Cmd+B)">Split</button>
       <button onClick={() => history("undo")} title="Cmd+Z">Undo</button>
       <button onClick={() => history("redo")} title="Cmd+Shift+Z">Redo</button>
       <button className={snapping ? "on" : ""} onClick={() => app.set({ snapping: !snapping })} title="Snapping (N); hold Alt to bypass">
@@ -318,14 +319,15 @@ function onKey(e: KeyboardEvent) {
   if (!mod && e.shiftKey && key === "z") return app.set({ pxPerFrame: fitZoom(p) });
 }
 
-/** Split the selection at the playhead, or every unlocked item under it when nothing is selected. */
+/** Split the selection at the playhead, or every unlocked item under it when nothing is selected
+ *  (anchored items are left out then; they follow the half they start in). */
 function split(p: Project, selection: string[], frame: number) {
   const ids = p.tracks.flatMap((t) =>
     t.locked
       ? []
       : t.items.filter((i) => {
           const span = itemSpan(p, i);
-          return span && frame > span.start && frame < span.start + span.duration && (!selection.length || selection.includes(i.id));
+          return span && frame > span.start && frame < span.start + span.duration && (selection.length ? selection.includes(i.id) : !anchorOf(i));
         }),
   );
   if (!ids.length) return app.set({ message: { text: "nothing to split under the playhead", error: true } });

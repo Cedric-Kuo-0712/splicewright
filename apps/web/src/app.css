@@ -57,6 +57,7 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .wave { position: absolute; left: 0; top: 2px; height: calc(100% - 4px); pointer-events: none; }
 .origin { position: absolute; top: 0; bottom: 0; pointer-events: none; }
 .playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: #ff4d4f; z-index: 7; }
+.playhead-head { position: absolute; bottom: 0; width: 11px; height: 12px; margin-left: -5px; background: #ff4d4f; clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%); z-index: 2; pointer-events: none; }
 .guide { position: absolute; top: 0; bottom: 0; width: 1px; background: #fcc419; z-index: 8; }
 .guide span { position: absolute; top: 2px; left: 4px; background: #fcc419; color: #000; font-size: 10px; padding: 0 4px; border-radius: 2px; white-space: nowrap; }
 .item .beat { position: absolute; top: 0; width: 1px; height: 7px; background: #ffd43b; pointer-events: none; }

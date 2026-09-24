@@ -29,6 +29,17 @@ interface Drag {
 /** Frame under a client x, given the lanes element (which scrolls with the content). */
 const frameAt = (lanes: HTMLElement, clientX: number, ppf: number) => Math.max(0, Math.round((clientX - lanes.getBoundingClientRect().left) / ppf));
 
+/** Seeks to the pointer and follows it while the button is held. `lanes` is any element whose left edge is frame 0. */
+function scrub(e: React.PointerEvent<HTMLElement>, lanes: HTMLElement, ppf: number) {
+  if (e.button !== 0) return;
+  e.stopPropagation();
+  const el = e.currentTarget;
+  const at = (ev: { clientX: number }) => seek(frameAt(lanes, ev.clientX, ppf));
+  at(e);
+  el.setPointerCapture(e.pointerId);
+  el.onpointermove = (ev) => ev.buttons && at(ev);
+}
+
 export function Timeline() {
   const p = app.use((s) => s.project)!;
   const ppf = app.use((s) => s.pxPerFrame);
@@ -151,14 +162,9 @@ export function Timeline() {
           <div
             className="lane"
             style={{ width }}
-            onPointerDown={(e) => {
-              const lane = e.currentTarget;
-              const at = (ev: { clientX: number }) => seek(frameAt(lane, ev.clientX, ppf));
-              at(e);
-              lane.setPointerCapture(e.pointerId);
-              lane.onpointermove = (ev) => ev.buttons && at(ev);
-            }}
+            onPointerDown={(e) => scrub(e, e.currentTarget, ppf)}
           >
+            <PlayheadHead ppf={ppf} />
             {ticks.minor.map((f) => <div key={f} className="tick minor" style={{ left: f * ppf }} />)}
             {ticks.labels.map((l) => (
               <div key={l.frame} className="tick major" style={{ left: l.frame * ppf }}>
@@ -180,7 +186,7 @@ export function Timeline() {
                 data-track={t.id}
                 className={`lane ${t.kind} ${drag && drag.trackId === t.id && drag.trackId !== drag.track.id ? "target" : ""}`}
                 style={{ width }}
-                onPointerDown={() => app.set({ selection: [] })}
+                onPointerDown={(e) => (app.set({ selection: [] }), scrub(e, e.currentTarget, ppf))}
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => drop(e, t)}
               >
@@ -227,6 +233,12 @@ export function Timeline() {
 function Playhead({ ppf }: { ppf: number }) {
   const frame = playhead.use((s) => s.frame);
   return <div className="playhead" style={{ left: frame * ppf }} />;
+}
+
+/** Grab handle in the ruler; the ruler itself does the scrubbing. */
+function PlayheadHead({ ppf }: { ppf: number }) {
+  const frame = playhead.use((s) => s.frame);
+  return <div className="playhead-head" style={{ left: frame * ppf }} />;
 }
 
 function TrackHeader({ t }: { t: Track }) {

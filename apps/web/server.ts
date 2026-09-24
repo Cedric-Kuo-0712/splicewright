@@ -5,7 +5,7 @@ import { basename, dirname, extname, join, relative, resolve, sep } from "node:p
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { createServer, type Plugin } from "vite";
-import { fingerprint, historyList, load, loadCtx, readAssets, redo, run, undo } from "@splicewright/core/node";
+import { fingerprint, historyList, load, loadCtx, readAssets, redo, run, sizesOf, undo } from "@splicewright/core/node";
 import { sourceAt } from "@splicewright/core";
 import { ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
 import { duckRanges } from "@splicewright/render/node";
@@ -86,8 +86,9 @@ function api(dir: string): Plugin {
   const snapshot = () => {
     const project = load(dir);
     const proxies = Object.keys(project.assets).filter((id) => existsSync(join(dir, ".splicewright", "proxies", "edit", `${id}.mp4`)));
-    const durations = Object.fromEntries(Object.entries(readAssets(dir)).flatMap(([id, a]) => (a.duration ? [[id, a.duration]] : [])));
-    return { project, duck: duckRanges(project, loadCtx(dir)), proxies, durations };
+    const probes = readAssets(dir);
+    const durations = Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.duration ? [[id, a.duration]] : [])));
+    return { project, duck: duckRanges(project, loadCtx(dir)), proxies, durations, sizes: sizesOf(probes) };
   };
   const result = (res: ServerResponse, r: ReturnType<typeof run>) =>
     "error" in r ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, { revision: r.project.revision, summary: r.changes.summary, ...snapshot() });

@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
-import { anchorOf, beatFrames, durationFrames, formatFrame, itemSpan, snapPoints, type AudioItem, type Item, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
-import { SplicewrightProject, type Props } from "@splicewright/render";
-import { addMarker, copy, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, tapBeat, upload, videoUnder } from "./edit.ts";
+import { anchorOf, animate, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, withKey, type Animatable, type AudioItem, type Item, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
+import { mediaBox, SplicewrightProject, type Props } from "@splicewright/render";
+import { addMarker, copy, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, tapBeat, upload, videoUnder } from "./edit.ts";
 import { app, dnd, history, ioRange, op, player, playhead, say, seek } from "./store.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 
@@ -141,6 +141,7 @@ function Preview({ p }: { p: Project }) {
   const slip = app.use((s) => s.slip);
   const looping = app.use((s) => s.looping);
   const live = app.use((s) => s.live);
+  const sizes = app.use((s) => s.sizes);
   const shown = useMemo(() => {
     let out = p;
     if (useProxies && proxies.length) {
@@ -150,7 +151,7 @@ function Preview({ p }: { p: Project }) {
     }
     // A slip drag previews its new source range before the op commits.
     if (slip) out = { ...out, tracks: out.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === slip.itemId ? { ...i, sourceIn: slip.sourceIn } : i)) })) as Project["tracks"] };
-    if (live) out = { ...out, tracks: out.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === live.itemId ? { ...i, transform: live.transform } : i)) })) as Project["tracks"] };
+    if (live) out = { ...out, tracks: out.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === live.itemId ? { ...i, ...live.patch } : i)) })) as Project["tracks"] };
     return out;
   }, [p, proxies, useProxies, slip, live]);
   const total = Math.max(1, durationFrames(p));
@@ -166,7 +167,7 @@ function Preview({ p }: { p: Project }) {
       <Player
         ref={ref}
         component={Composition}
-        inputProps={{ project: shown, duck }}
+        inputProps={{ project: shown, duck, sizes }}
         durationInFrames={total}
         inFrame={range?.[0]}
         outFrame={range ? Math.min(total - 1, range[1] - 1) : undefined}
@@ -194,14 +195,25 @@ const cleanTf = ({ x, y, scale, rotation, opacity }: Tf): Tf | null => {
   return Object.keys(out).length ? out : null;
 };
 
+type Crop = NonNullable<VideoItem["crop"]>;
+const SIDES = ["top", "right", "bottom", "left"] as const;
+
+/** Drop zero sides, so an uncropped picture unsets the field. */
+const cleanCrop = (c: Crop): Crop | null => {
+  const out = Object.fromEntries(SIDES.flatMap((k) => (c[k] ? [[k, c[k]]] : [])));
+  return Object.keys(out).length ? out : null;
+};
+
 /**
  * Move, scale and rotate the selected video item on the preview: drag the box, a corner, or the top knob.
  * Snaps to the frame centre (Alt bypasses), Shift snaps rotation to 15°, double-click resets.
- * ponytail: the box is the item's full frame, not its fitted content; exact for cover, loose for letterboxed contain.
+ * In crop mode (Shift+C) the box's edges crop the picture instead; double-click uncrops.
  */
 function TransformBox({ p }: { p: Project }) {
   const selection = app.use((s) => s.selection);
   const live = app.use((s) => s.live);
+  const sizes = app.use((s) => s.sizes);
+  const cropping = app.use((s) => s.cropping);
   const frame = playhead.use((s) => s.frame);
   const box = React.useRef<HTMLDivElement>(null);
   const [size, setSize] = React.useState<[number, number] | null>(null);
@@ -217,13 +229,52 @@ function TransformBox({ p }: { p: Project }) {
   const visible = !!(item && span && size && frame >= span.start && frame < span.start + span.duration);
   const { width: cw, height: ch } = p.meta;
   const k = size ? Math.min(size[0] / cw, size[1] / ch) : 1;
-  const tf: Tf = (live?.itemId === item?.id && live?.transform) || item?.transform || {};
+  const shown = item && live?.itemId === item.id ? { ...item, ...live.patch } : item;
+  const tf: Tf = (shown && animate(p, shown, frame).transform) || {};
+  const crop: Crop = shown?.crop ?? {};
   const { x = 0, y = 0, scale = 1, rotation = 0 } = tf;
+  // The picture as displayed, at scale 1, in composition px.
+  const [dw, dh] = shown ? mediaBox(p, shown, sizes[shown.assetId]).display : [cw, ch];
   // Screen position of the composition's top-left and of the item's centre.
   const ox = size ? (size[0] - cw * k) / 2 : 0;
   const oy = size ? (size[1] - ch * k) / 2 : 0;
   const cx = ox + (cw / 2 + x) * k;
   const cy = oy + (ch / 2 + y) * k;
+
+  const grabEdge = (e: React.PointerEvent<HTMLElement>, side: (typeof SIDES)[number]) => {
+    if (e.button !== 0 || !item) return;
+    e.stopPropagation();
+    const el = e.currentTarget;
+    const start = { ...crop };
+    const [a, b] = [Math.cos((rotation * Math.PI) / 180), Math.sin((rotation * Math.PI) / 180)];
+    let next: Crop | undefined;
+    el.setPointerCapture(e.pointerId);
+    el.onpointermove = (ev) => {
+      if (!ev.buttons) return;
+      // Pointer travel along the box's own axes, as a fraction of the picture.
+      const [dx, dy] = [ev.clientX - e.clientX, ev.clientY - e.clientY];
+      const u = (dx * a + dy * b) / (dw * scale * k);
+      const v = (-dx * b + dy * a) / (dh * scale * k);
+      const d = { top: v, bottom: -v, left: u, right: -u }[side];
+      const other = start[SIDES[(SIDES.indexOf(side) + 2) % 4]] ?? 0;
+      next = { ...start, [side]: +Math.min(0.95 - other, Math.max(0, (start[side] ?? 0) + d)).toFixed(3) };
+      app.set({ live: { itemId: item.id, patch: { crop: next } } });
+    };
+    el.onpointerup = () => {
+      el.onpointermove = el.onpointerup = null;
+      if (!next) return app.set({ live: null });
+      op("setProps", { itemId: item.id, patch: { crop: cleanCrop(next) } }).finally(() => app.set({ live: null }));
+    };
+  };
+
+  // Keyed props take a key at the playhead; the rest change the plain transform. One setProps either way.
+  const patchFor = (next: Tf) => {
+    let kf = item!.keyframes;
+    const plain: Tf = { ...item!.transform };
+    for (const k of ["x", "y", "scale", "rotation"] as const)
+      if (next[k] !== tf[k]) kf?.[k] ? (kf = withKey(p, { ...item!, keyframes: kf }, k, frame, next[k]!)) : (plain[k] = next[k]);
+    return { transform: cleanTf(plain), keyframes: kf ?? null };
+  };
 
   const grab = (e: React.PointerEvent<HTMLElement>, mode: "move" | "scale" | "rotate") => {
     if (e.button !== 0 || !item) return;
@@ -253,12 +304,12 @@ function TransformBox({ p }: { p: Project }) {
         deg = ((deg + 540) % 360) - 180;
         next = { ...tf, rotation: ev.shiftKey ? Math.round(deg / 15) * 15 : +deg.toFixed(1) };
       }
-      app.set({ live: { itemId: item.id, transform: next } });
+      app.set({ live: { itemId: item.id, patch: patchFor(next) as Partial<VideoItem> } });
     };
     el.onpointerup = () => {
       el.onpointermove = el.onpointerup = null;
       if (!next) return app.set({ live: null });
-      op("setProps", { itemId: item.id, patch: { transform: cleanTf(next) } }).then(() => app.set({ live: null }));
+      op("setProps", { itemId: item.id, patch: patchFor(next) }).finally(() => app.set({ live: null }));
     };
   };
 
@@ -266,15 +317,31 @@ function TransformBox({ p }: { p: Project }) {
     <div ref={box} className="stage">
       {visible && (
         <div
-          className="tf-box"
-          style={{ left: cx, top: cy, width: cw * scale * k, height: ch * scale * k, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
+          className={`tf-box ${cropping ? "cropping" : ""}`}
+          style={{ left: cx, top: cy, width: dw * scale * k, height: dh * scale * k, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
           onPointerDown={(e) => grab(e, "move")}
-          onDoubleClick={() => op("setProps", { itemId: item!.id, patch: { transform: cleanTf({ opacity: tf.opacity }) } })}
-          title={`${item!.id}: drag to move, corners scale, top knob rotates (Shift: 15°), double-click resets`}
+          onDoubleClick={() => op("setProps", { itemId: item!.id, patch: cropping ? { crop: null } : { transform: cleanTf({ opacity: tf.opacity }) } })}
+          title={
+            cropping
+              ? `${item!.id}: drag an edge to crop, double-click uncrops, Shift+C leaves crop mode`
+              : `${item!.id}: drag to move, corners scale, top knob rotates (Shift: 15°), double-click resets, Shift+C crops`
+          }
         >
-          {["nw", "ne", "sw", "se"].map((c) => <div key={c} className={`tf-h ${c}`} onPointerDown={(e) => grab(e, "scale")} />)}
-          <div className="tf-rot" onPointerDown={(e) => grab(e, "rotate")} />
-          <span className="tf-label">{`${Math.round(x)}, ${Math.round(y)} · ${Math.round(scale * 100)}%${rotation ? ` · ${rotation}°` : ""}`}</span>
+          {cropping ? (
+            <div className="crop-rect" style={{ inset: SIDES.map((s) => `${(crop[s] ?? 0) * 100}%`).join(" ") }}>
+              {SIDES.map((s) => <div key={s} className={`crop-h ${s}`} onPointerDown={(e) => grabEdge(e, s)} />)}
+            </div>
+          ) : (
+            <>
+              {["nw", "ne", "sw", "se"].map((c) => <div key={c} className={`tf-h ${c}`} onPointerDown={(e) => grab(e, "scale")} />)}
+              <div className="tf-rot" onPointerDown={(e) => grab(e, "rotate")} />
+            </>
+          )}
+          <span className="tf-label">
+            {cropping
+              ? SIDES.map((s) => `${Math.round((crop[s] ?? 0) * 100)}`).join(" / ") + " % crop"
+              : `${Math.round(x)}, ${Math.round(y)} · ${Math.round(scale * 100)}%${rotation ? ` · ${rotation}°` : ""}`}
+          </span>
         </div>
       )}
     </div>
@@ -344,13 +411,18 @@ function MediaBin({ p }: { p: Project }) {
 /** Text or number input that commits on Enter or blur; empty clears the field. */
 const TRANSITIONS = ["dissolve", "dip", "wipe"] as const;
 
-function Field({ label, value, onCommit, type = "text" }: { label: string; value: unknown; onCommit: (v: string | number | null) => void; type?: "text" | "number" }) {
+function Field({ label, value, onCommit, type = "text", mark }: { label: string; value: unknown; onCommit: (v: string | number | null) => void; type?: "text" | "number"; mark?: React.ReactNode }) {
   const initial = value === undefined || value === null ? "" : String(value);
   const commit = (raw: string) => raw !== initial && onCommit(raw === "" ? null : type === "number" ? Number(raw) : raw);
+  const id = React.useId();
   return (
-    <label className="field">
-      <span>{label}</span>
+    <label className="field" htmlFor={id}>
+      <span>
+        {label}
+        {mark}
+      </span>
       <input
+        id={id}
         key={initial}
         type={type}
         step="any"
@@ -364,6 +436,7 @@ function Field({ label, value, onCommit, type = "text" }: { label: string; value
 
 function Inspector({ p }: { p: Project }) {
   const selection = app.use((s) => s.selection);
+  const live = app.use((s) => s.live);
   const found = selection.length === 1 ? findItem(p, selection[0]) : null;
   if (!found) return <div className="inspector dim">{selection.length ? `${selection.length} items selected` : "Select an item"}</div>;
   const { track: t, item } = found;
@@ -396,7 +469,7 @@ function Inspector({ p }: { p: Project }) {
           <Field label="note" value={item.note} onCommit={(v) => set({ note: v })} />
         </>
       )}
-      {"sourceIn" in item && <Field label="volume" type="number" value={item.volume} onCommit={(v) => set({ volume: v })} />}
+      {"sourceIn" in item && t.kind !== "video" && <Field label="volume" type="number" value={item.volume} onCommit={(v) => set({ volume: v })} />}
       {"sourceIn" in item && (
         <>
           <Field label="fade in (f)" type="number" value={item.fadeIn} onCommit={(v) => set({ fadeIn: v })} />
@@ -404,7 +477,7 @@ function Inspector({ p }: { p: Project }) {
         </>
       )}
       {t.kind === "audio" && <BeatFields p={p} item={item as AudioItem} />}
-      {t.kind === "video" && "assetId" in item && <VideoFields item={item as VideoItem} fps={fps} still={p.assets[item.assetId]?.kind === "image"} set={set} />}
+      {t.kind === "video" && "assetId" in item && <VideoFields p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as VideoItem} fps={fps} still={p.assets[item.assetId]?.kind === "image"} set={set} />}
       {"component" in item && <PropsField value={item.props} onCommit={(props) => set({ props })} />}
     </div>
   );
@@ -453,9 +526,16 @@ function BeatFields({ p, item }: { p: Project; item: AudioItem }) {
   );
 }
 
-function VideoFields({ item, fps, still, set }: { item: VideoItem; fps: number; still: boolean; set: (patch: Record<string, unknown>) => void }) {
+function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem; fps: number; still: boolean; set: (patch: Record<string, unknown>) => void }) {
+  const cropping = app.use((s) => s.cropping);
+  const frame = playhead.use((s) => s.frame);
   const tf: Record<string, number> = item.transform ?? {};
   const tr = item.transition;
+  // Values at the playhead; a prop with keys edits its key there instead of its plain value.
+  const now = animate(p, item, frame);
+  const keyed = (k: Animatable) => !!item.keyframes?.[k];
+  const mark = (k: Animatable, v: number) => <KeyButton p={p} item={item} prop={k} frame={frame} value={v} />;
+  const keyPatch = (k: Animatable, v: number) => ({ keyframes: withKey(p, item, k, frame, v) ?? null });
   const setTf = (k: string, v: string | number | null) => {
     const next = { ...tf, [k]: v ?? undefined };
     if (v === null) delete next[k];
@@ -470,9 +550,21 @@ function VideoFields({ item, fps, still, set }: { item: VideoItem; fps: number; 
           <option value="cover">cover</option>
         </select>
       </label>
-      {["x", "y", "scale", "rotation", "opacity"].map((k) => (
-        <Field key={k} label={k} type="number" value={tf[k]} onCommit={(v) => setTf(k, v)} />
-      ))}
+      <Slider itemId={item.id} label="volume" min={0} max={2} step={0.01} zero={1} value={now.volume ?? 1} mark={mark("volume", now.volume ?? 1)} patch={(v) => (keyed("volume") ? keyPatch("volume", v) : { volume: v === 1 ? null : v })} />
+      {(["x", "y", "scale", "rotation", "opacity"] as const).map((k) => {
+        const v = (now.transform as Record<string, number> | undefined)?.[k];
+        const dflt = k === "scale" || k === "opacity" ? 1 : 0;
+        return (
+          <Field
+            key={k}
+            label={k}
+            type="number"
+            value={v === undefined ? v : +v.toFixed(3)}
+            mark={mark(k, v ?? dflt)}
+            onCommit={(n) => (keyed(k) ? n !== null && op("setKeyframe", { itemId: item.id, prop: k, at: frame, value: Number(n) }) : setTf(k, n))}
+          />
+        );
+      })}
       {!still && <Field label="speed (×)" type="number" value={item.speed ?? 1} onCommit={(v) => Number(v) > 0 && op("setSpeed", { itemId: item.id, speed: Number(v) })} />}
       <label className="field">
         <span>transition out</span>
@@ -482,7 +574,97 @@ function VideoFields({ item, fps, still, set }: { item: VideoItem; fps: number; 
         </select>
       </label>
       {tr && <Field label="transition (f)" type="number" value={tr.duration} onCommit={(v) => Number(v) >= 2 && set({ transition: { ...tr, duration: Math.round(Number(v)) } })} />}
+      <h4>
+        effects
+        <button onClick={(e) => openMenu(e, lookEntries(item))}>Look ▾</button>
+      </h4>
+      {EFFECTS.map(([k, min, max, step, zero]) => (
+        <Slider
+          key={k}
+          itemId={item.id}
+          label={k}
+          min={min}
+          max={max}
+          step={step}
+          zero={zero}
+          value={now.effects?.[k] ?? zero}
+          mark={mark(k, now.effects?.[k] ?? zero)}
+          patch={(v) => (keyed(k) ? keyPatch(k, v) : { effects: prune({ ...item.effects, [k]: v }, EFFECT_ZERO) })}
+        />
+      ))}
+      <h4>
+        crop
+        <button className={cropping ? "on" : ""} onClick={() => app.set({ cropping: !cropping })} title="crop handles on the preview (Shift+C)">
+          on preview
+        </button>
+      </h4>
+      {(["top", "right", "bottom", "left"] as const).map((k) => (
+        <Slider key={k} itemId={item.id} label={k} min={0} max={0.9} step={0.005} zero={0} value={item.crop?.[k] ?? 0} patch={(v) => ({ crop: prune({ ...item.crop, [k]: v }, {}) })} />
+      ))}
     </>
+  );
+}
+
+/** ◆ when a key sits on the playhead (click removes it), ◇ otherwise (click keys `value` there); lit once the prop has keys. */
+function KeyButton({ p, item, prop, frame, value }: { p: Project; item: VideoItem; prop: Animatable; frame: number; value: number }) {
+  const on = !!keyAt(p, item, prop, frame);
+  const inside = frame >= item.start && frame < item.start + item.duration;
+  return (
+    <button
+      className={`kf-btn ${item.keyframes?.[prop] ? "keyed" : ""}`}
+      disabled={!inside}
+      title={inside ? (on ? `remove the ${prop} key here` : `key ${prop} here`) : "move the playhead into the item to key it"}
+      onClick={() => op("setKeyframe", { itemId: item.id, prop, at: frame, value: on ? null : +value.toFixed(4) })}
+    >
+      {on ? "◆" : "◇"}
+    </button>
+  );
+}
+
+/** name, min, max, step, neutral */
+const EFFECTS = [
+  ["brightness", 0, 2, 0.01, 1],
+  ["contrast", 0, 2, 0.01, 1],
+  ["saturation", 0, 3, 0.01, 1],
+  ["hue", -180, 180, 1, 0],
+  ["blur", 0, 40, 0.5, 0],
+  ["grayscale", 0, 1, 0.01, 0],
+  ["sepia", 0, 1, 0.01, 0],
+  ["invert", 0, 1, 0.01, 0],
+] as const;
+const EFFECT_ZERO: Record<string, number> = Object.fromEntries(EFFECTS.map(([k, , , , z]) => [k, z]));
+
+/** Drop neutral values (`zero[k]`, else 0), so a fully reset group unsets the field. */
+const prune = (o: Record<string, number | undefined>, zero: Record<string, number>) => {
+  const out = Object.fromEntries(Object.entries(o).filter(([k, v]) => v !== undefined && v !== (zero[k] ?? 0)));
+  return Object.keys(out).length ? out : null;
+};
+
+/** Range slider: the preview follows the drag through `live`, release commits one setProps (one undo step); double-click resets. */
+function Slider({ itemId, label, min, max, step, zero, value, patch, mark }: { itemId: string; label: string; min: number; max: number; step: number; zero: number; value: number; patch: (v: number) => Partial<VideoItem> | Record<string, unknown>; mark?: React.ReactNode }) {
+  const commit = (v: number) => op("setProps", { itemId, patch: patch(v) }).finally(() => app.set({ live: null }));
+  const release = (v: number) => app.get().live?.itemId === itemId && commit(v);
+  const id = React.useId();
+  return (
+    <label className="field slider" htmlFor={id} title="drag; arrow keys step; double-click resets">
+      <span>
+        {label}
+        {mark}
+      </span>
+      <input
+        id={id}
+        onDoubleClick={() => value !== zero && commit(zero)}
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => app.set({ live: { itemId, patch: patch(+e.currentTarget.value) as Partial<VideoItem> } })}
+        onPointerUp={(e) => release(+e.currentTarget.value)}
+        onKeyUp={(e) => release(+e.currentTarget.value)}
+      />
+      <output>{+value.toFixed(3)}</output>
+    </label>
   );
 }
 
@@ -555,6 +737,7 @@ function onKey(e: KeyboardEvent) {
   if (mod && key === "a") return handled(), selectItems(itemsAfter(p, p.tracks));
   if (!mod && e.shiftKey && key === "m") return markerAroundSelection();
   if (!mod && e.shiftKey && key === "f") return freezeFrame(frame);
+  if (!mod && e.shiftKey && key === "c") return app.set({ cropping: !s.cropping });
   if (mod && key === "z") return handled(), history(e.shiftKey ? "redo" : "undo");
   if (mod && key === "c") return s.selection.length ? (handled(), copy()) : undefined;
   if (mod && key === "v") return handled(), paste(frame, e.shiftKey);
@@ -565,7 +748,7 @@ function onKey(e: KeyboardEvent) {
     handled();
     return rippleDelete(e.shiftKey);
   }
-  if (key === "escape") return app.set({ selection: [], gap: null });
+  if (key === "escape") return app.set({ selection: [], gap: null, cropping: false });
   // Alt letters: match the physical key, since macOS turns Alt+X into "≈".
   if (e.altKey && e.code === "KeyX") return handled(), app.set({ io: { in: null, out: null } });
   if (e.altKey && e.code === "KeyM") {

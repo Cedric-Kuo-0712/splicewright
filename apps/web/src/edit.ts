@@ -123,7 +123,7 @@ function edgeNear(t: Track, f: number) {
 
 // Fields insertItem doesn't take; setProps copies them.
 // ponytail: beats, downbeats and duck aren't copied; add a pasteItems op if pasted songs need them.
-const EXTRA = ["volume", "fit", "transform", "fadeIn", "fadeOut", "speed", "transition", "label", "note"];
+const EXTRA = ["volume", "fit", "transform", "effects", "crop", "keyframes", "fadeIn", "fadeOut", "speed", "transition", "label", "note"];
 
 /**
  * Paste clips with their relative timing at `at`. Each lands on its own track if it still exists and is
@@ -350,6 +350,23 @@ function transitionEntries(p: Project, t: Track, item: VideoItem): MenuEntry[] {
     ...(cur ? [{ label: "Remove transition", run: () => set(null), disabled: t.locked }] : []),
   ];
 }
+
+/** Look presets: each replaces the item's effects. */
+export const LOOKS: Record<string, VideoItem["effects"]> = {
+  "B&W": { grayscale: 1, contrast: 1.1 },
+  Noir: { grayscale: 1, contrast: 1.4, brightness: 0.9 },
+  Warm: { sepia: 0.25, saturation: 1.15, hue: -8 },
+  Cool: { hue: 12, saturation: 0.9, brightness: 1.03 },
+  Vintage: { sepia: 0.45, contrast: 0.9, saturation: 0.8, brightness: 1.05 },
+  Vivid: { saturation: 1.4, contrast: 1.15 },
+  Faded: { contrast: 0.8, saturation: 0.7, brightness: 1.1 },
+};
+
+export const lookEntries = (item: VideoItem): MenuEntry[] => [
+  ...Object.entries(LOOKS).map(([label, effects]) => ({ label, run: () => op("setProps", { itemId: item.id, patch: { effects } }) })),
+  "-",
+  { label: "Reset effects", run: () => op("setProps", { itemId: item.id, patch: { effects: null } }), disabled: !item.effects },
+];
 
 // ---- selection ----
 

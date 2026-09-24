@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { apply, createProject, itemSpan, validate, type Ctx, type OpResult, type Project } from "../src/index.ts";
+import { animate, apply, createProject, itemSpan, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
 
 const ctx: Ctx = {
   assetDurations: { a_clip: 10, a_song: 60 },
@@ -228,6 +228,33 @@ describe("ops", () => {
     expect(item(ok(apply(p, "setSpeed", { itemId: "i_1", speed: 1 }, ctx)), "i_1").speed).toBeUndefined();
     // setProps speed keeps the duration, so i_2 would read 5 s + 60f × 4 / 30 = 13 s of a 10 s clip.
     expect(err(apply(fixture(), "setProps", { itemId: "i_2", patch: { speed: 4 } }, ctx))).toBe("invalid");
+  });
+
+  it("effects and crop patch like any prop; a crop that hides the picture is rejected", () => {
+    const p = ok(apply(fixture(), "setProps", { itemId: "i_1", patch: { effects: { grayscale: 1 }, crop: { left: 0.2, right: 0.3 } } }, ctx));
+    expect(item(p, "i_1")).toMatchObject({ effects: { grayscale: 1 }, crop: { left: 0.2, right: 0.3 } });
+    expect(err(apply(p, "setProps", { itemId: "i_1", patch: { crop: { left: 0.6, right: 0.5 } } }, ctx))).toBe("invalid");
+  });
+
+  it("keyframes interpolate in source time, so split and speed keep them on the same content", () => {
+    let p = ok(apply(fixture(), "setKeyframe", { itemId: "i_1", prop: "opacity", at: 0, value: 0 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 30, value: 1 }, ctx));
+    const v = () => item(p, "i_1");
+    expect(valueAt(p, v(), "opacity", 15)).toBeCloseTo(0.5);
+    expect(valueAt(p, v(), "opacity", 60)).toBe(1); // held past the last key
+    expect(animate(p, v(), 15).transform?.opacity).toBeCloseTo(0.5);
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 30, value: 0.8 }, ctx)); // same frame replaces
+    expect(v().keyframes.opacity).toHaveLength(2);
+    const fast = ok(apply(p, "setSpeed", { itemId: "i_1", speed: 2 }, ctx));
+    expect(valueAt(fast, item(fast, "i_1"), "opacity", 15)).toBeCloseTo(0.8); // source 1 s is now frame 15
+    const cut = ok(apply(p, "split", { itemId: "i_1", at: 15 }, ctx));
+    expect(valueAt(cut, item(cut, "i_3"), "opacity", 15)).toBeCloseTo(0.4);
+    expect(err(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 30, value: 2 }, ctx))).toBe("invalid"); // out of range
+    expect(err(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 90, value: 1 }, ctx))).toBe("invalid"); // outside the item
+    expect(err(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 10, value: null }, ctx))).toBe("invalid"); // no key there
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 0, value: null }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 30, value: null }, ctx));
+    expect(v().keyframes).toBeUndefined();
   });
 
   it("dissolve needs source past both sides of the cut; dip doesn't; split keeps it on the second half", () => {

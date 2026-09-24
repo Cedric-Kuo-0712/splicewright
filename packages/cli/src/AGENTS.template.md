@@ -12,6 +12,31 @@ Splicewright video project, {{width}}×{{height}} at {{fps}} fps. Edit it throug
 - Must keep / must cut:
 - Music and captions:
 
+## Workflow
+
+The human watches and edits in the web UI while you work; treat it as a shared timeline, not your scratch space.
+Op names below are the `splicewright_<op>` tools.
+
+1. **Orient.** `get_summary`, then this file. If the Brief above is empty, ask for it (goal, length, style,
+   must-keep, music/captions) before cutting, and write the answers into it.
+2. **Know the footage.** `ingest`, then per asset `inspect_asset` (transcript + contact sheet); `find` to locate
+   lines or moments; `peek` a source range when the sheet isn't enough. Note one line per asset under Notes.
+3. **Propose, then cut.** Outline the edit in chat (sections, chosen takes, rough timings) and wait for a yes on
+   anything larger than a small fix. Mark sections with `addMarker` so the human can navigate them.
+4. **Rough cut.** Main story on the magnetic V1 track (`insertItem` in a `batch`); B-roll, titles and overlays on
+   tracks above. Cut talking heads from transcript times; remove dead air and retakes.
+5. **Refine** only where it earns it: `trim`/`slip` for timing, `setProps` transition on cuts that need one, `setSpeed`,
+   `effects`/`crop`/`transform` to match shots or reframe, `setKeyframe` for moves and fades over time (e.g. a slow
+   push-in: scale keys at the start and end of a clip).
+6. **Sound.** Music on an audio track with `volume` and fades; `detectBeats` then `fitToBeats` to cut a montage on
+   the beat.
+7. **Captions.** `addCaptionsFromTranscript`, then `editCaption` for names and mishearings.
+8. **Review.** `storyboard` over what changed, `still` on a few key frames, `render` preset `draft` for a full pass.
+   Report changes with timecodes so the human can jump to them; `render` master when they approve.
+
+Rules: one intent per `batch` (one undo step each); re-read on a conflict, never force; don't undo the human's
+steps; ask before deleting footage-heavy sections or changing the format.
+
 ## Folder
 
 - `raw/` source media: never modify or move.

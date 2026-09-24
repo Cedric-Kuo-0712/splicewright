@@ -1,5 +1,6 @@
 import { z } from "zod";
-import type { Anchor, AudioItem, CaptionItem, Ctx, Item, Project, Track, TrackKind, VideoItem } from "./schema.ts";
+import { ANIMATABLE, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
+import { keyAt, withKey } from "./keyframes.ts";
 import { beatFrames, snap, snapPoints, snapSpan } from "./timing.ts";
 import { anchorOf, itemSpan, secPerFrame, sourceAt, validate, videoItems } from "./validate.ts";
 
@@ -54,7 +55,7 @@ const EXT_KIND: Record<string, "video" | "audio" | "image"> = {
 };
 
 const ITEM_PROPS: Record<TrackKind, string[]> = {
-  video: ["volume", "fit", "transform", "fadeIn", "fadeOut", "transition", "speed", "label", "note"],
+  video: ["volume", "fit", "transform", "effects", "crop", "keyframes", "fadeIn", "fadeOut", "transition", "speed", "label", "note"],
   audio: ["volume", "fadeIn", "fadeOut", "label", "note"],
   caption: ["label", "note"],
   overlay: ["props", "label", "note"],
@@ -402,7 +403,7 @@ export const ops: Record<string, OpDef<any>> = {
   ),
 
   setProps: def(
-    'Patch item fields: volume, fit, transform, fadeIn, fadeOut, transition {kind: dissolve|dip|wipe, duration}, speed (video; speed here keeps duration, so the source range scales; setSpeed keeps the source range); volume, fadeIn, fadeOut (audio); props (overlay); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
+    'Patch item fields: volume, fit, transform, effects {brightness, contrast, saturation, hue, blur, grayscale, sepia, invert}, crop {top, right, bottom, left} (fractions), keyframes (whole map; use setKeyframe to key one value), fadeIn, fadeOut, transition {kind: dissolve|dip|wipe, duration}, speed (video; speed here keeps duration, so the source range scales; setSpeed keeps the source range); volume, fadeIn, fadeOut (audio); props (overlay); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
     const { track: t, item } = locate(p, a.itemId);
     patch(item as Record<string, unknown>, a.patch, ITEM_PROPS[t.kind], `${t.kind} item ${item.id}`);
     return `updated ${item.id}: ${Object.keys(a.patch).join(", ")}`;
@@ -421,6 +422,22 @@ export const ops: Record<string, OpDef<any>> = {
       else v.speed = a.speed;
       if (a.ripple ?? t.magnetic) shift(t, oldEnd, end(v) - oldEnd);
       return `${item.id} at ${a.speed}× → ${v.duration}f`;
+    },
+  ),
+
+  setKeyframe: def(
+    `Key a video item's ${ANIMATABLE.join(", ")} to \`value\` at timeline frame \`at\` (inside the item), replacing a key on that frame; value null removes it. Once a prop has keys they override its plain value; removing the last key restores it. Keys ride with the source, so split, trim, slip and speed keep them on the same content.`,
+    z.object({ itemId: Id, prop: z.enum(ANIMATABLE), at: z.number().int(), value: z.number().nullable(), ease: z.enum(["linear", "ease"]).optional() }),
+    (p, a) => {
+      const { track: t, item } = locate(p, a.itemId);
+      const v = item as VideoItem;
+      if (t.kind !== "video" || !("assetId" in v)) fail("invalid", `${item.id} is not a video item`);
+      if (a.at < v.start || a.at >= end(v)) fail("invalid", `frame ${a.at} is outside ${v.id} [${v.start}, ${end(v)})`);
+      if (a.value === null && !keyAt(p, v, a.prop, a.at)) fail("invalid", `${v.id} has no ${a.prop} key at frame ${a.at}`);
+      const kf = withKey(p, v, a.prop, a.at, a.value, a.ease);
+      if (kf) v.keyframes = kf;
+      else delete v.keyframes;
+      return a.value === null ? `removed ${a.prop} key on ${v.id} at ${a.at}` : `keyed ${v.id} ${a.prop} = ${a.value} at ${a.at}`;
     },
   ),
 

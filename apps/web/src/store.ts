@@ -31,6 +31,8 @@ export interface State {
   proxies: string[];
   /** Probed durations in seconds, from .splicewright/assets.json. */
   durations: Record<string, number>;
+  /** Coded pixel sizes per asset, for crop and the transform box. */
+  sizes: Record<string, [number, number]>;
   useProxies: boolean;
   selection: string[];
   /** A clicked empty span on a track, closed by Delete; kept apart from `selection` (items only). */
@@ -50,8 +52,10 @@ export interface State {
   editing: { kind: "caption" | "marker" | "track"; id: string } | null;
   /** Live slip drag: the preview shows this sourceIn before the op commits. */
   slip: { itemId: string; sourceIn: number } | null;
-  /** Live transform drag on the preview, shown before the op commits. */
-  live: { itemId: string; transform: NonNullable<VideoItem["transform"]> } | null;
+  /** Live drag on the preview or an inspector slider: this patch shows before the op commits. */
+  live: { itemId: string; patch: Partial<VideoItem> } | null;
+  /** Crop handles instead of transform handles on the preview (Shift+C). */
+  cropping: boolean;
   /** Assets with ingest running on the server → the step last reported. */
   ingesting: Record<string, string>;
   /** File names being uploaded. */
@@ -66,17 +70,17 @@ const hash = new URLSearchParams(location.hash.slice(1));
 const num = (v: string | null) => (v === null || v === "" || isNaN(Number(v)) ? null : Number(v));
 
 export const app = store<State>({
-  project: null, duck: {}, proxies: [], durations: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
-  io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, ingesting: {}, uploads: [], reveal: null,
+  project: null, duck: {}, proxies: [], durations: {}, sizes: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
+  io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, cropping: false, ingesting: {}, uploads: [], reveal: null,
 });
 export const playhead = store({ frame: 0 });
 
-type Snapshot = Pick<State, "project" | "duck" | "proxies" | "durations">;
-const take = ({ project, duck, proxies, durations }: Snapshot) =>
+type Snapshot = Pick<State, "project" | "duck" | "proxies" | "durations" | "sizes">;
+const take = ({ project, duck, proxies, durations, sizes }: Snapshot) =>
   app.set(({ gap }) => {
     // Drop a gap selection that an undo, redo, or another writer filled.
     const t = gap && project?.tracks.find((t) => t.id === gap.trackId);
-    return { project, duck, proxies, durations, gap: t && gapAt(t, gap.at) ? gap : null };
+    return { project, duck, proxies, durations, sizes, gap: t && gapAt(t, gap.at) ? gap : null };
   });
 
 async function call(path: string, body?: unknown) {

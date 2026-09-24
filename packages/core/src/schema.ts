@@ -31,6 +31,43 @@ export const Transform = z.object({
   opacity: z.number().min(0).max(1).optional(),
 });
 
+/** CSS-filter look; 1 (or 0 for hue, blur, grayscale, sepia, invert) is neutral. */
+export const Effects = z.object({
+  brightness: z.number().min(0).max(3).optional(),
+  contrast: z.number().min(0).max(3).optional(),
+  saturation: z.number().min(0).max(3).optional(),
+  hue: z.number().min(-180).max(180).optional(),
+  blur: z.number().min(0).max(100).optional(),
+  grayscale: z.number().min(0).max(1).optional(),
+  sepia: z.number().min(0).max(1).optional(),
+  invert: z.number().min(0).max(1).optional(),
+});
+
+/** Fractions of the picture cut from each side, in the picture's own orientation. */
+export const Crop = z
+  .object({ top: z.number().min(0).optional(), right: z.number().min(0).optional(), bottom: z.number().min(0).optional(), left: z.number().min(0).optional() })
+  .refine((c) => (c.left ?? 0) + (c.right ?? 0) < 1 && (c.top ?? 0) + (c.bottom ?? 0) < 1, { message: "crop leaves nothing visible" });
+
+const Volume = z.number().min(0).max(2);
+const ANIMATED = { ...Transform.shape, ...Effects.shape, volume: Volume.optional() };
+/** Video item fields that take keyframes: transform, effects, volume. */
+export const ANIMATABLE = Object.keys(ANIMATED) as (keyof typeof ANIMATED)[];
+export type Animatable = (typeof ANIMATABLE)[number];
+
+/**
+ * Per prop, keys sorted by `t` in source seconds, so split, trim, slip and speed keep them on the
+ * same content. `ease` shapes the segment leaving a key (default linear); values hold past the ends.
+ */
+export const Keyframes = z
+  .partialRecord(z.enum(ANIMATABLE), z.array(z.object({ t: Seconds.min(0), v: z.number(), ease: z.enum(["linear", "ease"]).optional() })).min(1))
+  .superRefine((kf, ctx) => {
+    for (const [k, keys] of Object.entries(kf) as [Animatable, { t: number; v: number }[]][])
+      keys.forEach((key, i) => {
+        if (i && key.t <= keys[i - 1].t) ctx.addIssue({ code: "custom", message: `${k} keys must increase in t` });
+        if (!ANIMATED[k].safeParse(key.v).success) ctx.addIssue({ code: "custom", message: `${k} key ${key.v} out of range` });
+      });
+  });
+
 export const Asset = z.object({
   id: Id,
   path: z.string().min(1),
@@ -42,9 +79,12 @@ export const VideoItem = z.object({
   ...itemBase,
   assetId: Id,
   sourceIn: Seconds.min(0),
-  volume: z.number().min(0).max(2).optional(),
+  volume: Volume.optional(),
   fit: z.enum(["contain", "cover"]).optional(),
   transform: Transform.optional(),
+  effects: Effects.optional(),
+  crop: Crop.optional(),
+  keyframes: Keyframes.optional(),
   role: z.string().optional(),
   /** Playback rate: source seconds per timeline second. Changes how much source `duration` covers. */
   speed: z.number().min(0.1).max(10).optional(),

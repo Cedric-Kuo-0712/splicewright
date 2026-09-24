@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame } from "remotion";
-import { itemSpan, transitionOf, type AudioItem, type Item, type Project, type Track, type VideoItem } from "@splicewright/core";
+import { animate, itemSpan, transitionOf, valueAt, type AudioItem, type Item, type Project, type Track, type VideoItem } from "@splicewright/core";
 import type { Config } from "./config.ts";
 import { duckGain, type Ranges } from "./duck.ts";
 
@@ -10,6 +10,8 @@ export interface Props extends Record<string, unknown> {
   project: Project;
   /** From duckRanges(); speech ranges per ducked audio item. */
   duck?: Record<string, Ranges>;
+  /** Coded [width, height] per asset, from sizesOf(); crop needs them to find the picture inside its box. */
+  sizes?: Record<string, [number, number]>;
   /** Carried through so the Node side can read config presets via selectComposition(). */
   presets?: Config["presets"];
 }
@@ -97,18 +99,67 @@ function look(item: VideoItem, f: number, inc?: Transition, out?: Transition) {
   return { opacity, bright, gain, clip };
 }
 
-const Video: React.FC<{ p: Project; item: VideoItem; muted?: boolean; from: number; inc?: Transition; out?: Transition }> = ({ p, item, muted, from, inc, out }) => {
-  const asset = p.assets[item.assetId];
-  const l = look(item, from + useCurrentFrame(), inc, out);
+/**
+ * Where a video item's picture sits at scale 1. The media element is `ew`×`eh` (the frame, swapped when
+ * the total rotation is a quarter turn) and rotated by `rot`; the visible picture inside it is `vw`×`vh`,
+ * centred. `display` is that picture upright as the asset plays (asset rotation applied, the item's not),
+ * and `turn` is the asset rotation in quarter turns. Without a probed `size` the picture fills the element.
+ */
+export function mediaBox(p: Project, item: VideoItem, size?: [number, number]) {
+  const { width: W, height: H } = p.meta;
+  const a = p.assets[item.assetId]?.rotation ?? 0;
+  const rot = a + (item.transform?.rotation ?? 0);
+  const [ew, eh] = Math.abs(rot % 180) === 90 ? [H, W] : [W, H];
+  const [w, h] = size ?? [ew, eh];
+  const s = (item.fit === "cover" ? Math.max : Math.min)(ew / w, eh / h);
+  const [vw, vh] = [Math.min(ew, w * s), Math.min(eh, h * s)];
+  const turn = ((Math.round(a / 90) % 4) + 4) % 4;
+  return { ew, eh, vw, vh, rot, turn, display: (turn % 2 ? [vh, vw] : [vw, vh]) as [number, number] };
+}
+
+const SIDES = ["top", "right", "bottom", "left"] as const;
+
+/** Crop as a clip-path on the (rotated) media element: crop sides are the upright picture's, so shift them by the asset's quarter turns. */
+function cropPath(box: ReturnType<typeof mediaBox>, crop: VideoItem["crop"]) {
+  if (!crop) return undefined;
+  const c = SIDES.map((_, i) => crop[SIDES[(i + box.turn) % 4]] ?? 0);
+  const [ox, oy] = [(box.ew - box.vw) / 2, (box.eh - box.vh) / 2];
+  return `inset(${oy + c[0] * box.vh}px ${ox + c[1] * box.vw}px ${oy + c[2] * box.vh}px ${ox + c[3] * box.vw}px)`;
+}
+
+/** effects field → CSS filter function, unit, neutral value. */
+const FILTERS = [
+  ["brightness", "brightness", "", 1],
+  ["contrast", "contrast", "", 1],
+  ["saturation", "saturate", "", 1],
+  ["hue", "hue-rotate", "deg", 0],
+  ["blur", "blur", "px", 0],
+  ["grayscale", "grayscale", "", 0],
+  ["sepia", "sepia", "", 0],
+  ["invert", "invert", "", 0],
+] as const;
+
+export const filterOf = (e: VideoItem["effects"] | null = {}) =>
+  FILTERS.flatMap(([k, fn, unit, zero]) => (e?.[k] !== undefined && e[k] !== zero ? [`${fn}(${e[k]}${unit})`] : [])).join(" ") || undefined;
+
+const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; muted?: boolean; from: number; inc?: Transition; out?: Transition }> = ({ p, item: raw, size, muted, from, inc, out }) => {
+  const asset = p.assets[raw.assetId];
+  const f = from + useCurrentFrame();
+  const item = animate(p, raw, f);
+  const l = look(item, f, inc, out);
   const speed = item.speed ?? 1;
-  const { x = 0, y = 0, scale = 1, rotation = 0, opacity } = item.transform ?? {};
-  const rot = (asset.rotation ?? 0) + rotation;
-  const swap = Math.abs(rot % 180) === 90;
+  const { x = 0, y = 0, scale = 1, opacity } = item.transform ?? {};
+  // ponytail: an animated rotation crossing a quarter turn re-fits the picture (the element swaps W and H) and pops.
+  const box = mediaBox(p, item, size);
+  // Pixel sizes, not vw/vh: in the Player those are the browser window's.
   const style: React.CSSProperties = {
-    width: swap ? "100vh" : "100%",
-    height: swap ? "100vw" : "100%",
+    width: box.ew,
+    height: box.eh,
+    flexShrink: 0,
     objectFit: item.fit ?? "contain",
-    transform: rot ? `rotate(${rot}deg)` : undefined,
+    transform: box.rot ? `rotate(${box.rot}deg)` : undefined,
+    filter: filterOf(item.effects),
+    clipPath: cropPath(box, item.crop),
   };
   return (
     <AbsoluteFill
@@ -130,7 +181,7 @@ const Video: React.FC<{ p: Project; item: VideoItem; muted?: boolean; from: numb
           src={staticFile(asset.path)}
           trimBefore={Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps)}
           playbackRate={speed}
-          volume={(f) => (item.volume ?? 1) * look(item, from + f, inc, out).gain}
+          volume={(v) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain}
           muted={muted}
           style={style}
         />
@@ -152,7 +203,7 @@ const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges }
   return <Audio src={staticFile(p.assets[item.assetId].path)} trimBefore={Math.round(item.sourceIn * p.meta.fps)} volume={volume} muted={t.muted} />;
 };
 
-export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, components }) => {
+export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, components }) => {
   const registry: Record<string, React.ComponentType<any>> = { Text, Image, CaptionLayer, ...components };
   const component = (name: string, where: string) => {
     const C = registry[name];
@@ -160,7 +211,7 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
     return C;
   };
   const body = (t: Track, item: Item, from: number, inc?: Transition, out?: Transition) => {
-    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} /> : <Video p={p} item={item as VideoItem} muted={t.muted} from={from} inc={inc} out={out} />;
+    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} muted={t.muted} from={from} inc={inc} out={out} />;
     const C = component((item as { component: string }).component, item.id);
     return <C {...(item as { props: object }).props} />;
   };

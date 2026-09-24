@@ -21,6 +21,10 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .preview { grid-area: preview; background: #000; min-height: 0; }
 .inspector { grid-area: inspector; overflow: auto; padding: 10px; border-left: 1px solid #2a2c31; }
 .field { display: grid; grid-template-columns: 80px 1fr; gap: 6px; align-items: center; margin-bottom: 6px; }
+.field.slider { grid-template-columns: 80px 1fr 44px; }
+.field.slider output { font: 11px ui-monospace, monospace; text-align: right; color: #aaa; }
+.inspector h4 { display: flex; justify-content: space-between; align-items: center; margin: 12px 0 6px; font-size: 12px; text-transform: uppercase; color: #999; }
+.inspector h4 button.on { background: #fcc419; color: #000; }
 .field.column { grid-template-columns: 1fr; }
 .field textarea { font-family: ui-monospace, monospace; font-size: 12px; }
 .status { grid-area: status; padding: 3px 10px; border-top: 1px solid #2a2c31; color: #9a9; min-height: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -125,5 +129,14 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .tf-rot { position: absolute; left: 50%; top: -26px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #fcc419; border: 1px solid #000; cursor: grab; }
 .tf-rot::after { content: ""; position: absolute; left: 5px; top: 11px; width: 1px; height: 14px; background: #fcc419; }
 .tf-label { position: absolute; left: 4px; top: 4px; font: 10px ui-monospace, monospace; background: #000b; color: #fcc419; padding: 0 4px; border-radius: 2px; white-space: nowrap; pointer-events: none; }
+.tf-box.cropping { overflow: hidden; border-style: dashed; }
+.crop-rect { position: absolute; border: 1px solid #fcc419; box-shadow: 0 0 0 9999px #0007; }
+.crop-h { position: absolute; background: #fcc419; opacity: 0.8; }
+.crop-h.top, .crop-h.bottom { left: 30%; right: 30%; height: 6px; cursor: ns-resize; } .crop-h.top { top: 0; } .crop-h.bottom { bottom: 0; }
+.crop-h.left, .crop-h.right { top: 30%; bottom: 30%; width: 6px; cursor: ew-resize; } .crop-h.left { left: 0; } .crop-h.right { right: 0; }
+.kf { position: absolute; bottom: 4px; width: 8px; height: 8px; margin-left: -4px; background: #74c0fc; border: 1px solid #000; transform: rotate(45deg); z-index: 5; cursor: pointer; }
+.kf-btn { margin-left: 4px; padding: 0 3px; border: 0; background: none; color: #777; font-size: 11px; line-height: 1; cursor: pointer; }
+.kf-btn.keyed { color: #74c0fc; }
+.kf-btn:disabled { opacity: 0.3; cursor: default; }
 .xfade { position: absolute; top: 3px; bottom: 3px; z-index: 4; pointer-events: none; border: 1px solid #fff9; border-radius: 3px; background: linear-gradient(to top right, transparent 48%, #fffa 49% 51%, transparent 52%), linear-gradient(to bottom right, transparent 48%, #fffa 49% 51%, transparent 52%), #0006; }
 .xfade.dip { background: linear-gradient(to bottom right, transparent 48%, #fffa 49% 51%, transparent 52%) left / 50% 100% no-repeat, linear-gradient(to top right, transparent 48%, #fffa 49% 51%, transparent 52%) right / 50% 100% no-repeat, #000a; }

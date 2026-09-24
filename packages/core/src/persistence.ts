@@ -49,6 +49,11 @@ export function readAssets(dir: string): Record<string, Probe> {
   return existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : {};
 }
 
+/** Coded [width, height] of each probed picture asset: the composition's `sizes` prop. */
+export function sizesOf(probes: Record<string, Probe>): Record<string, [number, number]> {
+  return Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.width && a.height ? [[id, [a.width, a.height]]] : [])));
+}
+
 /** size + mtime + first and last 64 KB, hashed (§3); undefined if the file is missing. */
 export function fingerprint(file: string): string | undefined {
   if (!existsSync(file)) return undefined;

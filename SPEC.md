@@ -23,7 +23,7 @@ Origin: extracted from the `video-cut` Kaohsiung vlog project (`apps/editor` + `
    without forking the tool.
 
 ### Non-goals (v1)
-- Keyframe animation, masks, color grading, chroma key, speed ramps, transitions library, stickers.
+- Bezier keyframe curves, masks, chroma key, curves/LUT color grading, speed ramps, stickers.
   (These are OpenCut features we may add later — see §13.)
 - Cloud sync, accounts, collaboration server.
 - Mobile / touch UI.
@@ -126,6 +126,15 @@ interface VideoItem extends ItemBase {
   volume?: number;                  // live audio, 0..2, default 1
   fit?: "contain" | "cover";
   transform?: { x?: number; y?: number; scale?: number; rotation?: number; opacity?: number };
+  // CSS filters on the picture; 1 is neutral for the first three, 0 for the rest.
+  effects?: { brightness?: number; contrast?: number; saturation?: number; hue?: number /* deg */;
+              blur?: number /* px */; grayscale?: number; sepia?: number; invert?: number };
+  crop?: { top?: number; right?: number; bottom?: number; left?: number };  // fractions of the visible picture, upright
+  // Animation of transform, effects and volume props. Per prop, keys sorted by t in SOURCE seconds, so
+  // split/trim/slip/speed keep them on the same content. A keyed prop ignores its plain value; values
+  // hold past the first and last key; ease shapes the segment leaving a key (smoothstep).
+  keyframes?: Partial<Record<"x"|"y"|"scale"|"rotation"|"opacity"|"volume"|keyof Effects,
+                             { t: Seconds; v: number; ease?: "linear" | "ease" }[]>>;
   role?: string;                    // free tag: "talking_head", "broll", ...
   speed?: number;                   // 0.1..10, source seconds per timeline second; no reverse
   fadeIn?: Frames;                  // opacity and volume ramps
@@ -200,7 +209,8 @@ The adapters (UI/CLI/MCP) only call ops and persist the result.
 | `move` | itemId, to, trackId?, ripple? | Rejects overlap unless `ripple`. |
 | `delete` | itemIds[], ripple? | Ripple closes the gap on magnetic tracks. |
 | `closeGap` | trackId, at | Closes the empty span containing `at`; later non-anchored items shift left. |
-| `setProps` | itemId, patch | Whitelisted fields only (volume, fit, transform, fades, transition, speed, props, label, note). `speed` here keeps the duration. |
+| `setProps` | itemId, patch | Whitelisted fields only (volume, fit, transform, effects, crop, keyframes, fades, transition, speed, props, label, note). `speed` here keeps the duration. |
+| `setKeyframe` | itemId, prop, at, value \| null, ease? | Video only: key `prop` at timeline frame `at` (inside the item), replacing a key within half a frame; null removes it. |
 | `setSpeed` | itemId, speed, ripple? | Video only: keeps the source range, scales the duration; ripple (default on magnetic) moves later items. |
 | `slip` | itemId, deltaSec | Changes `sourceIn` only; timeline position unchanged. |
 | `addTrack` / `removeTrack` / `setTrack` | … | Empty tracks are allowed (unlike OpenCut). |
@@ -308,7 +318,12 @@ Evolves from `video-cut/apps/editor`. Every mutation goes through core ops.
   - Video item menu and inspector: Speed… (setSpeed), transition into the next item (dissolve, dip to black, wipe);
     the timeline marks each transition across its cut.
   - With one video item selected under the playhead, a box on the player drags its transform: body moves (snaps to center, Alt bypasses),
-    corners scale, the top knob rotates (Shift: 15°), double-click resets.
+    corners scale, the top knob rotates (Shift: 15°), double-click resets. The box fits the visible picture (probed size).
+    Shift+C (or the inspector's crop button) swaps in crop edges; double-click uncrops, Esc leaves crop mode.
+  - Inspector effect and crop sliders preview live while dragged and commit one `setProps` on release (one undo step);
+    double-click a slider resets it. ◇ beside a field keys its value at the playhead (◆: a key is here, click removes it);
+    once a prop has keys, editing it (field, slider, or the preview box) keys it at the playhead. Items show a diamond per
+    keyed frame; clicking one seeks there. Look ▾ applies a preset (B&W, Noir, Warm, Cool, Vintage, Vivid, Faded) as `effects`.
   - Freeze frame (Shift+F, item menu): `POST /api/freeze {itemId, frame}` grabs the source frame into `raw/` as a PNG and imports it
     (its own undo step), then a batch splits the clip and ripple-inserts 2 s of the still on that track only.
   - Lane menu: remove all gaps on a track, insert space (pushes items starting after the frame on every unlocked track),
@@ -350,6 +365,9 @@ so the tool also runs on Linux.
 - `@splicewright/render` provides one Remotion composition, `SplicewrightProject`, that renders any
   `project.json`. It draws tracks bottom to top with `<Sequence from={start} durationInFrames={duration}>`.
 - Built-in components (v1): `Text`, `Image`, `CaptionLayer` (styleable).
+- Props: `project`, `duck` (speech ranges), and `sizes` (coded asset size from the probe; crop and the
+  editor's transform box use it to find the fitted picture, else the picture is taken to fill the frame).
+  `effects` is a CSS `filter` and `crop` a `clip-path: inset()` on the media element.
 - Audio: per-item volume, fades, and `duck` (implemented; the current `duck_under_speech` field is
   declared but never used by `Vlog.tsx`).
 - Custom components are registered in `splicewright.config.ts`:
@@ -428,8 +446,8 @@ explained, not hidden.
 ---
 
 ## 13. Later (candidate features, informed by OpenCut classic)
-Transitions, keyframes on `transform`/`volume`, text styles and templates, speed changes,
-masks, color adjustments, multi-select and group operations, nested sequences, and a desktop wrapper
+Bezier keyframe curves, keyframes on overlay props and audio items, text styles and templates,
+masks, multi-select and group operations, nested sequences, and a desktop wrapper
 (Tauri or Electron). Each one is added as a core op plus a schema extension with a schemaVersion
 migration.
 

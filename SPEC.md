@@ -278,7 +278,9 @@ Evolves from `video-cut/apps/editor`. Every mutation goes through core ops.
 - Server binds to `127.0.0.1` by default.
 - Keyboard: Space, ←/→ (±1 frame), Shift+←/→ (±10), J/K/L shuttle, Up/Down (previous/next edit),
   S or Cmd+B split (plain `C` is not used, so Cmd+C stays copy), Delete / Shift+Delete (ripple),
-  Cmd+Z / Cmd+Shift+Z.
+  Shift+Up/Down (also beats and captions), Home/End, `[` / `]` (selected clip's start/end), Cmd+A (select all),
+  Cmd+Z / Cmd+Shift+Z. The History button lists both stacks (`GET /api/history`); picking an entry sends
+  `POST /api/undo|redo {steps}`.
 - Editing (all through ops, one undo step per gesture):
   - Cmd+C / Cmd+V paste at the playhead (Cmd+Shift+V inserts and pushes later items), Cmd+D duplicates after the selection.
     Items go back to their track, else the first unlocked track of the same kind; anchored captions follow their video.
@@ -295,6 +297,14 @@ Evolves from `video-cut/apps/editor`. Every mutation goes through core ops.
     Alt-drag a caption or overlay re-attaches it to the video under its new start.
   - Double-click a caption to edit it in place: Enter saves, Shift+Enter breaks the line, Esc cancels, Tab saves and edits the next.
   - Audio items show fade-in/out handles and a volume line (0–2, with dB) on hover or selection.
+  - With one video item selected under the playhead, a box on the player drags its transform: body moves (snaps to center, Alt bypasses),
+    corners scale, the top knob rotates (Shift: 15°), double-click resets.
+  - Freeze frame (Shift+F, item menu): `POST /api/freeze {itemId, frame}` grabs the source frame into `raw/` as a PNG and imports it
+    (its own undo step), then a batch splits the clip and ripple-inserts 2 s of the still on that track only.
+  - Lane menu: remove all gaps on a track, insert space (pushes items starting after the frame on every unlocked track),
+    select all after here (track or all). Track menu: select all on track, Export SRT (caption tracks, client-side).
+  - Media bin menu: Replace selected clip keeps start, length (clipped to the new media), props and anchored items.
+  - Shift+M adds a range marker around the selection; the marker menu sets its color.
 
 ---
 

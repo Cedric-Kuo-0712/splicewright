@@ -1,5 +1,5 @@
 import { anchorOf, durationFrames, itemSpan, nextId, type Item, type Project, type Track, type TrackKind } from "@splicewright/core";
-import { app, ioRange, op, player, playhead, refresh, say, seek, type MenuEntry } from "./store.ts";
+import { app, history, ioRange, op, player, playhead, refresh, say, seek, type MenuEntry } from "./store.ts";
 
 // Editing commands shared by the keyboard, the toolbar, and the context menus. Multi-op edits go out
 // as one batch, so each is one undo step.
@@ -250,6 +250,153 @@ export function videoUnder(p: Project, frame: number) {
   }
 }
 
+// ---- space, freeze, replace ----
+
+/** Close every gap on `t`, latest first so each closeGap sees positions the earlier ones didn't move. */
+export function removeGaps(t: Track) {
+  const at: number[] = [];
+  let cur = 0;
+  for (const i of t.items.filter((i) => !anchorOf(i)).sort((a, b) => a.start - b.start)) {
+    if (i.start > cur) at.push(cur);
+    cur = Math.max(cur, end(i));
+  }
+  if (!at.length) return say(`no gaps on ${t.name}`, true);
+  return send(at.reverse().map((f) => ({ op: "closeGap", args: { trackId: t.id, at: f } })));
+}
+
+/** Push every unlocked item starting at or after `at` right by a prompted number of seconds. Items
+ * crossing `at` stay put. */
+export function insertSpace(at: number) {
+  const p = app.get().project!;
+  const sec = Number(prompt("Insert how many seconds of space?", "1"));
+  if (!(sec > 0)) return;
+  const d = Math.round(sec * p.meta.fps);
+  const later = p.tracks.flatMap((t) => (t.locked ? [] : t.items.filter((i) => !anchorOf(i) && i.start >= at)));
+  if (!later.length) return say(`nothing starts after ${at}`, true);
+  // Latest first, so no move lands on an item that hasn't moved yet.
+  return send(later.sort((a, b) => b.start - a.start).map((i) => ({ op: "move", args: { itemId: i.id, to: i.start + d, ripple: false } })));
+}
+
+/** The selected video item under `frame`, else the topmost one: freeze frame and replace act on it. */
+function videoTarget(p: Project, frame: number) {
+  const sel = app.get().selection.map((id) => findItem(p, id)).find((f) => f?.track.kind === "video" && f.item.start <= frame && frame < end(f.item));
+  const i = sel?.item ?? videoUnder(p, frame);
+  return i && findItem(p, i.id);
+}
+
+/** Holds the frame under the playhead for `sec` seconds: the server grabs it into raw/ as a still, then
+ * the item is split there and the still goes in between, pushing the rest of the track right. */
+export async function freezeFrame(frame: number, sec = 2) {
+  const p = app.get().project!;
+  const f = videoTarget(p, frame);
+  if (!f || !("assetId" in f.item) || p.assets[f.item.assetId]?.kind !== "video") return say("no video clip under the playhead", true);
+  if (f.track.locked) return say(`${f.track.name} is locked`, true);
+  const res = await fetch("/api/freeze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ itemId: f.item.id, frame }) });
+  const data = await res.json();
+  if (data.error) return say(`freeze: ${data.error.message ?? data.error}`, true);
+  await refresh();
+  const q = app.get().project!;
+  const { ops } = cuts(q, [frame], (_, i) => i.id === f.item.id);
+  ops.push({ op: "insertItem", args: { trackId: f.track.id, assetId: data.assetId, at: frame, duration: Math.round(sec * q.meta.fps), ripple: true } });
+  return send(ops);
+}
+
+/** Swap the selected video or audio clip's media for `assetId`, keeping its place, length (as far as
+ * the new media reaches), props, and anything anchored to it. */
+export function replaceWith(assetId: string) {
+  const { project: p, selection, durations } = app.get();
+  const f = selection.length === 1 ? findItem(p!, selection[0]) : null;
+  const a = p!.assets[assetId];
+  if (!f || !("assetId" in f.item)) return say("select one video or audio clip to replace", true);
+  if ((a.kind === "audio") !== (f.track.kind === "audio")) return say(`${a.id} is ${a.kind}; ${f.item.id} is on a ${f.track.kind} track`, true);
+  if (f.track.locked) return say(`${f.track.name} is locked`, true);
+  const it = f.item;
+  const len = a.kind === "image" ? Infinity : Math.floor((durations[assetId] ?? 0) * p!.meta.fps);
+  if (!len) return say(`${a.id} has no known duration yet; wait for ingest`, true);
+  const children = p!.tracks.flatMap((t) => t.items.filter((c) => anchorOf(c)?.itemId === it.id));
+  const nid = idMaker(p!)("i");
+  const extra = Object.fromEntries(EXTRA.filter((k) => k in it).map((k) => [k, (it as Record<string, unknown>)[k]]));
+  const ops: Op[] = [
+    ...children.map((c) => ({ op: "attach", args: { itemId: c.id, to: null } })),
+    { op: "delete", args: { itemIds: [it.id], ripple: false } },
+    // ponytail: a shorter replacement leaves a gap; no retime-to-fit.
+    { op: "insertItem", args: { trackId: f.track.id, assetId, at: it.start, duration: Math.min(it.duration, len), ripple: false } },
+    ...(Object.keys(extra).length ? [{ op: "setProps", args: { itemId: nid, patch: extra } }] : []),
+    ...children.map((c) => ({ op: "attach", args: { itemId: c.id, to: nid } })),
+  ];
+  return send(ops).then((ok) => ok && app.set({ selection: [nid] }));
+}
+
+// ---- selection ----
+
+const spanOf = (p: Project, i: Item) => itemSpan(p, i) ?? i;
+
+export const selectItems = (ids: string[]) => app.set({ selection: ids, gap: null, message: { text: `selected ${ids.length}` } });
+
+/** Items on `tracks` that start at or after `from` (anchored ones by their current span). */
+export function itemsAfter(p: Project, tracks: Track[], from = 0) {
+  return tracks.flatMap((t) => t.items.filter((i) => spanOf(p, i).start >= from).map((i) => i.id));
+}
+
+export function itemsUnder(p: Project, frame: number) {
+  return p.tracks.flatMap((t) => t.items.filter((i) => spanOf(p, i).start <= frame && frame < end(spanOf(p, i))).map((i) => i.id));
+}
+
+// ---- markers, captions, history ----
+
+/** A range marker covering the selection. */
+export function markerAroundSelection() {
+  const { project: p, selection } = app.get();
+  const spans = selection.flatMap((id) => {
+    const f = findItem(p!, id);
+    return f ? [spanOf(p!, f.item)] : [];
+  });
+  if (!spans.length) return say("select items to mark", true);
+  const start = Math.min(...spans.map((s) => s.start));
+  return op("addMarker", { label: `M${(p!.markers?.length ?? 0) + 1}`, start, duration: Math.max(...spans.map(end)) - start });
+}
+
+const COLORS: [string, string][] = [["Orange", ""], ["Red", "#e5534b"], ["Green", "#57ab5a"], ["Blue", "#539bf5"], ["Purple", "#b083f0"], ["Yellow", "#e0c341"]];
+
+function srtTime(frame: number, fps: number) {
+  const ms = Math.round((frame / fps) * 1000);
+  const pad = (n: number, w = 2) => String(n).padStart(w, "0");
+  return `${pad(Math.floor(ms / 3600000))}:${pad(Math.floor(ms / 60000) % 60)}:${pad(Math.floor(ms / 1000) % 60)},${pad(ms % 1000, 3)}`;
+}
+
+/** The caption track as SubRip text; hidden captions (anchor trimmed away) and empty ones are left out. */
+export function toSrt(p: Project, t: Track) {
+  const cues = t.items
+    .flatMap((c) => {
+      const s = itemSpan(p, c);
+      return s && "text" in c && c.text.trim() ? [{ ...s, text: c.text.trim() }] : [];
+    })
+    .sort((a, b) => a.start - b.start);
+  return cues.map((c, k) => `${k + 1}\n${srtTime(c.start, p.meta.fps)} --> ${srtTime(end(c), p.meta.fps)}\n${c.text}\n`).join("\n");
+}
+
+function download(name: string, text: string) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+/** Toolbar History: the undo and redo stacks as a menu; picking an entry steps back (or forward) to it. */
+export async function historyMenu(e: { clientX: number; clientY: number }) {
+  const { clientX: x, clientY: y } = e;
+  const res = await fetch("/api/history");
+  const h: Record<"undo" | "redo", { summary: string; revision: number }[]> = await res.json();
+  const entries: MenuEntry[] = [
+    // Farthest redo on top, so the menu reads oldest (bottom) to newest (top) like a timeline of edits.
+    ...h.redo.map((r, k) => ({ label: `↷ ${r.summary}`, run: () => history("redo", k + 1) })).reverse(),
+    { label: "● now", run: () => {}, disabled: true },
+    ...h.undo.map((u, k) => ({ label: `↶ ${u.summary}`, run: () => history("undo", k + 1) })),
+  ];
+  app.set({ menu: { x, y, entries } });
+}
+
 // ---- context menus ----
 
 export function openMenu(e: { clientX: number; clientY: number; preventDefault(): void; stopPropagation(): void }, entries: MenuEntry[]) {
@@ -270,10 +417,12 @@ export function itemMenu(p: Project, t: Track, item: Item, frame: number): MenuE
     { label: "Duplicate", hint: `${MOD}D`, run: duplicate },
     { label: "Delete", hint: "⌫", run: () => rippleDelete(false), disabled: t.locked },
     { label: "Ripple delete", hint: "⇧⌫", run: () => rippleDelete(true), disabled: t.locked },
+    { label: "Add marker around selection", hint: "⇧M", run: markerAroundSelection },
   ];
   if (t.kind === "video" && "assetId" in item) {
     out.push("-", { label: "Captions from transcript", run: () => op("addCaptionsFromTranscript", { itemId: item.id }) });
     out.push({ label: "Show in media bin", run: () => app.set({ reveal: item.assetId }) });
+    if (p.assets[item.assetId]?.kind === "video") out.push({ label: "Freeze frame here (2 s)", hint: "⇧F", run: () => freezeFrame(frame), disabled: !inside || t.locked });
     if (p.assets[item.assetId]?.kind !== "image") out.push({ label: "Slip…", hint: "⌥drag, ⌥, ⌥.", run: () => say("hold Alt and drag the item, or press Alt+, / Alt+. to slip a frame") });
   }
   if (t.kind === "audio") {
@@ -302,6 +451,11 @@ export function laneMenu(t: Track, frame: number, gap: boolean): MenuEntry[] {
   return [
     { label: "Paste here", hint: `${MOD}V`, run: () => paste(frame), disabled: !clipboard.length },
     { label: "Close gap", hint: "⌫", run: () => op("closeGap", { trackId: t.id, at: frame }), disabled: !gap },
+    { label: "Remove all gaps on track", run: () => removeGaps(t), disabled: t.locked },
+    { label: "Insert space here…", run: () => insertSpace(frame) },
+    "-",
+    { label: "Select all after here on track", run: () => selectItems(itemsAfter(app.get().project!, [t], frame)) },
+    { label: "Select all after here", run: () => selectItems(itemsAfter(app.get().project!, app.get().project!.tracks, frame)) },
     "-",
     ...rulerMenu(frame),
   ];
@@ -314,6 +468,7 @@ export function rulerMenu(frame: number): MenuEntry[] {
     ...(m ? [{ label: `Rename marker ${m.label}`, run: () => app.set({ editing: { kind: "marker", id: m.id } }) }, { label: `Delete marker ${m.label}`, hint: "⌥M", run: () => op("removeMarker", { markerId: m.id }) }] : []),
     { label: "Set In here", hint: "I", run: () => setIO("in", frame) },
     { label: "Set Out here", hint: "O", run: () => setIO("out", frame) },
+    { label: "Select items here", run: () => selectItems(itemsUnder(app.get().project!, frame)) },
     { label: "Clear In/Out", hint: "⌥X", run: () => app.set({ io: { in: null, out: null } }), disabled: !ioRange() },
   ];
 }
@@ -325,6 +480,8 @@ export function markerMenu(markerId: string): MenuEntry[] {
     { label: "Rename", hint: "double-click", run: () => app.set({ editing: { kind: "marker", id: m.id } }) },
     { label: "Delete", hint: "⌥M", run: () => op("removeMarker", { markerId: m.id }) },
     { label: "Set In/Out to this range", run: () => app.set({ io: { in: m.start, out: m.start + m.duration! } }), disabled: !m.duration },
+    "-",
+    ...COLORS.map(([name, c]) => ({ label: `${(m.color ?? "") === c ? "✓ " : ""}${name}`, run: () => op("setMarker", { markerId: m.id, patch: { color: c || null } }) })),
   ];
 }
 
@@ -339,6 +496,10 @@ export function trackMenu(p: Project, t: Track): MenuEntry[] {
     flag("hidden", "Hide"),
     flag("locked", "Lock"),
     flag("magnetic", "Magnetic (ripple edits)"),
+    "-",
+    { label: "Select all on track", run: () => selectItems(itemsAfter(p, [t])) },
+    { label: "Remove all gaps", run: () => removeGaps(t), disabled: t.locked },
+    ...(t.kind === "caption" ? [{ label: "Export SRT…", run: () => download(`${t.name}.srt`, toSrt(p, t)), disabled: !t.items.length }] : []),
     "-",
     { label: "Move up", run: () => op("moveTrack", { trackId: t.id, to: i + 1 }), disabled: i === p.tracks.length - 1 },
     { label: "Move down", run: () => op("moveTrack", { trackId: t.id, to: i - 1 }), disabled: i === 0 },

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { commit, init, load, redo, run, undo } from "../src/persistence.ts";
+import { commit, historyList, init, load, redo, run, undo } from "../src/persistence.ts";
 
 function project() {
   const dir = mkdtempSync(join(tmpdir(), "swr-"));
@@ -38,8 +38,10 @@ it("undo and redo step one op at a time with fresh revisions; a new op clears re
   const dir = project();
   run(dir, "addMarker", { label: "a", start: 0 });
   run(dir, "addMarker", { label: "b", start: 5 });
-  expect(undo(dir)).not.toHaveProperty("error");
+  expect(historyList(dir).undo.map((e) => e.summary)).toEqual([expect.stringContaining('"b"'), expect.stringContaining('"a"')]);
+  expect(undo(dir)).toMatchObject({ changes: { summary: expect.stringMatching(/^undo .*"b"/) } });
   expect(load(dir)).toMatchObject({ revision: 3, markers: [{ label: "a" }] });
+  expect(historyList(dir)).toMatchObject({ undo: [{ summary: expect.stringContaining('"a"') }], redo: [{ summary: expect.stringContaining('"b"') }] });
   expect(redo(dir)).not.toHaveProperty("error");
   expect(load(dir)).toMatchObject({ revision: 4, markers: [{ label: "a" }, { label: "b" }] });
   undo(dir);

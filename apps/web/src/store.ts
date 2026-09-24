@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { PlayerRef } from "@remotion/player";
-import { durationFrames, gapAt, type Project } from "@splicewright/core";
+import { durationFrames, gapAt, type Project, type VideoItem } from "@splicewright/core";
 import type { Ranges } from "@splicewright/render";
 
 // Two stores (§7.3): project state changes per op; the frame ticks at playback rate and only the
@@ -50,6 +50,8 @@ export interface State {
   editing: { kind: "caption" | "marker" | "track"; id: string } | null;
   /** Live slip drag: the preview shows this sourceIn before the op commits. */
   slip: { itemId: string; sourceIn: number } | null;
+  /** Live transform drag on the preview, shown before the op commits. */
+  live: { itemId: string; transform: NonNullable<VideoItem["transform"]> } | null;
   /** Assets with ingest running on the server → the step last reported. */
   ingesting: Record<string, string>;
   /** File names being uploaded. */
@@ -65,7 +67,7 @@ const num = (v: string | null) => (v === null || v === "" || isNaN(Number(v)) ? 
 
 export const app = store<State>({
   project: null, duck: {}, proxies: [], durations: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
-  io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, ingesting: {}, uploads: [], reveal: null,
+  io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, ingesting: {}, uploads: [], reveal: null,
 });
 export const playhead = store({ frame: 0 });
 
@@ -97,8 +99,8 @@ export async function op(name: string, args: unknown) {
   return true;
 }
 
-export async function history(which: "undo" | "redo") {
-  const { data } = await call(`/api/${which}`, {});
+export async function history(which: "undo" | "redo", steps = 1) {
+  const { data } = await call(`/api/${which}`, { steps });
   if (data.error) return app.set({ message: { text: data.error.message, error: true } });
   take(data);
   app.set({ message: { text: data.summary } });

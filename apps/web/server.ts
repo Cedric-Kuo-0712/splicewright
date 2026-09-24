@@ -5,8 +5,8 @@ import { basename, dirname, extname, join, relative, resolve, sep } from "node:p
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { createServer, type Plugin } from "vite";
-import { fingerprint, load, loadCtx, readAssets, redo, run, undo } from "@splicewright/core/node";
-import { ingest, limiter, thumb, waveform } from "@splicewright/ingest";
+import { fingerprint, historyList, load, loadCtx, readAssets, redo, run, undo } from "@splicewright/core/node";
+import { ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
 import { duckRanges } from "@splicewright/render/node";
 
 // Spec §7.3. `splicewright open` runs this: a Vite dev server for the UI (open question 5, the simple
@@ -134,8 +134,36 @@ function api(dir: string): Plugin {
             background(asset.id);
             return send(res, 200, { assetId: asset.id, summary: r.changes.summary, ...snapshot() });
           }
-          if (route === "POST /api/undo") return result(res, undo(dir));
-          if (route === "POST /api/redo") return result(res, redo(dir));
+          if (route === "POST /api/freeze") {
+            // Grabs one source frame of a video item into raw/ as a still and imports it; the client places it.
+            if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) return send(res, 403, { error: "cross-origin freeze refused" });
+            const { itemId, frame } = await body(req);
+            const p = load(dir);
+            const item = p.tracks.flatMap((t) => (t.kind === "video" ? t.items : [])).find((i) => i.id === itemId);
+            const asset = item && "assetId" in item ? p.assets[item.assetId] : undefined;
+            if (!item || !("sourceIn" in item) || asset?.kind !== "video") return send(res, 400, { error: { message: `${itemId} is not a video item` } });
+            const f = Math.min(Math.max(Number(frame) || 0, item.start), item.start + item.duration - 1);
+            const t = item.sourceIn + (f - item.start) / p.meta.fps;
+            const tmp = join(dir, "raw", `.freeze-${process.pid}-${Date.now()}.png`);
+            await ffmpeg(["-ss", t.toFixed(3), "-i", join(dir, asset.path), "-frames:v", "1", tmp]);
+            const stem = basename(asset.path, extname(asset.path));
+            const path = rawPath(dir, `${stem}-freeze-${Math.round(t * p.meta.fps)}.png`, tmp);
+            const r = run(dir, "importAsset", { path });
+            // Same content imported before: reuse that asset.
+            const id = "error" in r ? undefined : (Object.values(r.project.assets).find((a) => a.path === path) ?? r.project.assets[/as (\S+)/.exec(r.changes.summary)?.[1] ?? ""])?.id;
+            if (!id) return send(res, 400, "error" in r ? r : { error: { message: "freeze import failed" } });
+            background(id);
+            return send(res, 200, { assetId: id, ...snapshot() });
+          }
+          if (route === "POST /api/undo" || route === "POST /api/redo") {
+            // `steps` > 1 jumps through the history panel; stops at the first failure.
+            const steps = Math.max(1, Math.min(1000, Number((await body(req)).steps) || 1));
+            const fn = route.endsWith("undo") ? undo : redo;
+            let r = fn(dir);
+            for (let k = 1; k < steps && !("error" in r); k++) r = fn(dir);
+            return result(res, r);
+          }
+          if (route === "GET /api/history") return send(res, 200, historyList(dir));
           if (route === "GET /api/events") {
             res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
             res.write(": connected\n\n");

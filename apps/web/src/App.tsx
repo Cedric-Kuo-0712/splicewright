@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
-import { anchorOf, beatFrames, durationFrames, formatFrame, itemSpan, snapPoints, type AudioItem, type Item, type Project } from "@splicewright/core";
+import { anchorOf, beatFrames, durationFrames, formatFrame, itemSpan, snapPoints, type AudioItem, type Item, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
 import { SplicewrightProject, type Props } from "@splicewright/render";
-import { addMarker, copy, duplicate, findItem, loopRange, markerNear, nudge, openMenu, paste, rippleDelete, setIO, slipBy, split, tapBeat, upload } from "./edit.ts";
+import { addMarker, copy, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, tapBeat, upload, videoUnder } from "./edit.ts";
 import { app, dnd, history, ioRange, op, player, playhead, say, seek } from "./store.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 
@@ -110,6 +110,7 @@ function Toolbar({ p }: { p: Project }) {
       </button>
       <button onClick={() => history("undo")} title="Cmd+Z">Undo</button>
       <button onClick={() => history("redo")} title="Cmd+Shift+Z">Redo</button>
+      <button onClick={(e) => historyMenu(e)} title="Undo history: pick a step to go back (or forward) to">History</button>
       <button className={snapping ? "on" : ""} onClick={() => app.set({ snapping: !snapping })} title="Snapping (N); hold Alt to bypass">
         Snap
       </button>
@@ -139,6 +140,7 @@ function Preview({ p }: { p: Project }) {
   const rate = app.use((s) => s.rate);
   const slip = app.use((s) => s.slip);
   const looping = app.use((s) => s.looping);
+  const live = app.use((s) => s.live);
   const shown = useMemo(() => {
     let out = p;
     if (useProxies && proxies.length) {
@@ -148,8 +150,9 @@ function Preview({ p }: { p: Project }) {
     }
     // A slip drag previews its new source range before the op commits.
     if (slip) out = { ...out, tracks: out.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === slip.itemId ? { ...i, sourceIn: slip.sourceIn } : i)) })) as Project["tracks"] };
+    if (live) out = { ...out, tracks: out.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === live.itemId ? { ...i, transform: live.transform } : i)) })) as Project["tracks"] };
     return out;
-  }, [p, proxies, useProxies, slip]);
+  }, [p, proxies, useProxies, slip, live]);
   const total = Math.max(1, durationFrames(p));
   const range = looping ? (ioRange() ?? [0, total]) : null;
   const ref = useCallback((r: PlayerRef | null) => {
@@ -178,6 +181,102 @@ function Preview({ p }: { p: Project }) {
         acknowledgeRemotionLicense
         style={{ width: "100%", height: "100%" }}
       />
+      <TransformBox p={p} />
+    </div>
+  );
+}
+
+type Tf = NonNullable<VideoItem["transform"]>;
+
+/** Drop identity values, so a reset transform unsets the field. */
+const cleanTf = ({ x, y, scale, rotation, opacity }: Tf): Tf | null => {
+  const out: Tf = { ...(x && { x }), ...(y && { y }), ...(scale !== undefined && scale !== 1 && { scale }), ...(rotation && { rotation }), ...(opacity !== undefined && { opacity }) };
+  return Object.keys(out).length ? out : null;
+};
+
+/**
+ * Move, scale and rotate the selected video item on the preview: drag the box, a corner, or the top knob.
+ * Snaps to the frame centre (Alt bypasses), Shift snaps rotation to 15°, double-click resets.
+ * ponytail: the box is the item's full frame, not its fitted content; exact for cover, loose for letterboxed contain.
+ */
+function TransformBox({ p }: { p: Project }) {
+  const selection = app.use((s) => s.selection);
+  const live = app.use((s) => s.live);
+  const frame = playhead.use((s) => s.frame);
+  const box = React.useRef<HTMLDivElement>(null);
+  const [size, setSize] = React.useState<[number, number] | null>(null);
+  useEffect(() => {
+    const el = box.current!.parentElement!;
+    const ro = new ResizeObserver(() => setSize([el.clientWidth, el.clientHeight]));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const found = selection.length === 1 ? findItem(p, selection[0]) : null;
+  const item = found && found.track.kind === "video" && !found.track.locked && "assetId" in found.item ? (found.item as VideoItem) : null;
+  const span = item && itemSpan(p, item);
+  const visible = !!(item && span && size && frame >= span.start && frame < span.start + span.duration);
+  const { width: cw, height: ch } = p.meta;
+  const k = size ? Math.min(size[0] / cw, size[1] / ch) : 1;
+  const tf: Tf = (live?.itemId === item?.id && live?.transform) || item?.transform || {};
+  const { x = 0, y = 0, scale = 1, rotation = 0 } = tf;
+  // Screen position of the composition's top-left and of the item's centre.
+  const ox = size ? (size[0] - cw * k) / 2 : 0;
+  const oy = size ? (size[1] - ch * k) / 2 : 0;
+  const cx = ox + (cw / 2 + x) * k;
+  const cy = oy + (ch / 2 + y) * k;
+
+  const grab = (e: React.PointerEvent<HTMLElement>, mode: "move" | "scale" | "rotate") => {
+    if (e.button !== 0 || !item) return;
+    e.stopPropagation();
+    const el = e.currentTarget;
+    const r = box.current!.parentElement!.getBoundingClientRect();
+    const [px, py] = [e.clientX - r.left, e.clientY - r.top];
+    const start = { x, y, scale, rotation };
+    const d0 = Math.hypot(px - cx, py - cy) || 1;
+    const a0 = Math.atan2(py - cy, px - cx);
+    let next: Tf | undefined;
+    el.setPointerCapture(e.pointerId);
+    el.onpointermove = (ev) => {
+      if (!ev.buttons) return;
+      const [qx, qy] = [ev.clientX - r.left, ev.clientY - r.top];
+      if (mode === "move") {
+        let nx = Math.round(start.x + (qx - px) / k);
+        let ny = Math.round(start.y + (qy - py) / k);
+        if (!ev.altKey && Math.abs(nx * k) < 6) nx = 0;
+        if (!ev.altKey && Math.abs(ny * k) < 6) ny = 0;
+        next = { ...tf, x: nx, y: ny };
+      } else if (mode === "scale") {
+        const f = Math.hypot(qx - cx, qy - cy) / d0;
+        next = { ...tf, scale: Math.max(0.05, +(start.scale * f).toFixed(3)) };
+      } else {
+        let deg = start.rotation + ((Math.atan2(qy - cy, qx - cx) - a0) * 180) / Math.PI;
+        deg = ((deg + 540) % 360) - 180;
+        next = { ...tf, rotation: ev.shiftKey ? Math.round(deg / 15) * 15 : +deg.toFixed(1) };
+      }
+      app.set({ live: { itemId: item.id, transform: next } });
+    };
+    el.onpointerup = () => {
+      el.onpointermove = el.onpointerup = null;
+      if (!next) return app.set({ live: null });
+      op("setProps", { itemId: item.id, patch: { transform: cleanTf(next) } }).then(() => app.set({ live: null }));
+    };
+  };
+
+  return (
+    <div ref={box} className="stage">
+      {visible && (
+        <div
+          className="tf-box"
+          style={{ left: cx, top: cy, width: cw * scale * k, height: ch * scale * k, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
+          onPointerDown={(e) => grab(e, "move")}
+          onDoubleClick={() => op("setProps", { itemId: item!.id, patch: { transform: cleanTf({ opacity: tf.opacity }) } })}
+          title={`${item!.id}: drag to move, corners scale, top knob rotates (Shift: 15°), double-click resets`}
+        >
+          {["nw", "ne", "sw", "se"].map((c) => <div key={c} className={`tf-h ${c}`} onPointerDown={(e) => grab(e, "scale")} />)}
+          <div className="tf-rot" onPointerDown={(e) => grab(e, "rotate")} />
+          <span className="tf-label">{`${Math.round(x)}, ${Math.round(y)} · ${Math.round(scale * 100)}%${rotation ? ` · ${rotation}°` : ""}`}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -217,7 +316,12 @@ function MediaBin({ p }: { p: Project }) {
           draggable
           onDragStart={(e) => (e.dataTransfer.setData("application/x-splicewright-asset", a.id), (dnd.assetId = a.id))}
           onDragEnd={() => (dnd.assetId = null)}
-          onContextMenu={(e) => openMenu(e, [{ label: "Insert at playhead", run: () => op("insertItem", { assetId: a.id, at: playhead.get().frame }) }])}
+          onContextMenu={(e) =>
+            openMenu(e, [
+              { label: "Insert at playhead", run: () => op("insertItem", { assetId: a.id, at: playhead.get().frame }) },
+              { label: "Replace selected clip", run: () => replaceWith(a.id), disabled: app.get().selection.length !== 1 },
+            ])
+          }
           title={`${a.id} — drag onto the timeline`}
         >
           {a.kind === "audio" ? <div className="thumb audio">♪</div> : <img className="thumb" src={`/api/thumb?asset=${a.id}&t=0`} alt="" draggable={false} />}
@@ -411,7 +515,9 @@ function onKey(e: KeyboardEvent) {
   if (key === "arrowleft" || key === "arrowright") return handled(), player.ref?.pause(), seek(frame + (key === "arrowleft" ? -1 : 1) * (e.shiftKey ? 10 : 1));
   if (key === "arrowup" || key === "arrowdown") {
     handled();
-    const edges = [...new Set(snapPoints(p, [0, Infinity], { kinds: ["edge", "marker"] }).map((pt) => pt.frame))].sort((a, b) => a - b);
+    // Shift adds beats and captions: every snap point.
+    const kinds: SnapPoint["kind"][] = e.shiftKey ? ["edge", "marker", "beat", "caption"] : ["edge", "marker"];
+    const edges = [...new Set(snapPoints(p, [0, Infinity], { kinds }).map((pt) => pt.frame))].sort((a, b) => a - b);
     const to = key === "arrowup" ? edges.filter((f) => f < frame).at(-1) : edges.find((f) => f > frame);
     return to !== undefined && seek(to);
   }
@@ -426,6 +532,17 @@ function onKey(e: KeyboardEvent) {
     app.set({ rate: next });
     return player.ref?.play();
   }
+  if (key === "home" || key === "end") return handled(), seek(key === "home" ? 0 : durationFrames(p));
+  if (!mod && (e.key === "[" || e.key === "]")) {
+    // The selected clip's start or end, else the clip under the playhead on the top video track.
+    const f = s.selection.length ? findItem(p, s.selection[0]) : null;
+    const it = f?.item ?? videoUnder(p, frame);
+    const span = it && itemSpan(p, it);
+    return span ? seek(e.key === "[" ? span.start : span.start + span.duration - 1) : say("no clip selected or under the playhead", true);
+  }
+  if (mod && key === "a") return handled(), selectItems(itemsAfter(p, p.tracks));
+  if (!mod && e.shiftKey && key === "m") return markerAroundSelection();
+  if (!mod && e.shiftKey && key === "f") return freezeFrame(frame);
   if (mod && key === "z") return handled(), history(e.shiftKey ? "redo" : "undo");
   if (mod && key === "c") return s.selection.length ? (handled(), copy()) : undefined;
   if (mod && key === "v") return handled(), paste(frame, e.shiftKey);

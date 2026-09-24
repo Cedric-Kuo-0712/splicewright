@@ -8,7 +8,7 @@ import { validate } from "./validate.ts";
 // Spec §6. The only Node-dependent part of core.
 
 type Err = { error: { code: string; message: string } };
-interface HistoryEntry { op: string; args: unknown; project: Project }
+interface HistoryEntry { op: string; args: unknown; project: Project; summary?: string }
 
 export const cacheDir = (dir: string, ...parts: string[]) => join(dir, ".splicewright", ...parts);
 
@@ -110,7 +110,7 @@ export function run(dir: string, op: string, args: unknown, baseRevision?: numbe
   if ("error" in r) return r;
   const c = commit(dir, r.project, before.revision, ctx);
   if ("error" in c) return c;
-  push(dir, "undo", { op, args, project: before });
+  push(dir, "undo", { op, args, project: before, summary: r.changes.summary });
   rmSync(cacheDir(dir, "history", "redo"), { recursive: true, force: true });
   return r;
 }
@@ -130,8 +130,24 @@ function step(dir: string, from: "undo" | "redo", to: "undo" | "redo"): OpResult
   const c = commit(dir, restored, current.revision);
   if ("error" in c) return c;
   rmSync(join(stack, top));
-  push(dir, to, { op: entry.op, args: entry.args, project: current });
-  return { project: restored, changes: { summary: `${from} ${entry.op}` } };
+  push(dir, to, { op: entry.op, args: entry.args, project: current, summary: entry.summary });
+  return { project: restored, changes: { summary: `${from} ${entry.summary ?? entry.op}` } };
+}
+
+/**
+ * The latest `limit` steps of each stack, newest first: what undo (or redo) would revert next comes first.
+ * ponytail: parses whole snapshots to read one line each; keep an index file if stacks get long.
+ */
+export function historyList(dir: string, limit = 30) {
+  const list = (stack: "undo" | "redo") => {
+    const d = cacheDir(dir, "history", stack);
+    if (!existsSync(d)) return [];
+    return readdirSync(d).sort().reverse().slice(0, limit).map((f) => {
+      const e: HistoryEntry = JSON.parse(readFileSync(join(d, f), "utf8"));
+      return { summary: e.summary ?? e.op, revision: e.project.revision };
+    });
+  };
+  return { undo: list("undo"), redo: list("redo") };
 }
 
 function push(dir: string, stack: "undo" | "redo", entry: HistoryEntry) {

@@ -1,4 +1,4 @@
-import type { Ctx, Project } from "@splicewright/core";
+import { frameOf, type Ctx, type Project } from "@splicewright/core";
 
 export type Ranges = [number, number][];
 
@@ -8,7 +8,6 @@ export type Ranges = [number, number][];
  * (Node) and handed to the composition as a prop, so the composition stays pure.
  */
 export function duckRanges(p: Project, ctx: Ctx): Record<string, Ranges> {
-  const fps = p.meta.fps;
   const out: Record<string, Ranges> = {};
   for (const t of p.tracks)
     for (const a of t.items) {
@@ -20,8 +19,8 @@ export function duckRanges(p: Project, ctx: Ctx): Record<string, Ranges> {
         .flatMap((v) => {
           const end = v.start + v.duration;
           return (ctx.transcript?.(v.assetId) ?? []).flatMap(({ start, end: e }): Ranges => {
-            const lo = Math.max(v.start, v.start + Math.round((start - v.sourceIn) * fps));
-            const hi = Math.min(end, v.start + Math.round((e - v.sourceIn) * fps));
+            const lo = Math.max(v.start, Math.round(frameOf(p, v, start)));
+            const hi = Math.min(end, Math.round(frameOf(p, v, e)));
             return hi > lo ? [[lo, hi]] : [];
           });
         })

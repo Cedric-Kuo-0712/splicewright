@@ -16,12 +16,30 @@ export function itemSpan(project: Project, it: Item): { start: number; duration:
   if (!anchor) return { start: it.start, duration: it.duration };
   const item = videoItems(project).get(anchor.itemId);
   if (!item) return null;
-  const fps = project.meta.fps;
   const lo = Math.max(anchor.sourceStart, item.sourceIn);
-  const hi = Math.min(anchor.sourceEnd, item.sourceIn + item.duration / fps);
-  const start = item.start + Math.round((lo - item.sourceIn) * fps);
-  const end = item.start + Math.round((hi - item.sourceIn) * fps);
+  const hi = Math.min(anchor.sourceEnd, sourceAt(project, item, item.start + item.duration));
+  const start = Math.round(frameOf(project, item, lo));
+  const end = Math.round(frameOf(project, item, hi));
   return end - start >= 1 ? { start, duration: end - start } : null;
+}
+
+type Media = { start: number; sourceIn: number; speed?: number };
+
+/** Source seconds per timeline frame (speed only exists on video items). */
+export const secPerFrame = (p: Project, i: Media) => (i.speed ?? 1) / p.meta.fps;
+/** Source seconds shown at timeline frame `f`. */
+export const sourceAt = (p: Project, i: Media, f: number) => i.sourceIn + (f - i.start) * secPerFrame(p, i);
+/** Timeline frame (unrounded) that shows source second `s`. */
+export const frameOf = (p: Project, i: Media, s: number) => i.start + (s - i.sourceIn) / secPerFrame(p, i);
+
+/** A video item's transition when the next item touches it: that item, plus the frames before and
+ * after the cut the transition covers. */
+export function transitionOf(t: Track, it: Item) {
+  const tr = t.kind === "video" ? (it as VideoItem).transition : undefined;
+  const next = tr && (t.items as VideoItem[]).find((i) => i.start === it.start + it.duration);
+  if (!tr || !next) return undefined;
+  const half = Math.floor(tr.duration / 2);
+  return { kind: tr.kind, next, before: Math.min(half, it.duration), after: Math.min(tr.duration - half, next.duration) };
 }
 
 export function videoItems(project: Project): Map<string, VideoItem> {
@@ -53,8 +71,17 @@ export function validate(project: unknown, prev?: Project, ctx: Ctx = {}): strin
       if ("assetId" in i) {
         if (!p.assets[i.assetId]) errs.push(`${i.id}: unknown asset ${i.assetId}`);
         const dur = ctx.assetDurations?.[i.assetId];
-        if (dur !== undefined && i.sourceIn + i.duration / p.meta.fps > dur + 1e-6)
+        if (dur !== undefined && sourceAt(p, i, i.start + i.duration) > dur + 1e-6)
           errs.push(`${i.id}: source range ends past asset duration ${dur}s`);
+        // dissolve and wipe play both sides past the cut; images have no source limits.
+        const tr = transitionOf(t, i);
+        if (tr && tr.kind !== "dip") {
+          const still = (x: { assetId: string }) => p.assets[x.assetId]?.kind === "image";
+          if (!still(i) && dur !== undefined && sourceAt(p, i, i.start + i.duration + tr.after) > dur + 1e-6)
+            errs.push(`${i.id}: ${tr.kind} into ${tr.next.id} needs ${tr.after} frames of source after ${i.id}'s end; shorten it or use dip`);
+          if (!still(tr.next) && sourceAt(p, tr.next, tr.next.start - tr.before) < -1e-6)
+            errs.push(`${i.id}: ${tr.kind} into ${tr.next.id} needs ${tr.before} frames of source before ${tr.next.id}'s start; shorten it or use dip`);
+        }
       }
       const anchor = anchorOf(i);
       if (anchor && !vids.has(anchor.itemId)) errs.push(`${i.id}: anchored to missing video item ${anchor.itemId}`);

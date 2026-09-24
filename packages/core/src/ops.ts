@@ -1,7 +1,7 @@
 import { z } from "zod";
-import type { Anchor, AudioItem, CaptionItem, Ctx, Item, Project, Track, TrackKind } from "./schema.ts";
+import type { Anchor, AudioItem, CaptionItem, Ctx, Item, Project, Track, TrackKind, VideoItem } from "./schema.ts";
 import { beatFrames, snap, snapPoints, snapSpan } from "./timing.ts";
-import { anchorOf, itemSpan, validate, videoItems } from "./validate.ts";
+import { anchorOf, itemSpan, secPerFrame, sourceAt, validate, videoItems } from "./validate.ts";
 
 // Spec §5. Every op mutates a private clone; `apply` bumps the revision and validates.
 
@@ -54,7 +54,7 @@ const EXT_KIND: Record<string, "video" | "audio" | "image"> = {
 };
 
 const ITEM_PROPS: Record<TrackKind, string[]> = {
-  video: ["volume", "fit", "transform", "label", "note"],
+  video: ["volume", "fit", "transform", "fadeIn", "fadeOut", "transition", "speed", "label", "note"],
   audio: ["volume", "fadeIn", "fadeOut", "label", "note"],
   caption: ["label", "note"],
   overlay: ["props", "label", "note"],
@@ -97,7 +97,7 @@ const DENSITY = z
 /** Timeline frame → source seconds of the anchor's target. */
 function toSource(p: Project, anchor: Anchor, frame: number): number {
   const target = videoItems(p).get(anchor.itemId) ?? fail("not_found", `anchor target ${anchor.itemId} not found`);
-  return target.sourceIn + (frame - target.start) / p.meta.fps;
+  return sourceAt(p, target, frame);
 }
 
 function spanText(p: Project, item: Item): string {
@@ -252,9 +252,10 @@ export const ops: Record<string, OpDef<any>> = {
       second.start = a.at;
       second.duration = item.duration - offset;
       item.duration = offset;
-      if ("sourceIn" in second) second.sourceIn += offset / p.meta.fps;
+      if ("sourceIn" in second) second.sourceIn += offset * secPerFrame(p, item as VideoItem);
       delete (second as { fadeIn?: number }).fadeIn;
       delete (item as { fadeOut?: number }).fadeOut;
+      delete (item as VideoItem).transition; // it leads out of the second half now
       (t.items as Item[]).splice(t.items.indexOf(item as never) + 1, 0, second);
 
       let moved = 0;
@@ -293,7 +294,7 @@ export const ops: Record<string, OpDef<any>> = {
         // The right edge stays put (or, with ripple, the left edge stays and later items follow).
         const delta = a.to - item.start;
         item.duration -= delta;
-        if ("sourceIn" in item) item.sourceIn += delta / p.meta.fps;
+        if ("sourceIn" in item) item.sourceIn += delta * secPerFrame(p, item as VideoItem);
         if (ripple) shift(t, oldEnd, -delta);
         else item.start = a.to;
       }
@@ -313,7 +314,7 @@ export const ops: Record<string, OpDef<any>> = {
       (dst.items as Item[]).push(item);
       const anchor = anchorOf(item);
       if (anchor) {
-        const delta = (a.to - item.start) / p.meta.fps;
+        const delta = toSource(p, anchor, a.to) - toSource(p, anchor, item.start);
         anchor.sourceStart += delta;
         anchor.sourceEnd += delta;
         return `re-anchored ${item.id} on ${dst.id} → ${spanText(p, item)}`;
@@ -401,11 +402,27 @@ export const ops: Record<string, OpDef<any>> = {
   ),
 
   setProps: def(
-    'Patch item fields: volume, fit, transform (video); volume, fadeIn, fadeOut (audio); props (overlay); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
+    'Patch item fields: volume, fit, transform, fadeIn, fadeOut, transition {kind: dissolve|dip|wipe, duration}, speed (video; speed here keeps duration, so the source range scales; setSpeed keeps the source range); volume, fadeIn, fadeOut (audio); props (overlay); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
     const { track: t, item } = locate(p, a.itemId);
     patch(item as Record<string, unknown>, a.patch, ITEM_PROPS[t.kind], `${t.kind} item ${item.id}`);
     return `updated ${item.id}: ${Object.keys(a.patch).join(", ")}`;
   }),
+
+  setSpeed: def(
+    "Play a video item at `speed` (0.1–10, 1 = normal) over the same source range: its duration scales to fit. With ripple (default on magnetic tracks) later items follow its new end.",
+    z.object({ itemId: Id, speed: z.number().min(0.1).max(10), ripple: z.boolean().optional() }),
+    (p, a) => {
+      const { track: t, item } = locate(p, a.itemId);
+      const v = item as VideoItem;
+      if (t.kind !== "video" || !("assetId" in v) || p.assets[v.assetId]?.kind === "image") fail("invalid", `${item.id} is not a video clip`);
+      const oldEnd = end(v);
+      v.duration = Math.max(1, Math.round((v.duration * (v.speed ?? 1)) / a.speed));
+      if (a.speed === 1) delete v.speed;
+      else v.speed = a.speed;
+      if (a.ripple ?? t.magnetic) shift(t, oldEnd, end(v) - oldEnd);
+      return `${item.id} at ${a.speed}× → ${v.duration}f`;
+    },
+  ),
 
   slip: def(
     'Shift which source media an item shows by deltaSec; timeline position unchanged.',z.object({ itemId: Id, deltaSec: z.number() }), (p, a) => {
@@ -588,7 +605,6 @@ export const ops: Record<string, OpDef<any>> = {
       const items = t.items.filter((i) => i.start >= lo && i.start < hi);
       if (!items.length) fail("not_found", `no items on ${t.id} start in [${lo}, ${hi})`);
 
-      const fps = p.meta.fps;
       // Beat grid origin: the last beat at or before `from`; -1 makes the first beat after it beat 1.
       let k = beats.findLastIndex((b) => b <= (a.from ?? items[0].start));
       const changed: string[] = [];
@@ -602,7 +618,7 @@ export const ops: Record<string, OpDef<any>> = {
         let j = want;
         if (p.assets[item.assetId]?.kind === "video") {
           const len = ctx.assetDurations?.[item.assetId];
-          const max = len === undefined ? undefined : Math.floor((len - item.sourceIn) * fps);
+          const max = len === undefined ? undefined : Math.floor((len - item.sourceIn) / secPerFrame(p, item));
           if (max === undefined) j = -1;
           else while (j >= 0 && beats[j] - item.start > max) j--;
           if (j === -1 || beats[j] <= item.start) {

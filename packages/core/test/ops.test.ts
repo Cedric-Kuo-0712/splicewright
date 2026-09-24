@@ -218,6 +218,29 @@ describe("ops", () => {
     expect(ok(apply(p, "moveTrack", { trackId: "t_3", to: 99 }, ctx)).tracks.map((t) => t.id)).toEqual(["t_1", "t_2", "t_3"]);
   });
 
+  it("setSpeed scales duration over the same source; split and trim read source at that speed", () => {
+    const p = ok(apply(fixture(), "setSpeed", { itemId: "i_1", speed: 2 }, ctx));
+    expect(item(p, "i_1")).toMatchObject({ duration: 45, speed: 2, sourceIn: 0 });
+    expect(item(p, "i_2").start).toBe(45); // magnetic: later items follow
+    const cut = ok(apply(p, "split", { itemId: "i_1", at: 15 }, ctx));
+    expect(item(cut, "i_3").sourceIn).toBeCloseTo(1);
+    expect(item(ok(apply(p, "trim", { itemId: "i_1", edge: "start", to: 15 }, ctx)), "i_1").sourceIn).toBeCloseTo(1);
+    expect(item(ok(apply(p, "setSpeed", { itemId: "i_1", speed: 1 }, ctx)), "i_1").speed).toBeUndefined();
+    // setProps speed keeps the duration, so i_2 would read 5 s + 60f × 4 / 30 = 13 s of a 10 s clip.
+    expect(err(apply(fixture(), "setProps", { itemId: "i_2", patch: { speed: 4 } }, ctx))).toBe("invalid");
+  });
+
+  it("dissolve needs source past both sides of the cut; dip doesn't; split keeps it on the second half", () => {
+    const tr = (kind: string) => ({ itemId: "i_1", patch: { transition: { kind, duration: 30 } } });
+    const p = ok(apply(fixture(), "setProps", tr("dissolve"), ctx));
+    const slipped = ok(apply(fixture(), "slip", { itemId: "i_2", deltaSec: -5 }, ctx)); // i_2 now starts at source 0
+    expect(err(apply(slipped, "setProps", tr("dissolve"), ctx))).toBe("invalid");
+    ok(apply(slipped, "setProps", tr("dip"), ctx));
+    const cut = ok(apply(p, "split", { itemId: "i_1", at: 30 }, ctx));
+    expect(item(cut, "i_1").transition).toBeUndefined();
+    expect(item(cut, "i_3").transition).toMatchObject({ kind: "dissolve" });
+  });
+
   it("batch is atomic: all or nothing, one revision", () => {
     const p = fixture();
     const swap = ok(

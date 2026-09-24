@@ -1,4 +1,4 @@
-import { anchorOf, durationFrames, itemSpan, nextId, type Item, type Project, type Track, type TrackKind } from "@splicewright/core";
+import { anchorOf, durationFrames, itemSpan, nextId, secPerFrame, type Item, type Project, type Track, type TrackKind, type VideoItem } from "@splicewright/core";
 import { app, history, ioRange, op, player, playhead, refresh, say, seek, type MenuEntry } from "./store.ts";
 
 // Editing commands shared by the keyboard, the toolbar, and the context menus. Multi-op edits go out
@@ -123,7 +123,7 @@ function edgeNear(t: Track, f: number) {
 
 // Fields insertItem doesn't take; setProps copies them.
 // ponytail: beats, downbeats and duck aren't copied; add a pasteItems op if pasted songs need them.
-const EXTRA = ["volume", "fit", "transform", "fadeIn", "fadeOut", "label", "note"];
+const EXTRA = ["volume", "fit", "transform", "fadeIn", "fadeOut", "speed", "transition", "label", "note"];
 
 /**
  * Paste clips with their relative timing at `at`. Each lands on its own track if it still exists and is
@@ -311,7 +311,7 @@ export function replaceWith(assetId: string) {
   if ((a.kind === "audio") !== (f.track.kind === "audio")) return say(`${a.id} is ${a.kind}; ${f.item.id} is on a ${f.track.kind} track`, true);
   if (f.track.locked) return say(`${f.track.name} is locked`, true);
   const it = f.item;
-  const len = a.kind === "image" ? Infinity : Math.floor((durations[assetId] ?? 0) * p!.meta.fps);
+  const len = a.kind === "image" ? Infinity : Math.floor((durations[assetId] ?? 0) / secPerFrame(p!, it));
   if (!len) return say(`${a.id} has no known duration yet; wait for ingest`, true);
   const children = p!.tracks.flatMap((t) => t.items.filter((c) => anchorOf(c)?.itemId === it.id));
   const nid = idMaker(p!)("i");
@@ -325,6 +325,30 @@ export function replaceWith(assetId: string) {
     ...children.map((c) => ({ op: "attach", args: { itemId: c.id, to: nid } })),
   ];
   return send(ops).then((ok) => ok && app.set({ selection: [nid] }));
+}
+
+// ---- speed, transitions ----
+
+function setSpeed(item: VideoItem) {
+  const v = Number(prompt("Speed (0.1–10×; the clip's length scales)", String(item.speed ?? 1)));
+  if (v >= 0.1 && v <= 10) return op("setSpeed", { itemId: item.id, speed: v });
+}
+
+const TRANSITION_NAME = { dissolve: "Dissolve", dip: "Dip to black", wipe: "Wipe" } as const;
+
+function transitionEntries(p: Project, t: Track, item: VideoItem): MenuEntry[] {
+  const next = t.items.some((i) => i.start === end(item));
+  const cur = item.transition;
+  const set = (kind: keyof typeof TRANSITION_NAME | null) =>
+    op("setProps", { itemId: item.id, patch: { transition: kind && { kind, duration: cur?.duration ?? Math.round(p.meta.fps) } } });
+  return [
+    ...(Object.keys(TRANSITION_NAME) as (keyof typeof TRANSITION_NAME)[]).map((k) => ({
+      label: `${cur?.kind === k ? "✓ " : ""}${TRANSITION_NAME[k]} into next`,
+      run: () => set(k),
+      disabled: !next || t.locked,
+    })),
+    ...(cur ? [{ label: "Remove transition", run: () => set(null), disabled: t.locked }] : []),
+  ];
 }
 
 // ---- selection ----
@@ -422,7 +446,11 @@ export function itemMenu(p: Project, t: Track, item: Item, frame: number): MenuE
   if (t.kind === "video" && "assetId" in item) {
     out.push("-", { label: "Captions from transcript", run: () => op("addCaptionsFromTranscript", { itemId: item.id }) });
     out.push({ label: "Show in media bin", run: () => app.set({ reveal: item.assetId }) });
-    if (p.assets[item.assetId]?.kind === "video") out.push({ label: "Freeze frame here (2 s)", hint: "⇧F", run: () => freezeFrame(frame), disabled: !inside || t.locked });
+    if (p.assets[item.assetId]?.kind === "video") {
+      out.push({ label: "Freeze frame here (2 s)", hint: "⇧F", run: () => freezeFrame(frame), disabled: !inside || t.locked });
+      out.push({ label: `Speed… (${(item as VideoItem).speed ?? 1}×)`, run: () => setSpeed(item as VideoItem), disabled: t.locked });
+    }
+    out.push("-", ...transitionEntries(p, t, item as VideoItem));
     if (p.assets[item.assetId]?.kind !== "image") out.push({ label: "Slip…", hint: "⌥drag, ⌥, ⌥.", run: () => say("hold Alt and drag the item, or press Alt+, / Alt+. to slip a frame") });
   }
   if (t.kind === "audio") {

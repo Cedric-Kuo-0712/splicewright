@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { anchorOf, beatFrames, durationFrames, formatFrame, gapAt, itemSpan, rulerTicks, snap, snapPoints, snapSpan, type AudioItem, type CaptionItem, type Item, type Project, type SnapPoint, type Track } from "@splicewright/core";
+import { anchorOf, beatFrames, durationFrames, formatFrame, gapAt, itemSpan, rulerTicks, secPerFrame, snap, snapPoints, snapSpan, transitionOf, type AudioItem, type CaptionItem, type Item, type Project, type SnapPoint, type Track, type VideoItem } from "@splicewright/core";
 import { app, dnd, ioRange, op, playhead, say, seek } from "./store.ts";
 import { dropFiles, findItem, insertOnNewTrack, laneMenu, markerMenu, openMenu, itemMenu, rulerMenu, trackMenu, videoUnder } from "./edit.ts";
 
@@ -148,8 +148,9 @@ export function Timeline() {
     if (drag.mode === "slip") {
       // Dragging right moves the film strip right: earlier source shows.
       const len = s.durations[(drag.item as { assetId: string }).assetId];
-      const max = len === undefined ? Infinity : len - drag.span.duration / fps;
-      const want = drag.sourceIn! - d / fps;
+      const spf = secPerFrame(p, drag.item as VideoItem);
+      const max = len === undefined ? Infinity : len - drag.span.duration * spf;
+      const want = drag.sourceIn! - d * spf;
       const to = Math.min(max, Math.max(0, want));
       app.set({ slip: { itemId: id, sourceIn: to } });
       return setDrag({ ...drag, slipTo: to, limit: to !== want });
@@ -433,9 +434,13 @@ export function Timeline() {
                         {"assetId" in shown && t.kind === "audio" && <Wave assetId={shown.assetId} sourceIn={shown.sourceIn} fps={fps} ppf={ppf} duration={duration} />}
                         {t.kind === "audio" && !(live && live.mode !== "move") && <BeatTicks p={p} item={item as AudioItem} ppf={ppf} />}
                         {live?.mode === "slip" && <SlipEnds p={p} item={shown as Item & { assetId: string; sourceIn: number }} />}
-                        {t.kind === "audio" && !t.locked && !live && <AudioHandles item={item as AudioItem} ppf={ppf} />}
-                        <span className="name">{"text" in item ? item.text : "component" in item ? item.component : (item.label ?? p.assets[item.assetId]?.path)}</span>
+                        {"sourceIn" in item && !t.locked && !live && <FadeHandles item={item} ppf={ppf} />}
+                        <span className="name">
+                          {"text" in item ? item.text : "component" in item ? item.component : (item.label ?? p.assets[item.assetId]?.path)}
+                          {"speed" in item && item.speed ? ` · ${item.speed}×` : ""}
+                        </span>
                       </div>
+                      <TransitionMark t={t} item={item} ppf={ppf} />
                       {editing?.kind === "caption" && editing.id === item.id && <CaptionEditor p={p} t={t} item={item as CaptionItem} left={start * ppf} width={Math.max(240, duration * ppf)} />}
                     </React.Fragment>
                   );
@@ -581,7 +586,7 @@ function CaptionEditor({ p, t, item, left, width }: { p: Project; t: Track; item
 
 /** Slip preview: the new first and last source frames at the item's ends. */
 function SlipEnds({ p, item }: { p: Project; item: Item & { assetId: string; sourceIn: number } }) {
-  const last = item.sourceIn + (item.duration - 1) / p.meta.fps;
+  const last = item.sourceIn + (item.duration - 1) * secPerFrame(p, item);
   return (
     <>
       <img className="slip-end in" src={`/api/thumb?asset=${item.assetId}&t=${Math.floor(item.sourceIn)}`} alt="" draggable={false} />
@@ -593,8 +598,16 @@ function SlipEnds({ p, item }: { p: Project; item: Item & { assetId: string; sou
   );
 }
 
+/** The span a transition covers across the cut after `item`. */
+function TransitionMark({ t, item, ppf }: { t: Track; item: Item; ppf: number }) {
+  const tr = transitionOf(t, item);
+  if (!tr) return null;
+  const cut = item.start + item.duration;
+  return <div className={`xfade ${tr.kind}`} style={{ left: (cut - tr.before) * ppf, width: (tr.before + tr.after) * ppf }} title={`${tr.kind} ${tr.before + tr.after}f into ${tr.next.id}`} />;
+}
+
 /** Fade wedges with corner handles, and a volume line to drag up and down (shown on hover or selection). */
-function AudioHandles({ item, ppf }: { item: AudioItem; ppf: number }) {
+function FadeHandles({ item, ppf }: { item: AudioItem | VideoItem; ppf: number }) {
   const [live, setLive] = useState<{ fadeIn?: number; fadeOut?: number; volume?: number } | null>(null);
   const fadeIn = live?.fadeIn ?? item.fadeIn ?? 0;
   const fadeOut = live?.fadeOut ?? item.fadeOut ?? 0;
@@ -657,7 +670,7 @@ function Thumbs({ p, item, width, viewLeft, viewWidth }: { p: Project; item: Ite
   const ppf = width / item.duration;
   const out: React.ReactNode[] = [];
   for (let x = Math.max(0, Math.floor(viewLeft / W) * W); x < Math.min(width, viewLeft + viewWidth); x += W) {
-    const t = Math.floor(item.sourceIn + x / ppf / fps);
+    const t = Math.floor(item.sourceIn + (x / ppf) * secPerFrame(p, item));
     out.push(<img key={x} src={`/api/thumb?asset=${item.assetId}&t=${t}`} style={{ left: x, width: W }} draggable={false} alt="" />);
   }
   return <div className="thumbs">{out}</div>;

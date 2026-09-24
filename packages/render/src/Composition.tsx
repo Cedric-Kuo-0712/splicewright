@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame } from "remotion";
-import { itemSpan, type AudioItem, type Item, type Project, type Track, type VideoItem } from "@splicewright/core";
+import { itemSpan, transitionOf, type AudioItem, type Item, type Project, type Track, type VideoItem } from "@splicewright/core";
 import type { Config } from "./config.ts";
 import { duckGain, type Ranges } from "./duck.ts";
 
@@ -66,8 +66,41 @@ const Captions: React.FC<{ p: Project; t: Track; Layer: React.ComponentType<{ te
   return texts.length ? <Layer texts={texts} /> : null;
 };
 
-const Video: React.FC<{ p: Project; item: VideoItem; muted?: boolean }> = ({ p, item, muted }) => {
+type Transition = NonNullable<ReturnType<typeof transitionOf>>;
+const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
+
+/** How a video item looks and sounds at timeline frame `f`: its fades, plus the transition into it
+ * (`inc`, from the item before) and out of it. dissolve and wipe lay the incoming item over the
+ * outgoing one across the cut; dip darkens to black before the cut and back after it. */
+function look(item: VideoItem, f: number, inc?: Transition, out?: Transition) {
+  const end = item.start + item.duration;
+  let opacity = 1;
+  let bright = 1;
+  let gain = 1;
+  let clip: string | undefined;
+  if (item.fadeIn) gain *= clamp01((f - item.start) / item.fadeIn);
+  if (item.fadeOut) gain *= clamp01((end - f) / item.fadeOut);
+  opacity *= gain;
+  if (inc) {
+    const t = clamp01((f - item.start + inc.before) / (inc.before + inc.after));
+    const d = clamp01((f - item.start) / inc.after);
+    if (inc.kind === "dissolve") (opacity *= t), (gain *= t);
+    else if (inc.kind === "wipe") (clip = `inset(0 ${(1 - t) * 100}% 0 0)`), (gain *= t);
+    else (bright *= d), (gain *= d);
+  }
+  if (out) {
+    const t = clamp01((f - end + out.before) / (out.before + out.after));
+    const d = clamp01((end - f) / out.before);
+    if (out.kind === "dip") (bright *= d), (gain *= d);
+    else gain *= 1 - t; // stays in view under the incoming item
+  }
+  return { opacity, bright, gain, clip };
+}
+
+const Video: React.FC<{ p: Project; item: VideoItem; muted?: boolean; from: number; inc?: Transition; out?: Transition }> = ({ p, item, muted, from, inc, out }) => {
   const asset = p.assets[item.assetId];
+  const l = look(item, from + useCurrentFrame(), inc, out);
+  const speed = item.speed ?? 1;
   const { x = 0, y = 0, scale = 1, rotation = 0, opacity } = item.transform ?? {};
   const rot = (asset.rotation ?? 0) + rotation;
   const swap = Math.abs(rot % 180) === 90;
@@ -78,12 +111,29 @@ const Video: React.FC<{ p: Project; item: VideoItem; muted?: boolean }> = ({ p, 
     transform: rot ? `rotate(${rot}deg)` : undefined,
   };
   return (
-    <AbsoluteFill style={{ ...center, opacity, transform: x || y || scale !== 1 ? `translate(${x}px, ${y}px) scale(${scale})` : undefined }}>
+    <AbsoluteFill
+      style={{
+        ...center,
+        opacity: (opacity ?? 1) * l.opacity,
+        filter: l.bright < 1 ? `brightness(${l.bright})` : undefined,
+        clipPath: l.clip,
+        transform: x || y || scale !== 1 ? `translate(${x}px, ${y}px) scale(${scale})` : undefined,
+      }}
+    >
       {asset.kind === "image" ? (
         <Img src={staticFile(asset.path)} style={style} />
       ) : (
         // ponytail: sourceIn is rounded to whole frames, as video-cut did; pass seconds if sub-frame seeks matter.
-        <OffthreadVideo src={staticFile(asset.path)} trimBefore={Math.round(item.sourceIn * p.meta.fps)} volume={item.volume ?? 1} muted={muted} style={style} />
+        // trimBefore is in source frames (Remotion doesn't scale it by playbackRate); `from` may sit before
+        // item.start when a transition plays the incoming item early.
+        <OffthreadVideo
+          src={staticFile(asset.path)}
+          trimBefore={Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps)}
+          playbackRate={speed}
+          volume={(f) => (item.volume ?? 1) * look(item, from + f, inc, out).gain}
+          muted={muted}
+          style={style}
+        />
       )}
     </AbsoluteFill>
   );
@@ -109,8 +159,8 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
     if (!C) throw new Error(`unknown component "${name}" on ${where}; register it in splicewright.config.ts`);
     return C;
   };
-  const body = (t: Track, item: Item) => {
-    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} /> : <Video p={p} item={item as VideoItem} muted={t.muted} />;
+  const body = (t: Track, item: Item, from: number, inc?: Transition, out?: Transition) => {
+    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} /> : <Video p={p} item={item as VideoItem} muted={t.muted} from={from} inc={inc} out={out} />;
     const C = component((item as { component: string }).component, item.id);
     return <C {...(item as { props: object }).props} />;
   };
@@ -123,12 +173,18 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
           <Captions key={t.id} p={p} t={t} Layer={component(t.style ?? "CaptionLayer", t.id)} />
         ) : (
           <React.Fragment key={t.id}>
-            {t.items.map((item) => {
+            {/* Video items in time order, so an incoming item draws over the outgoing one. */}
+            {(t.kind === "video" ? [...t.items].sort((a, b) => a.start - b.start) : t.items).map((item, k, list) => {
               const span = itemSpan(p, item);
               if (!span) return null;
+              const inc = k > 0 ? transitionOf(t, list[k - 1]) : undefined;
+              const out = transitionOf(t, item);
+              // dissolve and wipe play the handles: the incoming item starts early, the outgoing one runs late.
+              const lead = inc && inc.next === item && inc.kind !== "dip" ? inc.before : 0;
+              const tail = out && out.kind !== "dip" ? out.after : 0;
               return (
-                <Sequence key={item.id} from={span.start} durationInFrames={span.duration} name={item.label ?? item.id}>
-                  {body(t, item)}
+                <Sequence key={item.id} from={span.start - lead} durationInFrames={span.duration + lead + tail} name={item.label ?? item.id}>
+                  {body(t, item, span.start - lead, inc?.next === item ? inc : undefined, out)}
                 </Sequence>
               );
             })}

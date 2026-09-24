@@ -1,6 +1,6 @@
 import type { AudioItem, Ctx, Item, Project } from "./schema.ts";
 import { beatFrames } from "./timing.ts";
-import { itemSpan } from "./validate.ts";
+import { frameOf, itemSpan, sourceAt } from "./validate.ts";
 
 // Token-budget read views (§7.2). Pure; shared by `splicewright status` and the MCP read tools.
 
@@ -68,7 +68,7 @@ export function getItem(p: Project, itemId: string, ctx: Ctx = {}) {
       if (item.id !== itemId) continue;
       if (!("assetId" in item)) return { track: t.id, item, visible: visible(p, item) !== null };
       const lo = item.sourceIn;
-      const hi = lo + item.duration / p.meta.fps;
+      const hi = sourceAt(p, item, item.start + item.duration);
       return {
         track: t.id,
         item,
@@ -85,7 +85,6 @@ export function find(p: Project, query: string, ctx: Ctx = {}, limit = 50) {
   const q = query.toLowerCase();
   const hits: { track: string; itemId: string; start: number; field: string; text: string }[] = [];
   const has = (s: unknown) => typeof s === "string" && s.toLowerCase().includes(q);
-  const fps = p.meta.fps;
   for (const t of p.tracks)
     for (const item of t.items) {
       const add = (field: string, text: string, start = item.start) => hits.push({ track: t.id, itemId: item.id, start, field, text });
@@ -94,10 +93,10 @@ export function find(p: Project, query: string, ctx: Ctx = {}, limit = 50) {
       if ("text" in item && has(item.text)) add("text", item.text, visible(p, item)?.start ?? item.start);
       if ("props" in item && has(JSON.stringify(item.props))) add("props", JSON.stringify(item.props));
       if (t.kind === "video" && "assetId" in item) {
-        const hi = item.sourceIn + item.duration / fps;
+        const hi = sourceAt(p, item, item.start + item.duration);
         for (const s of ctx.transcript?.(item.assetId) ?? [])
           if (s.start < hi && s.end > item.sourceIn && has(s.text))
-            add("transcript", s.text.trim(), item.start + Math.max(0, Math.round((s.start - item.sourceIn) * fps)));
+            add("transcript", s.text.trim(), Math.max(item.start, Math.round(frameOf(p, item, s.start))));
       }
     }
   return hits.sort((a, b) => a.start - b.start).slice(0, limit);

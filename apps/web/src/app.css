@@ -125,3 +125,5 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .tf-rot { position: absolute; left: 50%; top: -26px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #fcc419; border: 1px solid #000; cursor: grab; }
 .tf-rot::after { content: ""; position: absolute; left: 5px; top: 11px; width: 1px; height: 14px; background: #fcc419; }
 .tf-label { position: absolute; left: 4px; top: 4px; font: 10px ui-monospace, monospace; background: #000b; color: #fcc419; padding: 0 4px; border-radius: 2px; white-space: nowrap; pointer-events: none; }
+.xfade { position: absolute; top: 3px; bottom: 3px; z-index: 4; pointer-events: none; border: 1px solid #fff9; border-radius: 3px; background: linear-gradient(to top right, transparent 48%, #fffa 49% 51%, transparent 52%), linear-gradient(to bottom right, transparent 48%, #fffa 49% 51%, transparent 52%), #0006; }
+.xfade.dip { background: linear-gradient(to bottom right, transparent 48%, #fffa 49% 51%, transparent 52%) left / 50% 100% no-repeat, linear-gradient(to top right, transparent 48%, #fffa 49% 51%, transparent 52%) right / 50% 100% no-repeat, #000a; }

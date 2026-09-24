@@ -46,6 +46,14 @@ export const VideoItem = z.object({
   fit: z.enum(["contain", "cover"]).optional(),
   transform: Transform.optional(),
   role: z.string().optional(),
+  /** Playback rate: source seconds per timeline second. Changes how much source `duration` covers. */
+  speed: z.number().min(0.1).max(10).optional(),
+  /** Opacity and volume ramps at the ends, in frames. */
+  fadeIn: Frames.min(0).optional(),
+  fadeOut: Frames.min(0).optional(),
+  /** Into the next item on the track when they touch, centred on the cut. dissolve and wipe need
+   * duration/2 frames of source past both sides of the cut; dip goes through black and needs none. */
+  transition: z.object({ kind: z.enum(["dissolve", "dip", "wipe"]), duration: Frames.min(2) }).optional(),
 });
 
 export const AudioItem = z.object({

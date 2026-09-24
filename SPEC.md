@@ -127,6 +127,12 @@ interface VideoItem extends ItemBase {
   fit?: "contain" | "cover";
   transform?: { x?: number; y?: number; scale?: number; rotation?: number; opacity?: number };
   role?: string;                    // free tag: "talking_head", "broll", ...
+  speed?: number;                   // 0.1..10, source seconds per timeline second; no reverse
+  fadeIn?: Frames;                  // opacity and volume ramps
+  fadeOut?: Frames;
+  // Into the next item on the track when they touch, centred on the cut (Diffusion Studio's model).
+  // dissolve/wipe play duration/2 frames of source past both sides of the cut; dip needs no handles.
+  transition?: { kind: "dissolve" | "dip" | "wipe"; duration: Frames };
 }
 
 interface AudioItem extends ItemBase {
@@ -172,7 +178,8 @@ Readable ids matter because agents quote them back.
 1. `duration >= 1` and `start >= 0` for every item.
 2. No two items on the same video/audio/overlay track overlap.
 3. Every `assetId` exists in `assets`; every anchored caption's `itemId` exists.
-4. `sourceIn >= 0` and `sourceIn + duration/fps <= asset.duration` (when probed duration is known).
+4. `sourceIn >= 0` and `sourceIn + duration × speed/fps <= asset.duration` (when probed duration is known);
+   a dissolve or wipe also needs its handles inside the source (images always have them).
 5. Item and track ids are unique.
 6. Locked tracks are unchanged relative to the previous revision.
 
@@ -193,7 +200,8 @@ The adapters (UI/CLI/MCP) only call ops and persist the result.
 | `move` | itemId, to, trackId?, ripple? | Rejects overlap unless `ripple`. |
 | `delete` | itemIds[], ripple? | Ripple closes the gap on magnetic tracks. |
 | `closeGap` | trackId, at | Closes the empty span containing `at`; later non-anchored items shift left. |
-| `setProps` | itemId, patch | Whitelisted fields only (volume, fit, transform, fades, props, label, note). |
+| `setProps` | itemId, patch | Whitelisted fields only (volume, fit, transform, fades, transition, speed, props, label, note). `speed` here keeps the duration. |
+| `setSpeed` | itemId, speed, ripple? | Video only: keeps the source range, scales the duration; ripple (default on magnetic) moves later items. |
 | `slip` | itemId, deltaSec | Changes `sourceIn` only; timeline position unchanged. |
 | `addTrack` / `removeTrack` / `setTrack` | … | Empty tracks are allowed (unlike OpenCut). |
 | `moveTrack` | trackId, to | Moves a track to layer index `to` (0 = bottom). |
@@ -296,7 +304,9 @@ Evolves from `video-cut/apps/editor`. Every mutation goes through core ops.
   - Alt-drag a video item's body slips it (the player shows the new first frame; stops at the source edges); Alt+, / Alt+. slip one frame.
     Alt-drag a caption or overlay re-attaches it to the video under its new start.
   - Double-click a caption to edit it in place: Enter saves, Shift+Enter breaks the line, Esc cancels, Tab saves and edits the next.
-  - Audio items show fade-in/out handles and a volume line (0–2, with dB) on hover or selection.
+  - Audio and video items show fade-in/out handles and a volume line (0–2, with dB) on hover or selection.
+  - Video item menu and inspector: Speed… (setSpeed), transition into the next item (dissolve, dip to black, wipe);
+    the timeline marks each transition across its cut.
   - With one video item selected under the playhead, a box on the player drags its transform: body moves (snaps to center, Alt bypasses),
     corners scale, the top knob rotates (Shift: 15°), double-click resets.
   - Freeze frame (Shift+F, item menu): `POST /api/freeze {itemId, frame}` grabs the source frame into `raw/` as a PNG and imports it

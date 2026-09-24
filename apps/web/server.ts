@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { createServer, type Plugin } from "vite";
 import { fingerprint, historyList, load, loadCtx, readAssets, redo, run, undo } from "@splicewright/core/node";
+import { sourceAt } from "@splicewright/core";
 import { ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
 import { duckRanges } from "@splicewright/render/node";
 
@@ -143,7 +144,7 @@ function api(dir: string): Plugin {
             const asset = item && "assetId" in item ? p.assets[item.assetId] : undefined;
             if (!item || !("sourceIn" in item) || asset?.kind !== "video") return send(res, 400, { error: { message: `${itemId} is not a video item` } });
             const f = Math.min(Math.max(Number(frame) || 0, item.start), item.start + item.duration - 1);
-            const t = item.sourceIn + (f - item.start) / p.meta.fps;
+            const t = sourceAt(p, item, f);
             const tmp = join(dir, "raw", `.freeze-${process.pid}-${Date.now()}.png`);
             await ffmpeg(["-ss", t.toFixed(3), "-i", join(dir, asset.path), "-frames:v", "1", tmp]);
             const stem = basename(asset.path, extname(asset.path));

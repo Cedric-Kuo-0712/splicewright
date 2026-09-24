@@ -342,6 +342,8 @@ function MediaBin({ p }: { p: Project }) {
 }
 
 /** Text or number input that commits on Enter or blur; empty clears the field. */
+const TRANSITIONS = ["dissolve", "dip", "wipe"] as const;
+
 function Field({ label, value, onCommit, type = "text" }: { label: string; value: unknown; onCommit: (v: string | number | null) => void; type?: "text" | "number" }) {
   const initial = value === undefined || value === null ? "" : String(value);
   const commit = (raw: string) => raw !== initial && onCommit(raw === "" ? null : type === "number" ? Number(raw) : raw);
@@ -395,14 +397,14 @@ function Inspector({ p }: { p: Project }) {
         </>
       )}
       {"sourceIn" in item && <Field label="volume" type="number" value={item.volume} onCommit={(v) => set({ volume: v })} />}
-      {t.kind === "audio" && (
+      {"sourceIn" in item && (
         <>
-          <Field label="fade in (f)" type="number" value={(item as { fadeIn?: number }).fadeIn} onCommit={(v) => set({ fadeIn: v })} />
-          <Field label="fade out (f)" type="number" value={(item as { fadeOut?: number }).fadeOut} onCommit={(v) => set({ fadeOut: v })} />
-          <BeatFields p={p} item={item as AudioItem} />
+          <Field label="fade in (f)" type="number" value={item.fadeIn} onCommit={(v) => set({ fadeIn: v })} />
+          <Field label="fade out (f)" type="number" value={item.fadeOut} onCommit={(v) => set({ fadeOut: v })} />
         </>
       )}
-      {t.kind === "video" && "assetId" in item && <VideoFields item={item as Item & { fit?: string; transform?: Record<string, number> }} set={set} />}
+      {t.kind === "audio" && <BeatFields p={p} item={item as AudioItem} />}
+      {t.kind === "video" && "assetId" in item && <VideoFields item={item as VideoItem} fps={fps} still={p.assets[item.assetId]?.kind === "image"} set={set} />}
       {"component" in item && <PropsField value={item.props} onCommit={(props) => set({ props })} />}
     </div>
   );
@@ -451,8 +453,9 @@ function BeatFields({ p, item }: { p: Project; item: AudioItem }) {
   );
 }
 
-function VideoFields({ item, set }: { item: { fit?: string; transform?: Record<string, number> }; set: (patch: Record<string, unknown>) => void }) {
-  const tf = item.transform ?? {};
+function VideoFields({ item, fps, still, set }: { item: VideoItem; fps: number; still: boolean; set: (patch: Record<string, unknown>) => void }) {
+  const tf: Record<string, number> = item.transform ?? {};
+  const tr = item.transition;
   const setTf = (k: string, v: string | number | null) => {
     const next = { ...tf, [k]: v ?? undefined };
     if (v === null) delete next[k];
@@ -470,6 +473,15 @@ function VideoFields({ item, set }: { item: { fit?: string; transform?: Record<s
       {["x", "y", "scale", "rotation", "opacity"].map((k) => (
         <Field key={k} label={k} type="number" value={tf[k]} onCommit={(v) => setTf(k, v)} />
       ))}
+      {!still && <Field label="speed (×)" type="number" value={item.speed ?? 1} onCommit={(v) => Number(v) > 0 && op("setSpeed", { itemId: item.id, speed: Number(v) })} />}
+      <label className="field">
+        <span>transition out</span>
+        <select value={tr?.kind ?? ""} onChange={(e) => set({ transition: e.target.value ? { kind: e.target.value, duration: tr?.duration ?? Math.round(fps) } : null })}>
+          <option value="">none</option>
+          {TRANSITIONS.map((k) => <option key={k}>{k}</option>)}
+        </select>
+      </label>
+      {tr && <Field label="transition (f)" type="number" value={tr.duration} onCommit={(v) => Number(v) >= 2 && set({ transition: { ...tr, duration: Math.round(Number(v)) } })} />}
     </>
   );
 }

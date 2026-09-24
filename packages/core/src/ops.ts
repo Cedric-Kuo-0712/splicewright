@@ -125,6 +125,14 @@ function shift(t: Track, from: number, delta: number) {
   for (const i of t.items) if (i.start >= from) i.start += delta;
 }
 
+/** The empty span [from, to) containing frame `at` on `t`, if items follow it. Anchored items don't count. */
+export function gapAt(t: Track, at: number): [number, number] | undefined {
+  const free = t.items.filter((i) => !anchorOf(i));
+  if (free.some((i) => i.start <= at && at < end(i))) return;
+  const to = Math.min(...free.filter((i) => i.start > at).map((i) => i.start));
+  return to === Infinity ? undefined : [Math.max(0, ...free.filter((i) => end(i) <= at).map(end)), to];
+}
+
 function fits(t: Track, start: number, duration: number): boolean {
   return t.kind === "caption" || t.items.every((i) => end(i) <= start || i.start >= start + duration);
 }
@@ -353,6 +361,19 @@ export const ops: Record<string, OpDef<any>> = {
     },
   ),
 
+  closeGap: def(
+    "Close the empty span containing frame `at` on a track: every later item shifts left to meet the item before it (or frame 0). Anchored items are skipped; they follow their anchor item.",
+    z.object({ trackId: Id, at: Frames.min(0) }),
+    (p, a) => {
+      const t = findTrack(p, a.trackId);
+      const gap = gapAt(t, a.at);
+      if (!gap) fail("invalid", `frame ${a.at} on ${t.id} is not in a gap with items after it`);
+      const [from, to] = gap;
+      for (const i of t.items) if (!anchorOf(i) && i.start >= to) i.start -= to - from;
+      return `closed gap [${from}, ${to}) on ${t.id} (${to - from}f)`;
+    },
+  ),
+
   attach: def(
     "Anchor an overlay or caption to a video item's source time at its current position, so it follows that item through trims, ripples and moves. to: null detaches it, freezing it at its current timeline position.",
     z.object({ itemId: Id, to: Id.nullable() }),
@@ -478,8 +499,11 @@ export const ops: Record<string, OpDef<any>> = {
         const first = Math.max(0, beats.findIndex((t) => Math.abs(t - (r.downbeats[0] ?? beats[0])) < 1e-6));
         beats = beats.filter((_, i) => i >= first && (i - first) % n === 0);
       }
-      if (beats.length) item.beats = beats.sort((x, y) => x - y);
-      else delete item.beats;
+      beats.sort((x, y) => x - y);
+      const down = r.downbeats.filter((t) => beats.includes(t));
+      delete item.beats, delete item.downbeats;
+      if (beats.length) item.beats = beats;
+      if (down.length) item.downbeats = down;
       return `${item.id}: ${beats.length} beats (${a.density}, ${r.tempo.toFixed(1)} BPM); ${beatFrames(p, item).length} visible`;
     },
   ),
@@ -504,8 +528,10 @@ export const ops: Record<string, OpDef<any>> = {
       const frame = (t: number) => item.start + Math.round((t - item.sourceIn) * p.meta.fps);
       const keep = (item.beats ?? []).filter((t) => frame(t) !== a.at);
       if (keep.length === (item.beats ?? []).length) fail("not_found", `${item.id} has no beat at ${a.at}`);
+      const down = (item.downbeats ?? []).filter((t) => frame(t) !== a.at);
+      delete item.beats, delete item.downbeats;
       if (keep.length) item.beats = keep;
-      else delete item.beats;
+      if (down.length) item.downbeats = down;
       return `removed beat from ${item.id} at ${a.at}`;
     },
   ),
@@ -513,7 +539,7 @@ export const ops: Record<string, OpDef<any>> = {
   clearBeats: def("Remove all beats from an audio item.", z.object({ itemId: Id }), (p, a) => {
     const item = audioItem(p, a.itemId);
     const n = item.beats?.length ?? 0;
-    delete item.beats;
+    delete item.beats, delete item.downbeats;
     return `cleared ${n} beats from ${item.id}`;
   }),
 

@@ -3,7 +3,7 @@ import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
 import { anchorOf, beatFrames, durationFrames, formatFrame, itemSpan, snapPoints, type AudioItem, type Item, type Project, type Track } from "@splicewright/core";
 import { SplicewrightProject, type Props } from "@splicewright/render";
-import { app, history, op, player, playhead, seek } from "./store.ts";
+import { app, dnd, history, op, player, playhead, seek } from "./store.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 
 // Spec §7.3 panels: media bin, player, inspector, timeline.
@@ -34,6 +34,8 @@ function Toolbar({ p }: { p: Project }) {
   const snapping = app.use((s) => s.snapping);
   const useProxies = app.use((s) => s.useProxies);
   const proxies = app.use((s) => s.proxies);
+  const selection = app.use((s) => s.selection);
+  const gap = app.use((s) => s.gap);
   return (
     <div className="toolbar">
       <strong>{p.meta.title}</strong>
@@ -43,6 +45,7 @@ function Toolbar({ p }: { p: Project }) {
       <Timecode fps={p.meta.fps} />
       <span className="spacer" />
       <button onClick={() => split(p, app.get().selection, playhead.get().frame)} title="Split selection at the playhead; all items under it if nothing is selected (S / Cmd+B)">Split</button>
+      <button disabled={!selection.length && !gap} onClick={() => rippleDelete(true)} title="Delete the selection and close its gap, or close a clicked gap (Shift+Delete)">Ripple delete</button>
       <button onClick={() => history("undo")} title="Cmd+Z">Undo</button>
       <button onClick={() => history("redo")} title="Cmd+Shift+Z">Redo</button>
       <button className={snapping ? "on" : ""} onClick={() => app.set({ snapping: !snapping })} title="Snapping (N); hold Alt to bypass">
@@ -109,7 +112,7 @@ function MediaBin({ p }: { p: Project }) {
     <div className="bin">
       <h3>Media</h3>
       {Object.values(p.assets).map((a) => (
-        <div key={a.id} className="asset" draggable onDragStart={(e) => e.dataTransfer.setData("application/x-splicewright-asset", a.id)} title={`${a.id} — drag onto the timeline`}>
+        <div key={a.id} className="asset" draggable onDragStart={(e) => (e.dataTransfer.setData("application/x-splicewright-asset", a.id), (dnd.assetId = a.id))} onDragEnd={() => (dnd.assetId = null)} title={`${a.id} — drag onto the timeline`}>
           {a.kind === "audio" ? <div className="thumb audio">♪</div> : <img className="thumb" src={`/api/thumb?asset=${a.id}&t=0`} alt="" draggable={false} />}
           <span>{a.path.split("/").pop()}</span>
         </div>
@@ -156,6 +159,13 @@ function Inspector({ p }: { p: Project }) {
           {formatFrame(span.start, fps)} → {formatFrame(span.start + span.duration, fps)} ({span.duration}f)
           {anchorOf(item) ? " · anchored" : ""}
         </p>
+      )}
+      {span && !t.locked && (
+        <>
+          {/* Same ops as dragging: move keeps the duration, trim end keeps the start. */}
+          <Field label="start (f)" type="number" value={span.start} onCommit={(v) => v !== null && op("move", { itemId: item.id, to: Math.round(Number(v)) })} />
+          <Field label="duration (f)" type="number" value={span.duration} onCommit={(v) => v !== null && op("trim", { itemId: item.id, edge: "end", to: span.start + Math.round(Number(v)) })} />
+        </>
       )}
       {"mode" in item ? (
         <Field label="text" value={item.text} onCommit={(v) => op("editCaption", { captionId: item.id, text: v ?? "" })} />
@@ -307,9 +317,9 @@ function onKey(e: KeyboardEvent) {
   if (mod && key === "z") return handled(), history(e.shiftKey ? "redo" : "undo");
   if ((!mod && key === "s") || (mod && key === "b")) return handled(), split(p, s.selection, frame);
   if (key === "delete" || key === "backspace") {
-    if (!s.selection.length) return;
+    if (!s.selection.length && !s.gap) return;
     handled();
-    return op("delete", { itemIds: s.selection, ...(e.shiftKey && { ripple: true }) }).then((ok) => ok && app.set({ selection: [] }));
+    return rippleDelete(e.shiftKey);
   }
   if (!mod && key === "b") return handled(), tapBeat(p, s.selection, frame);
   if (!mod && key === "n") return app.set({ snapping: !s.snapping, message: { text: `snapping ${s.snapping ? "off" : "on"}` } });
@@ -317,6 +327,13 @@ function onKey(e: KeyboardEvent) {
   if (!mod && (e.key === "+" || e.key === "=")) return zoom(1.5);
   if (!mod && (e.key === "-" || e.key === "_")) return zoom(1 / 1.5);
   if (!mod && e.shiftKey && key === "z") return app.set({ pxPerFrame: fitZoom(p) });
+}
+
+/** Deletes the selection (ripple: close its gap), or closes the clicked gap. */
+function rippleDelete(ripple: boolean) {
+  const { selection, gap } = app.get();
+  if (selection.length) return op("delete", { itemIds: selection, ...(ripple && { ripple: true }) }).then((ok) => ok && app.set({ selection: [] }));
+  if (gap) return op("closeGap", gap).then((ok) => ok && app.set({ gap: null }));
 }
 
 /** Split the selection at the playhead, or every unlocked item under it when nothing is selected

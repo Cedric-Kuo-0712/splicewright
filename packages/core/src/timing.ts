@@ -74,9 +74,9 @@ export interface SnapOptions {
 }
 
 /** An audio item's beats as timeline frames, inside its visible range, sorted and unique (§15.3). */
-export function beatFrames(p: Project, item: AudioItem): number[] {
+export function beatFrames(p: Project, item: AudioItem, times = item.beats): number[] {
   const out: number[] = [];
-  for (const t of item.beats ?? []) {
+  for (const t of times ?? []) {
     const f = item.start + Math.round((t - item.sourceIn) * p.meta.fps);
     if (f >= item.start && f < item.start + item.duration && f !== out.at(-1)) out.push(f);
   }

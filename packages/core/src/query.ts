@@ -49,8 +49,9 @@ export function getRange(p: Project, from: number, to: number) {
       .filter((i): i is Item => i !== null && i.start < to && end(i) > from)
       .map((i) => {
         if (!("beats" in i && i.beats)) return { track: t.id, ...i };
-        const { beats, ...rest } = i as AudioItem;
-        return { track: t.id, ...rest, beatFrames: beatFrames(p, i as AudioItem).filter((f) => f >= from && f < to) };
+        const { beats, downbeats, ...rest } = i as AudioItem;
+        const inRange = (times?: number[]) => beatFrames(p, i as AudioItem, times).filter((f) => f >= from && f < to);
+        return { track: t.id, ...rest, beatFrames: inRange(beats), ...(downbeats && { downbeatFrames: inRange(downbeats) }) };
       }),
   );
 }

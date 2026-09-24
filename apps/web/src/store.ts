@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { PlayerRef } from "@remotion/player";
-import { durationFrames, type Project } from "@splicewright/core";
+import { durationFrames, gapAt, type Project } from "@splicewright/core";
 import type { Ranges } from "@splicewright/render";
 
 // Two stores (§7.3): project state changes per op; the frame ticks at playback rate and only the
@@ -33,6 +33,8 @@ export interface State {
   durations: Record<string, number>;
   useProxies: boolean;
   selection: string[];
+  /** A clicked empty span on a track, closed by Delete; kept apart from `selection` (items only). */
+  gap: { trackId: string; at: number } | null;
   snapping: boolean;
   /** Timeline zoom. */
   pxPerFrame: number;
@@ -41,11 +43,16 @@ export interface State {
   rate: number;
 }
 
-export const app = store<State>({ project: null, duck: {}, proxies: [], durations: {}, useProxies: true, selection: [], snapping: true, pxPerFrame: 2, message: null, rate: 1 });
+export const app = store<State>({ project: null, duck: {}, proxies: [], durations: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1 });
 export const playhead = store({ frame: 0 });
 
 type Snapshot = Pick<State, "project" | "duck" | "proxies" | "durations">;
-const take = ({ project, duck, proxies, durations }: Snapshot) => app.set({ project, duck, proxies, durations });
+const take = ({ project, duck, proxies, durations }: Snapshot) =>
+  app.set(({ gap }) => {
+    // Drop a gap selection that an undo, redo, or another writer filled.
+    const t = gap && project?.tracks.find((t) => t.id === gap.trackId);
+    return { project, duck, proxies, durations, gap: t && gapAt(t, gap.at) ? gap : null };
+  });
 
 async function call(path: string, body?: unknown) {
   const res = await fetch(path, body === undefined ? undefined : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -80,6 +87,9 @@ export function listen() {
     if (JSON.parse(e.data).revision !== app.get().project?.revision) refresh();
   };
 }
+
+/** The media-bin asset being dragged; dragover can't read dataTransfer, so the preview reads this. */
+export const dnd: { assetId: string | null } = { assetId: null };
 
 /** Set by the Player on mount; the timeline and keyboard seek through it. */
 export const player: { ref: PlayerRef | null } = { ref: null };

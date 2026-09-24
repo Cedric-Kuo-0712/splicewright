@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { beatFrames, durationFrames, formatFrame, itemSpan, rulerTicks, snap, snapPoints, snapSpan, type AudioItem, type Item, type Project, type SnapPoint, type Track } from "@splicewright/core";
-import { app, op, playhead, seek } from "./store.ts";
+import { anchorOf, beatFrames, durationFrames, formatFrame, gapAt, itemSpan, rulerTicks, snap, snapPoints, snapSpan, type AudioItem, type Item, type Project, type SnapPoint, type Track } from "@splicewright/core";
+import { app, dnd, op, playhead, seek } from "./store.ts";
 
 // Spec §7.3 timeline and §15.1–15.2 ruler and snapping.
 
@@ -29,6 +29,8 @@ interface Drag {
 /** Frame under a client x, given the lanes element (which scrolls with the content). */
 const frameAt = (lanes: HTMLElement, clientX: number, ppf: number) => Math.max(0, Math.round((clientX - lanes.getBoundingClientRect().left) / ppf));
 
+let scrubbing = false;
+
 /** Seeks to the pointer and follows it while the button is held. `lanes` is any element whose left edge is frame 0. */
 function scrub(e: React.PointerEvent<HTMLElement>, lanes: HTMLElement, ppf: number) {
   if (e.button !== 0) return;
@@ -36,18 +38,22 @@ function scrub(e: React.PointerEvent<HTMLElement>, lanes: HTMLElement, ppf: numb
   const el = e.currentTarget;
   const at = (ev: { clientX: number }) => seek(frameAt(lanes, ev.clientX, ppf));
   at(e);
+  scrubbing = true;
   el.setPointerCapture(e.pointerId);
   el.onpointermove = (ev) => ev.buttons && at(ev);
+  el.onlostpointercapture = () => (scrubbing = false);
 }
 
 export function Timeline() {
   const p = app.use((s) => s.project)!;
   const ppf = app.use((s) => s.pxPerFrame);
   const selection = app.use((s) => s.selection);
+  const gap = app.use((s) => s.gap);
   const scroller = useRef<HTMLDivElement>(null);
   const lanes = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ left: 0, width: 1000 });
   const [drag, setDrag] = useState<Drag | null>(null);
+  const [ghost, setGhost] = useState<{ trackId: string; at: number; duration?: number; bad: boolean } | null>(null);
   const zoomAnchor = useRef<{ frame: number; x: number } | null>(null);
 
   const total = durationFrames(p);
@@ -91,7 +97,7 @@ export function Timeline() {
     e.stopPropagation();
     const id = item.id;
     const sel = app.get().selection;
-    app.set({ selection: e.shiftKey || e.metaKey ? (sel.includes(id) ? sel.filter((s) => s !== id) : [...sel, id]) : sel.includes(id) ? sel : [id] });
+    app.set({ gap: null, selection: e.shiftKey || e.metaKey ? (sel.includes(id) ? sel.filter((s) => s !== id) : [...sel, id]) : sel.includes(id) ? sel : [id] });
     if (track.locked) return;
     const span = itemSpan(p, item)!;
     const x = e.clientX - (e.currentTarget as HTMLElement).getBoundingClientRect().left;
@@ -141,13 +147,30 @@ export function Timeline() {
     if (mode === "end" && drag.duration !== span.duration) await op("trim", { itemId: item.id, edge: "end", to: drag.start + drag.duration });
   }
 
+  function dropAt(e: React.DragEvent) {
+    const at = frameAt(lanes.current!, e.clientX, ppf);
+    return app.get().snapping && !e.altKey ? snap(snapPoints(p, [0, Infinity], { playhead: playhead.get().frame }), at, Math.max(1, SNAP_PX / ppf)).frame : at;
+  }
+
+  /** Where and how long the dragged asset would land; red when it would overlap on a non-magnetic track. */
+  function dragOver(e: React.DragEvent, track: Track) {
+    e.preventDefault();
+    const asset = p.assets[dnd.assetId ?? ""];
+    if (!asset || (asset.kind === "audio" ? "audio" : "video") !== track.kind) return ghost && setGhost(null);
+    const at = dropAt(e);
+    const secs = app.get().durations[asset.id];
+    const duration = asset.kind === "image" ? 5 * fps : secs !== undefined ? Math.floor(secs * fps) : undefined;
+    const bad = !track.magnetic && track.items.some((i) => !anchorOf(i) && i.start < at + (duration ?? 1) && at < i.start + i.duration);
+    if (ghost?.trackId !== track.id || ghost.at !== at || ghost.duration !== duration || ghost.bad !== bad) setGhost({ trackId: track.id, at, duration, bad });
+  }
+
   async function drop(e: React.DragEvent, track: Track) {
+    setGhost(null);
     const assetId = e.dataTransfer.getData("application/x-splicewright-asset");
     const asset = p.assets[assetId];
     if (!asset) return;
     e.preventDefault();
-    let at = frameAt(lanes.current!, e.clientX, ppf);
-    if (app.get().snapping && !e.altKey) at = snap(snapPoints(p, [0, Infinity], { playhead: playhead.get().frame }), at, Math.max(1, SNAP_PX / ppf)).frame;
+    const at = dropAt(e);
     const kind = asset.kind === "audio" ? "audio" : "video";
     // Probed assets let the core default the duration; otherwise read it from the media here.
     const probed = asset.kind !== "image" && app.get().durations[assetId] !== undefined;
@@ -186,10 +209,21 @@ export function Timeline() {
                 data-track={t.id}
                 className={`lane ${t.kind} ${drag && drag.trackId === t.id && drag.trackId !== drag.track.id ? "target" : ""}`}
                 style={{ width }}
-                onPointerDown={(e) => (app.set({ selection: [] }), scrub(e, e.currentTarget, ppf))}
-                onDragOver={(e) => e.preventDefault()}
+                onPointerDown={(e) => {
+                  const at = frameAt(e.currentTarget, e.clientX, ppf);
+                  app.set({ selection: [], gap: !t.locked && gapAt(t, at) ? { trackId: t.id, at } : null });
+                  scrub(e, e.currentTarget, ppf);
+                }}
+                onDragOver={(e) => dragOver(e, t)}
+                onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node) && setGhost(null)}
                 onDrop={(e) => drop(e, t)}
               >
+                {gap?.trackId === t.id && <Gap span={gapAt(t, gap.at)} ppf={ppf} />}
+                {ghost?.trackId === t.id && (
+                  <div className={`ghost ${ghost.bad ? "bad" : ""}`} style={{ left: ghost.at * ppf, width: ghost.duration ? ghost.duration * ppf : 2 }}>
+                    <span>{ghost.duration ? `${formatFrame(ghost.duration, fps)}${t.magnetic ? " · ripple" : ""}` : "?"}</span>
+                  </div>
+                )}
                 {t.items.map((item) => {
                   const span = itemSpan(p, item);
                   if (!span) return null;
@@ -205,7 +239,7 @@ export function Timeline() {
                     >
                       {"assetId" in item && t.kind === "video" && <Thumbs p={p} item={item} width={duration * ppf} viewLeft={view.left - start * ppf} viewWidth={view.width} />}
                       {"assetId" in item && t.kind === "audio" && <Wave assetId={item.assetId} sourceIn={item.sourceIn} fps={fps} ppf={ppf} duration={duration} />}
-                      {t.kind === "audio" && !(live && live.mode !== "move") && beatFrames(p, item as AudioItem).map((f) => <div key={f} className="beat" style={{ left: (f - item.start) * ppf }} />)}
+                      {t.kind === "audio" && !(live && live.mode !== "move") && <BeatTicks p={p} item={item as AudioItem} ppf={ppf} />}
                       <span className="name">{"text" in item ? item.text : "component" in item ? item.component : (item.label ?? p.assets[item.assetId]?.path)}</span>
                     </div>
                   );
@@ -221,7 +255,7 @@ export function Timeline() {
               </div>
             )}
             <BeatGuides p={p} selection={selection} ppf={ppf} />
-            <Playhead ppf={ppf} />
+            <Playhead ppf={ppf} scroller={scroller} />
           </div>
         </div>
       </div>
@@ -230,9 +264,22 @@ export function Timeline() {
 }
 
 /** The only timeline part that re-renders per frame. */
-function Playhead({ ppf }: { ppf: number }) {
+function Playhead({ ppf, scroller }: { ppf: number; scroller: React.RefObject<HTMLDivElement | null> }) {
   const frame = playhead.use((s) => s.frame);
+  // Page the view when the playhead leaves it (playback, keyboard jumps), but not under a scrubbing pointer.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || scrubbing) return;
+    const x = frame * ppf;
+    const w = el.clientWidth - HEADER;
+    if (x > el.scrollLeft + w) el.scrollLeft = x - 0.1 * w;
+    else if (x < el.scrollLeft) el.scrollLeft = x - 0.9 * w;
+  }, [frame]);
   return <div className="playhead" style={{ left: frame * ppf }} />;
+}
+
+function Gap({ span, ppf }: { span?: [number, number]; ppf: number }) {
+  return span ? <div className="gap" style={{ left: span[0] * ppf, width: (span[1] - span[0]) * ppf }} title="gap: Delete closes it" /> : null;
 }
 
 /** Grab handle in the ruler; the ruler itself does the scrubbing. */
@@ -255,6 +302,11 @@ function TrackHeader({ t }: { t: Track }) {
       {flag("locked", "L")}
     </div>
   );
+}
+
+function BeatTicks({ p, item, ppf }: { p: Project; item: AudioItem; ppf: number }) {
+  const down = new Set(beatFrames(p, item, item.downbeats));
+  return beatFrames(p, item).map((f) => <div key={f} className={`beat ${down.has(f) ? "down" : ""}`} style={{ left: (f - item.start) * ppf }} />);
 }
 
 /** Faint full-height lines at the selected audio items' beats (§15.3). */

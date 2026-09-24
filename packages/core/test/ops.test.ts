@@ -101,6 +101,20 @@ describe("ops", () => {
     expect(items(p, "t_3")).toHaveLength(0);
   });
 
+  it("closeGap shifts later items left to meet the previous one", () => {
+    let p = ok(apply(fixture(), "insertItem", { assetId: "a_song", at: 30, duration: 20 }, ctx)); // t_2: [30,50)
+    p = ok(apply(p, "insertItem", { assetId: "a_song", at: 80, duration: 10, trackId: "t_2" }, ctx)); // [80,90)
+    p = ok(apply(p, "insertItem", { assetId: "a_song", at: 100, duration: 10, trackId: "t_2" }, ctx)); // [100,110)
+    const r = apply(p, "closeGap", { trackId: "t_2", at: 60 }, ctx);
+    expect(r).toMatchObject({ changes: { summary: "closed gap [50, 80) on t_2 (30f)" } });
+    expect(items(ok(r), "t_2").map((i) => i.start)).toEqual([30, 50, 70]);
+    expect(items(ok(apply(p, "closeGap", { trackId: "t_2", at: 10 }, ctx)), "t_2")[0].start).toBe(0); // leading gap
+    expect(err(apply(p, "closeGap", { trackId: "t_2", at: 40 }, ctx))).toBe("invalid"); // inside an item
+    expect(err(apply(p, "closeGap", { trackId: "t_2", at: 200 }, ctx))).toBe("invalid"); // nothing after
+    const locked = ok(apply(p, "setTrack", { trackId: "t_2", patch: { locked: true } }, ctx));
+    expect(err(apply(locked, "closeGap", { trackId: "t_2", at: 60 }, ctx))).toBe("invalid");
+  });
+
   it("setProps and setTrack enforce whitelists; null unsets", () => {
     const p = fixture();
     const v = ok(apply(p, "setProps", { itemId: "i_1", patch: { volume: 0.5, fit: "cover" } }, ctx));

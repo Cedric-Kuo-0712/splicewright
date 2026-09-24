@@ -60,7 +60,12 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .playhead-head { position: absolute; bottom: 0; width: 11px; height: 12px; margin-left: -5px; background: #ff4d4f; clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%); z-index: 2; pointer-events: none; }
 .guide { position: absolute; top: 0; bottom: 0; width: 1px; background: #fcc419; z-index: 8; }
 .guide span { position: absolute; top: 2px; left: 4px; background: #fcc419; color: #000; font-size: 10px; padding: 0 4px; border-radius: 2px; white-space: nowrap; }
+.gap { position: absolute; top: 3px; bottom: 3px; background: repeating-linear-gradient(-45deg, #fcc41933 0 4px, transparent 4px 8px); outline: 2px solid #fcc419; outline-offset: -1px; border-radius: 3px; pointer-events: none; }
+.ghost { position: absolute; top: 3px; bottom: 3px; background: #ffffff22; border: 1px dashed #fff; border-radius: 3px; pointer-events: none; z-index: 4; }
+.ghost.bad { border-color: #f77; background: #ff4d4f33; }
+.ghost span { position: absolute; left: 4px; top: 2px; font-size: 10px; white-space: nowrap; }
 .item .beat { position: absolute; top: 0; width: 1px; height: 7px; background: #ffd43b; pointer-events: none; }
+.item .beat.down { height: 14px; width: 2px; }
 .beat-guide { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(255, 212, 59, 0.18); pointer-events: none; z-index: 6; }
 .beats { border-top: 1px solid #2a2c31; margin-top: 8px; padding-top: 6px; }
 .buttons { display: flex; gap: 6px; margin-bottom: 8px; }

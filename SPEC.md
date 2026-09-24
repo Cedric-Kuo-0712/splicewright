@@ -192,6 +192,7 @@ The adapters (UI/CLI/MCP) only call ops and persist the result.
 | `trim` | itemId, edge: "start"\|"end", to (frame), ripple? | Trimming "start" moves `start` and `sourceIn` together, so the right edge stays put. |
 | `move` | itemId, to, trackId?, ripple? | Rejects overlap unless `ripple`. |
 | `delete` | itemIds[], ripple? | Ripple closes the gap on magnetic tracks. |
+| `closeGap` | trackId, at | Closes the empty span containing `at`; later non-anchored items shift left. |
 | `setProps` | itemId, patch | Whitelisted fields only (volume, fit, transform, fades, props, label, note). |
 | `slip` | itemId, deltaSec | Changes `sourceIn` only; timeline position unchanged. |
 | `addTrack` / `removeTrack` / `setTrack` | … | Empty tracks are allowed (unlike OpenCut). |
@@ -373,7 +374,7 @@ explained, not hidden.
 | M3 | `render`: generic composition, config loader, captions, ducking | §11 acceptance comparison | ✅ done (frames; audio not compared) |
 | M4 | `apps/web` ported to core ops, file watching, edit proxies, thumbs/waveforms; adaptive ruler + snapping (§15.1–15.2) | manual pass over §7.3 checklist; `rulerTicks`/`snap` unit tests | ✅ done (UI plays edit proxies if present; generating them is M5) |
 | M5 | `ingest` generic port | fresh project from raw files → first render with no manual steps | ✅ done (no `scenes` step) |
-| M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow | ✅ done (real-music F-measure §15.5 not yet reported) |
+| M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow | ✅ done (real-music F-measure: tool `ingest/beat_eval.py` ready; number pending a hand-tapped reference) |
 
 ---
 
@@ -500,6 +501,9 @@ stronger beats *(unverified)*. Splicewright exposes this as an explicit density 
 - **Schema extension** (optional field, so no `schemaVersion` bump):
   `AudioItem.beats?: Seconds[]`. This is the chosen beat list in **asset time**, sorted. It lives in
   `project.json` so that manual edits persist and snapping never depends on the cache.
+  `AudioItem.downbeats?: Seconds[]` is the subset of those beats that start a bar (set by `detectBeats`,
+  kept in step by `removeBeat`/`clearBeats`; tapped beats are never downbeats). `get_range` reports both
+  as frames (`beatFrames`, `downbeatFrames`).
 - Like anchored captions (§4.1), beats are mapped to the timeline on the fly:
   `frame = start + round((t − sourceIn) × fps)`, keeping only the ones inside the item's visible range.
   Moving, trimming or slipping the music carries its beats along. Rounding to frames shifts a beat by at
@@ -530,6 +534,8 @@ On the MCP side:
   the accents.
 - Real music: tap a reference beat list by hand for one project song and report F-measure at a ±70 ms
   tolerance, the usual MIR evaluation window. This is a reported number, not a pass/fail gate, until we
-  know what "good enough" feels like in the editor.
+  know what "good enough" feels like in the editor. Tap the reference with `B` in the UI on a cleared
+  audio item, then run `python ingest/beat_eval.py <project> <itemId>` (greedy one-to-one matching, no
+  warm-up trim; B lands on the playhead frame, so taps carry up to half a frame of quantization).
 - `fitToBeats`: unit test on a slideshow of 8 images plus a synthetic beat list, checking that every cut
   lands on a beat and the total duration is correct.

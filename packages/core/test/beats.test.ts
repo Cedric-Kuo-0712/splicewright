@@ -36,6 +36,19 @@ describe("detectBeats", () => {
     expect(run("every:2")).toHaveLength(20);
   });
 
+  it("keeps the downbeats that survive the density, and removeBeat/clearBeats drop them too", () => {
+    const item = (p: Project) => p.tracks[1].items[0] as AudioItem;
+    const p = slideshow();
+    expect(item(p).downbeats).toEqual(analysis.downbeats);
+    expect(item(ok(apply(p, "detectBeats", { itemId: "i_9", density: "every:4" }, ctx))).downbeats).toEqual(analysis.downbeats);
+    // 0.75 s is the first downbeat, frame round(22.5) = 23.
+    const q = ok(apply(p, "removeBeat", { itemId: "i_9", at: 23 }));
+    expect(item(q).downbeats).toEqual(analysis.downbeats.slice(1));
+    expect(beatFrames(q, item(q), item(q).downbeats)[0]).toBe(83);
+    expect(item(ok(apply(p, "clearBeats", { itemId: "i_9" })))).not.toHaveProperty("downbeats");
+    expect(getRange(p, 0, 90).find((i) => i.id === "i_9")).toMatchObject({ downbeatFrames: [23, 83] });
+  });
+
   it("fails clearly without the ingest cache", () => {
     expect(apply(slideshow(), "detectBeats", { itemId: "i_9" }, {})).toMatchObject({ error: { code: "not_found" } });
   });

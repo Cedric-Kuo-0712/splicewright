@@ -58,6 +58,8 @@ export const AudioItem = z.object({
   duck: z.object({ under: z.array(Id), level: z.number().min(0).max(1) }).optional(),
   /** Chosen beats in asset seconds, sorted (§15.3); mapped to frames on the fly like anchored captions. */
   beats: z.array(Seconds.min(0)).optional(),
+  /** The subset of `beats` that start a bar, from detectBeats; drawn taller. */
+  downbeats: z.array(Seconds.min(0)).optional(),
 });
 
 export const CaptionItem = z.discriminatedUnion("mode", [

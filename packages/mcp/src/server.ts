@@ -22,8 +22,21 @@ function writeResult(r: OpResult) {
   return json({ revision: r.project.revision, summary: r.changes.summary });
 }
 
+/** Sent to the client on connect; agents such as Claude Code put it in their context. The per-project brief lives in AGENTS.md. */
+export const INSTRUCTIONS = `Splicewright edits a video project in the current folder (project.json); a human may be watching or editing it live in the web UI (splicewright open).
+
+Start: get_summary, then read AGENTS.md for the brief. Timeline positions and durations are frames at meta.fps; sourceIn and peek ranges are source seconds.
+
+Look before cutting, cheapest first: find (transcripts, labels, notes) → inspect_asset (transcript + contact sheet) → peek (frame grid of a source range) → storyboard (grid of the edit) → still (one full frame). Avoid still in loops.
+
+Assets must be ingested before insertItem can default a duration and before detectBeats or addCaptionsFromTranscript; ingest is cached, so re-running is cheap.
+
+Edit only through splicewright_* tools, never by writing project.json or touching raw/. Put multi-step changes in splicewright_batch: atomic, one revision, one undo step. Pass the baseRevision you last read; on a conflict error the human changed something, so re-read instead of retrying. Undo is shared with the human: only undo your own last step. Frame args also take { near } to snap to edges, markers or beats.
+
+Check the result with storyboard over the changed range; render with preset draft for a quick full check. Record decisions worth keeping across sessions in AGENTS.md under Notes.`;
+
 export function createServer(dir: string): McpServer {
-  const server = new McpServer({ name: "splicewright", version: "0.0.0" });
+  const server = new McpServer({ name: "splicewright", version: "0.0.0" }, { instructions: INSTRUCTIONS });
   const baseRevision = z.number().int().optional().describe("Revision this edit is based on; stale writes are rejected. Omit for latest.");
 
   for (const [name, op] of Object.entries(ops)) {

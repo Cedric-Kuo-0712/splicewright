@@ -17,6 +17,7 @@ it("an agent can read and edit a project over stdio MCP", async () => {
   const client = new Client({ name: "test", version: "0" });
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [CLI, "mcp"], cwd: dir, stderr: "ignore" }));
   try {
+    expect(client.getInstructions()).toContain("splicewright_batch");
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).toEqual(expect.arrayContaining(["splicewright_split", "splicewright_trim", "splicewright_batch", "get_summary", "get_range", "find"]));
 

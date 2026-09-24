@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { relative, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { getSummary } from "@splicewright/core";
 import { init, load, redo, run, undo } from "@splicewright/core/node";
@@ -52,6 +53,32 @@ const [cmd, ...args] = positionals;
 const dir = process.cwd();
 const fail = (e: Error): never => out({ error: { code: "render_failed", message: e.message } });
 
+/**
+ * AGENTS.md (the brief), CLAUDE.md (points Claude Code at it) and .mcp.json (starts `splicewright mcp` here).
+ * Existing files are kept; .mcp.json only gains a splicewright entry if it has none. Returns what was written.
+ */
+function agentFiles(dir: string, meta: { title: string; fps: number; width: number; height: number }): string[] {
+  const written: string[] = [];
+  const write = (name: string, text: string) => {
+    if (existsSync(join(dir, name))) return;
+    writeFileSync(join(dir, name), text);
+    written.push(name);
+  };
+  const template = readFileSync(join(import.meta.dirname, "AGENTS.template.md"), "utf8");
+  write("AGENTS.md", template.replace(/\{\{(\w+)\}\}/g, (_, k: keyof typeof meta) => String(meta[k])));
+  write("CLAUDE.md", "@AGENTS.md\n");
+  // The CLI by absolute path (it need not be on PATH); node by name, since process.execPath is a
+  // versioned install path (e.g. Homebrew Cellar) that breaks on upgrade.
+  const mcpPath = join(dir, ".mcp.json");
+  const mcp = existsSync(mcpPath) ? JSON.parse(readFileSync(mcpPath, "utf8")) : {};
+  if (!mcp.mcpServers?.splicewright) {
+    mcp.mcpServers = { ...mcp.mcpServers, splicewright: { type: "stdio", command: "node", args: [realpathSync(process.argv[1]), "mcp"], env: {} } };
+    writeFileSync(mcpPath, JSON.stringify(mcp, null, 2) + "\n");
+    written.push(".mcp.json");
+  }
+  return written;
+}
+
 /** Frame number, or [hh:]mm:ss[.s] timecode, to a timeline frame. */
 function toFrame(at: string, fps: number): number | undefined {
   if (/^\d+$/.test(at)) return Number(at);
@@ -71,7 +98,10 @@ switch (cmd) {
     const fps = Number(flags.fps);
     const title = flags.title ?? dir.split(/[/\\]/).pop()!;
     const r = init(dir, { title, fps, width, height });
-    out("error" in r ? r : { created: "project.json", revision: r.revision });
+    if ("error" in r && r.error.code !== "exists") out(r);
+    const meta = load(dir).meta;
+    const created = [...("error" in r ? [] : ["project.json"]), ...agentFiles(dir, meta)];
+    out({ created, revision: load(dir).revision });
   }
   case "import": {
     if (!args.length) out({ error: { code: "usage", message: "import <paths...>" } });

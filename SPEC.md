@@ -227,7 +227,7 @@ Snapping, the adaptive ruler, and beat points are specified in §15.
 
 ### 7.1 CLI (`splicewright`)
 ```
-splicewright init [--fps 30 --size 1920x1080]
+splicewright init [--fps 30 --size 1920x1080]  # also AGENTS.md, CLAUDE.md, .mcp.json
 splicewright import <paths...> [--no-ingest]  # register + ingest
 splicewright ingest [--only probe,proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
 splicewright status                         # compact JSON summary (see get_summary)
@@ -239,6 +239,12 @@ splicewright mcp                            # MCP server over stdio
 splicewright migrate video-cut <path>       # one-off importer (§11)
 ```
 All commands print one concise JSON object on stdout; logs go to stderr or files.
+
+`init` also writes the agent setup, keeping any file that already exists (so it can be re-run in an
+existing project): `AGENTS.md` (the per-project brief and notes, from `packages/cli/src/AGENTS.template.md`),
+`CLAUDE.md` (`@AGENTS.md`, for Claude Code) and `.mcp.json` (adds a `splicewright` server that runs this CLI's
+`mcp` by absolute path). How to use the tools is not in AGENTS.md: it is the MCP server's `instructions` (§7.2),
+so it stays current with the tools. Project state is not in AGENTS.md either: agents read it with `get_summary`.
 
 ### 7.2 MCP server
 Write tools map 1:1 to core ops (`splicewright_split`, `splicewright_trim`, …, `splicewright_batch`).
@@ -255,6 +261,9 @@ Read tools are designed for token budget:
 | `peek` | Grid of n frames (~320 px tiles) from a video asset's source range + tile times. Reads the analysis proxy when its spacing allows. |
 | `storyboard` | Grid of n composition frames from a timeline range + tile frames: the edit at a glance. |
 | `render` | Starts a render job → job id; `render_status` polls it. |
+
+The server sends `instructions` on connect (the workflow: read cheaply before cutting, batch edits,
+baseRevision and conflicts, shared undo); the text is `INSTRUCTIONS` in `packages/mcp/src/server.ts`.
 
 Every write tool accepts `baseRevision` (optional; if omitted, uses latest) and returns the new
 revision plus a one-line change summary.

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { getSummary } from "@splicewright/core";
-import { init, load, redo, run, undo } from "@splicewright/core/node";
+import { init, load, rawPath, redo, run, undo } from "@splicewright/core/node";
 import { ingest, STEPS, type Step } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
 import { render, still } from "@splicewright/render/node";
@@ -17,7 +17,7 @@ const USAGE = `usage: splicewright <command>
   ingest [--only proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
   status
   op <opName> '<json args>' [--base <revision>]
-  undo | redo
+  undo | redo [--base <revision>]
   still --at <frame|[hh:]mm:ss[.s]> [-o out/still-<frame>.jpg]
   render [-o out/final.mp4] [--preset draft|master] [--range a-b]
   open [--port 5190]
@@ -105,7 +105,17 @@ switch (cmd) {
   }
   case "import": {
     if (!args.length) out({ error: { code: "usage", message: "import <paths...>" } });
-    const paths = args.map((p) => relative(dir, resolve(p)));
+    const paths = args.map((p) => {
+      const abs = resolve(p);
+      const rel = relative(dir, abs);
+      if (!isAbsolute(rel) && rel.split(sep)[0] !== "..") return rel;
+      // Outside the project: render and the editor only read files inside it, so copy into raw/.
+      if (!existsSync(abs)) out({ error: { code: "not_found", message: `${p} not found` } });
+      mkdirSync(join(dir, "raw"), { recursive: true });
+      const tmp = join(dir, "raw", `.import-${process.pid}`);
+      cpSync(abs, tmp, { preserveTimestamps: true }); // keeps the fingerprint, so importing it again finds the copy
+      return rawPath(dir, basename(abs), tmp);
+    });
     const results = paths.map((path) => opResult(run(dir, "importAsset", { path })));
     const ids = Object.values(load(dir).assets).filter((a) => paths.includes(a.path)).map((a) => a.id);
     out({ results, ...(!flags["no-ingest"] && ids.length && { ingest: await ingest(dir, { assets: ids, jobs, log }) }) });
@@ -130,9 +140,9 @@ switch (cmd) {
     out(opResult(run(dir, name, parsed, flags.base === undefined ? undefined : Number(flags.base))));
   }
   case "undo":
-    out(opResult(undo(dir)));
+    out(opResult(undo(dir, flags.base === undefined ? undefined : Number(flags.base))));
   case "redo":
-    out(opResult(redo(dir)));
+    out(opResult(redo(dir, flags.base === undefined ? undefined : Number(flags.base))));
   case "still": {
     const frame = toFrame(flags.at ?? "", load(dir).meta.fps);
     if (frame === undefined) out({ error: { code: "usage", message: "still --at <frame|[hh:]mm:ss[.s]>" } });

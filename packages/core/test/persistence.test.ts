@@ -53,6 +53,16 @@ it("undo and redo step one op at a time with fresh revisions; a new op clears re
   expect(redo(dir)).toMatchObject({ error: { code: "nothing_to_redo" } });
 });
 
+it("undo with a stale baseRevision is refused; undone ids stay taken", () => {
+  const dir = project();
+  const mine = run(dir, "addMarker", { label: "mine", start: 0 });
+  run(dir, "addMarker", { label: "theirs", start: 5 });
+  expect(undo(dir, "error" in mine ? -1 : mine.project.revision)).toMatchObject({ error: { code: "conflict" } });
+  expect(load(dir).markers).toHaveLength(2);
+  expect(undo(dir, 2)).not.toHaveProperty("error");
+  expect(run(dir, "addMarker", { label: "new", start: 9 })).toMatchObject({ changes: { summary: expect.stringContaining("m_3") } });
+});
+
 it("init refuses to overwrite", () => {
   const dir = project();
   expect(init(dir, { title: "x", fps: 30, width: 1, height: 1 })).toMatchObject({ error: { code: "exists" } });

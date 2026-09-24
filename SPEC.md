@@ -86,6 +86,7 @@ interface Project {
   assets: Record<AssetId, Asset>;
   tracks: Track[];                  // render order: index 0 is bottom-most
   markers?: Marker[];               // named ranges/points: chapters, notes, "sections"
+  ids?: Record<string, number>;     // highest counter handed out per id prefix (§4.3)
 }
 
 interface Asset {
@@ -181,7 +182,9 @@ track plus `markers` for section names. Section-specific data (e.g. `location_ti
 
 ### 4.3 IDs
 Generated ids are short and readable: `<prefix>_<base36 counter>` (`i_1f`, `t_3`, `c_a2`).
-Readable ids matter because agents quote them back.
+Readable ids matter because agents quote them back. Counters only move forward (`ids` records the
+highest per prefix, and undo keeps it), so a deleted id is never handed to a new item: an id an agent
+remembers either still names the same thing or is not found.
 
 ### 4.4 Invariants (checked by `validate()` on every write)
 1. `duration >= 1` and `start >= 0` for every item.
@@ -222,7 +225,8 @@ The adapters (UI/CLI/MCP) only call ops and persist the result.
 | `batch` | ops[] | Atomic: all or nothing, one revision, one undo step. |
 
 Undo/redo: the history is an op log with inverse snapshots, persisted to `.splicewright/history/`.
-**One op = one undo step.** The UI sends one op when the drag ends, not one per pointer move; during
+Undo and redo take an optional `baseRevision`, rejected as a conflict unless the project is still at it,
+so an agent undoing its own last step never undoes a newer human edit. **One op = one undo step.** The UI sends one op when the drag ends, not one per pointer move; during
 the drag it previews locally.
 
 Snapping, the adaptive ruler, and beat points are specified in §15.
@@ -246,7 +250,7 @@ Snapping, the adaptive ruler, and beat points are specified in §15.
 ### 7.1 CLI (`splicewright`)
 ```
 splicewright init [--fps 30 --size 1920x1080]  # also AGENTS.md, CLAUDE.md, .mcp.json
-splicewright import <paths...> [--no-ingest]  # register + ingest
+splicewright import <paths...> [--no-ingest]  # register + ingest; files outside the project are copied into raw/
 splicewright ingest [--only probe,proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
 splicewright status                         # compact JSON summary (see get_summary)
 splicewright op <opName> '<json args>'      # any core op
@@ -298,7 +302,7 @@ Evolves from `video-cut/apps/editor`. Every mutation goes through core ops.
   S or Cmd+B split (plain `C` is not used, so Cmd+C stays copy), Delete / Shift+Delete (ripple),
   Shift+Up/Down (also beats and captions), Home/End, `[` / `]` (selected clip's start/end), Cmd+A (select all),
   Cmd+Z / Cmd+Shift+Z. The History button lists both stacks (`GET /api/history`); picking an entry sends
-  `POST /api/undo|redo {steps}`.
+  `POST /api/undo|redo {steps, baseRevision}`. Every non-GET API request with a foreign `Origin` is refused.
 - Editing (all through ops, one undo step per gesture):
   - Cmd+C / Cmd+V paste at the playhead (Cmd+Shift+V inserts and pushes later items), Cmd+D duplicates after the selection.
     Items go back to their track, else the first unlocked track of the same kind; anchored captions follow their video.

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, extname, join } from "node:path";
 import { apply, createProject, type OpResult } from "./ops.ts";
 import type { Ctx, Project } from "./schema.ts";
 import { validate } from "./validate.ts";
@@ -120,18 +120,25 @@ export function run(dir: string, op: string, args: unknown, baseRevision?: numbe
   return r;
 }
 
-export const undo = (dir: string) => step(dir, "undo", "redo");
-export const redo = (dir: string) => step(dir, "redo", "undo");
+/** Undo the latest step. With `baseRevision`, rejected unless the project is still at it, so a writer
+ * undoing its own last step can't undo someone else's newer one. */
+export const undo = (dir: string, baseRevision?: number) => step(dir, "undo", "redo", baseRevision);
+export const redo = (dir: string, baseRevision?: number) => step(dir, "redo", "undo", baseRevision);
 
 // History: one snapshot file per step, named by the revision it was pushed at (monotonic).
 // ponytail: full snapshots, never pruned; store diffs or cap the stack if projects get large.
-function step(dir: string, from: "undo" | "redo", to: "undo" | "redo"): OpResult {
+function step(dir: string, from: "undo" | "redo", to: "undo" | "redo", baseRevision?: number): OpResult {
+  const current = load(dir);
+  if (baseRevision !== undefined && baseRevision !== current.revision)
+    return { error: { code: "conflict", message: `project is at revision ${current.revision}; ${from} was based on ${baseRevision}` } };
   const stack = cacheDir(dir, "history", from);
   const top = existsSync(stack) ? readdirSync(stack).sort().at(-1) : undefined;
   if (!top) return { error: { code: `nothing_to_${from}`, message: `nothing to ${from}` } };
   const entry: HistoryEntry = JSON.parse(readFileSync(join(stack, top), "utf8"));
-  const current = load(dir);
-  const restored = { ...entry.project, revision: current.revision + 1 };
+  // Id counters only move forward, so an undone item's id is never handed to a new one.
+  const ids = { ...entry.project.ids };
+  for (const [k, n] of Object.entries(current.ids ?? {})) ids[k] = Math.max(ids[k] ?? 0, n);
+  const restored = { ...entry.project, revision: current.revision + 1, ...(Object.keys(ids).length && { ids }) };
   const c = commit(dir, restored, current.revision);
   if ("error" in c) return c;
   rmSync(join(stack, top));
@@ -159,4 +166,18 @@ function push(dir: string, stack: "undo" | "redo", entry: HistoryEntry) {
   const d = cacheDir(dir, "history", stack);
   mkdirSync(d, { recursive: true });
   writeAtomic(join(d, `${String(load(dir).revision).padStart(9, "0")}.json`), entry);
+}
+
+/** Moves `tmp` into raw/ under a safe version of `name` and returns its project-relative path; if a
+ * file there already has the same content, `tmp` is dropped and that file's path returned. */
+export function rawPath(dir: string, name: string, tmp: string): string {
+  const clean = basename(name).replace(/[^\w.\- ]/g, "_").replace(/^\.+/, "") || "upload";
+  const ext = extname(clean);
+  const stem = clean.slice(0, clean.length - ext.length);
+  for (let n = 1; ; n++) {
+    const rel = join("raw", n === 1 ? clean : `${stem}-${n}${ext}`);
+    const file = join(dir, rel);
+    if (!existsSync(file)) return renameSync(tmp, file), rel;
+    if (fingerprint(file) === fingerprint(tmp)) return unlinkSync(tmp), rel;
+  }
 }

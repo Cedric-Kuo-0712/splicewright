@@ -33,7 +33,7 @@ Without `npm link`, run `node <repo>/packages/cli/src/main.ts <command>` whereve
 ```sh
 mkdir trip && cd trip
 splicewright init --title "Trip" --fps 30 --size 1920x1080
-cp ~/Movies/trip/*.mp4 raw/            # or: splicewright import ~/Movies/trip/*.mp4
+cp ~/Movies/trip/*.mp4 raw/            # or: splicewright import ~/Movies/trip/*.mp4 (copies into raw/)
 splicewright ingest                     # probes, proxies, thumbnails, waveforms, transcripts, beats
 splicewright open                       # the editor, at http://127.0.0.1:5190
 splicewright render --preset draft      # quick check → out/final.mp4
@@ -210,7 +210,7 @@ splicewright import <paths...> [--no-ingest]
 splicewright ingest [--only proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
 splicewright status
 splicewright op <opName> '<json args>' [--base <revision>]
-splicewright undo | redo
+splicewright undo | redo [--base <revision>]
 splicewright still --at <frame|[hh:]mm:ss[.s]> [-o file.jpg]
 splicewright render [-o out/final.mp4] [--preset draft|master] [--range a-b]
 splicewright open [--port 5190]

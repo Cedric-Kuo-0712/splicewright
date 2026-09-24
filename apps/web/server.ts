@@ -1,11 +1,11 @@
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, watch } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, watch } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { createServer, type Plugin } from "vite";
-import { fingerprint, historyList, load, loadCtx, readAssets, redo, run, sizesOf, undo } from "@splicewright/core/node";
+import { historyList, load, loadCtx, rawPath, readAssets, redo, run, sizesOf, undo } from "@splicewright/core/node";
 import { sourceAt } from "@splicewright/core";
 import { ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
 import { duckRanges } from "@splicewright/render/node";
@@ -50,16 +50,14 @@ const TYPES: Record<string, string> = { mp4: "video/mp4", mov: "video/quicktime"
 // ponytail: at most 4 lazy ffmpeg jobs at once, FIFO; thumbs of 4K footage cost ~0.2 s each.
 const limited = limiter(4);
 
-/** A safe file name in raw/ for an upload; same content as an existing file reuses it. */
-function rawPath(dir: string, name: string, tmp: string): string {
-  const clean = basename(name).replace(/[^\w.\- ]/g, "_").replace(/^\.+/, "") || "upload";
-  const ext = extname(clean);
-  const stem = clean.slice(0, clean.length - ext.length);
-  for (let n = 1; ; n++) {
-    const rel = join("raw", n === 1 ? clean : `${stem}-${n}${ext}`);
-    const file = join(dir, rel);
-    if (!existsSync(file)) return renameSync(tmp, file), rel;
-    if (fingerprint(file) === fingerprint(tmp)) return unlinkSync(tmp), rel;
+/** No Origin header (curl, scripts) or this server's own page. */
+function sameOrigin(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === req.headers.host;
+  } catch {
+    return false; // "null" from sandboxed frames and file:// pages
   }
 }
 
@@ -109,6 +107,9 @@ function api(dir: string): Plugin {
             return sendFile(req, res, file, TYPES[file.split(".").pop()!.toLowerCase()]);
           }
           if (!url.pathname.startsWith("/api/")) return next();
+          // Every POST writes: refuse cross-site requests, since any page can POST to localhost.
+          // (Vite's host check, which runs first, already stops DNS rebinding.)
+          if (req.method !== "GET" && !sameOrigin(req)) return send(res, 403, { error: { code: "forbidden", message: "cross-origin request refused" } });
           const route = `${req.method} ${url.pathname}`;
           if (route === "GET /api/project") return send(res, 200, { dir, ...snapshot() });
           if (route === "POST /api/op") {
@@ -116,8 +117,6 @@ function api(dir: string): Plugin {
             return result(res, run(dir, b.op, b.args, b.baseRevision));
           }
           if (route === "POST /api/import") {
-            // It writes files: refuse cross-site requests (a page elsewhere can POST to localhost).
-            if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) return send(res, 403, { error: "cross-origin import refused" });
             mkdirSync(join(dir, "raw"), { recursive: true });
             const tmp = join(dir, "raw", `.upload-${process.pid}-${Date.now()}`);
             await pipeline(req, createWriteStream(tmp));
@@ -138,7 +137,6 @@ function api(dir: string): Plugin {
           }
           if (route === "POST /api/freeze") {
             // Grabs one source frame of a video item into raw/ as a still and imports it; the client places it.
-            if (req.headers.origin && new URL(req.headers.origin).host !== req.headers.host) return send(res, 403, { error: "cross-origin freeze refused" });
             const { itemId, frame } = await body(req);
             const p = load(dir);
             const item = p.tracks.flatMap((t) => (t.kind === "video" ? t.items : [])).find((i) => i.id === itemId);
@@ -158,10 +156,12 @@ function api(dir: string): Plugin {
             return send(res, 200, { assetId: id, ...snapshot() });
           }
           if (route === "POST /api/undo" || route === "POST /api/redo") {
-            // `steps` > 1 jumps through the history panel; stops at the first failure.
-            const steps = Math.max(1, Math.min(1000, Number((await body(req)).steps) || 1));
+            // `steps` > 1 jumps through the history panel; stops at the first failure. `baseRevision`
+            // guards the first step: the client only undoes what it has on screen.
+            const b = await body(req);
+            const steps = Math.max(1, Math.min(1000, Number(b.steps) || 1));
             const fn = route.endsWith("undo") ? undo : redo;
-            let r = fn(dir);
+            let r = fn(dir, typeof b.baseRevision === "number" ? b.baseRevision : undefined);
             for (let k = 1; k < steps && !("error" in r); k++) r = fn(dir);
             return result(res, r);
           }

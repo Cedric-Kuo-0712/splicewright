@@ -160,6 +160,8 @@ export const Project = z.object({
   assets: z.record(Id, Asset),
   tracks: z.array(Track),
   markers: z.array(Marker).optional(),
+  /** Highest counter handed out per id prefix, so a deleted id is never reused (§4.3). */
+  ids: z.record(z.string(), z.number().int().min(0)).optional(),
 });
 
 export type Asset = z.infer<typeof Asset>;

@@ -103,8 +103,10 @@ export async function op(name: string, args: unknown) {
   return true;
 }
 
+/** Undo/redo from the revision on screen, so an agent step that landed unseen is never the one undone. */
 export async function history(which: "undo" | "redo", steps = 1) {
-  const { data } = await call(`/api/${which}`, { steps });
+  const { status, data } = await call(`/api/${which}`, { steps, baseRevision: app.get().project?.revision });
+  if (status === 409) await refresh();
   if (data.error) return app.set({ message: { text: data.error.message, error: true } });
   take(data);
   app.set({ message: { text: data.summary } });

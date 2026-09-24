@@ -41,3 +41,13 @@ it("applies ops against the client's revision", async () => {
   expect(ok).toMatchObject({ status: 200, data: { revision: project.revision + 1 } });
   expect(await post({ op: "addMarker", args: { label: "y", start: 6 }, baseRevision: project.revision })).toMatchObject({ status: 409, data: { error: { code: "conflict" } } });
 });
+
+it("refuses writes from other sites", async () => {
+  const { project } = await (await fetch(`${server.url}api/project`)).json();
+  const evil = { Origin: "https://evil.example", "Content-Type": "text/plain" };
+  for (const path of ["api/op", "api/undo", "api/import?name=x.mp4"]) {
+    const r = await fetch(`${server.url}${path}`, { method: "POST", headers: evil, body: JSON.stringify({ op: "addMarker", args: { label: "x", start: 0 }, steps: 5 }) });
+    expect(r.status, path).toBe(403);
+  }
+  expect((await (await fetch(`${server.url}api/project`)).json()).project.revision).toBe(project.revision);
+});

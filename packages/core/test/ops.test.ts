@@ -45,7 +45,18 @@ describe("ops", () => {
     p = ok(apply(p, "importAsset", { path: "other/VID_20260627_191257.mp4" }));
     expect(Object.keys(p.assets)).toContain("a_vid20260627191257_2");
     expect(err(apply(p, "importAsset", { path: "/abs/x.mp4" }))).toBe("invalid");
+    expect(err(apply(p, "importAsset", { path: "../outside/x.mp4" }))).toBe("invalid");
     expect(err(apply(p, "importAsset", { path: "notes.txt" }))).toBe("invalid");
+  });
+
+  it("never reuses a deleted id, so ids predicted for a batch hold", () => {
+    const p = ok(apply(fixture(), "batch", { ops: [
+      { op: "delete", args: { itemIds: ["i_2"], ripple: false } },
+      { op: "insertItem", args: { trackId: "t_1", assetId: "a_clip", at: 90, duration: 60, ripple: false } },
+      { op: "setProps", args: { itemId: "i_3", patch: { volume: 0.5 } } },
+    ] }, ctx));
+    expect(item(p, "i_3")).toMatchObject({ start: 90, volume: 0.5 });
+    expect(item(p, "i_2")).toBeUndefined();
   });
 
   it("insertItem picks a track with room, defaults duration from the probe, ripples on magnetic tracks", () => {

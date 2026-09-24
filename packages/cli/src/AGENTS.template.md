@@ -35,7 +35,7 @@ Op names below are the `splicewright_<op>` tools.
    Report changes with timecodes so the human can jump to them; `render` master when they approve.
 
 Rules: one intent per `batch` (one undo step each); re-read on a conflict, never force; don't undo the human's
-steps; ask before deleting footage-heavy sections or changing the format.
+steps (pass your last write's revision as `baseRevision` to undo); ask before deleting footage-heavy sections or changing the format.
 
 ## Folder
 

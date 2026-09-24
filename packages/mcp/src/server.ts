@@ -31,7 +31,7 @@ Look before cutting, cheapest first: find (transcripts, labels, notes) → inspe
 
 Assets must be ingested before insertItem can default a duration and before detectBeats or addCaptionsFromTranscript; ingest is cached, so re-running is cheap.
 
-Edit only through splicewright_* tools, never by writing project.json or touching raw/. Put multi-step changes in splicewright_batch: atomic, one revision, one undo step. Pass the baseRevision you last read; on a conflict error the human changed something, so re-read instead of retrying. Undo is shared with the human: only undo your own last step. Frame args also take { near } to snap to edges, markers or beats.
+Edit only through splicewright_* tools, never by writing project.json or touching raw/. Put multi-step changes in splicewright_batch: atomic, one revision, one undo step. Pass the baseRevision you last read; on a conflict error the human changed something, so re-read instead of retrying. Undo is shared with the human: only undo your own last step, and pass the revision that step returned as baseRevision so a newer human edit is never the one undone. Frame args also take { near } to snap to edges, markers or beats.
 
 Check the result with storyboard over the changed range; render with preset draft for a quick full check. Record decisions worth keeping across sessions in AGENTS.md under Notes.`;
 
@@ -48,8 +48,17 @@ export function createServer(dir: string): McpServer {
       async ({ baseRevision, ...args }: Record<string, unknown>) => writeResult(run(dir, name, args, baseRevision as number | undefined)),
     );
   }
-  server.registerTool("splicewright_undo", { description: "Undo the last op (one op = one step)." }, async () => writeResult(undo(dir)));
-  server.registerTool("splicewright_redo", { description: "Redo the last undone op." }, async () => writeResult(redo(dir)));
+  const stepBase = z.number().int().optional().describe("The revision your last write returned. If anyone has written since, this is rejected as a conflict instead of undoing their step.");
+  server.registerTool(
+    "splicewright_undo",
+    { description: "Undo the last op (one op = one step). Pass baseRevision so you only ever undo your own step.", inputSchema: { baseRevision: stepBase } },
+    async ({ baseRevision }) => writeResult(undo(dir, baseRevision)),
+  );
+  server.registerTool(
+    "splicewright_redo",
+    { description: "Redo the last undone op. Pass baseRevision (the revision your undo returned).", inputSchema: { baseRevision: stepBase } },
+    async ({ baseRevision }) => writeResult(redo(dir, baseRevision)),
+  );
 
   server.registerTool(
     "ingest",

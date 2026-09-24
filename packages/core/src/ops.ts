@@ -106,19 +106,26 @@ function spanText(p: Project, item: Item): string {
   return s ? `[${s.start}, ${s.start + s.duration})` : "hidden (outside its anchor item)";
 }
 
-/** `<prefix>_<base36 counter>`, one past the highest existing id with that prefix (§4.3). */
+/** `<prefix>_<base36 counter>`, one past the highest id with that prefix ever handed out (§4.3). */
 export function nextId(p: Project, prefix: string): string {
   const re = new RegExp(`^${prefix}_([0-9a-z]+)$`);
   const ids = [
     ...p.tracks.flatMap((t) => [t.id, ...t.items.map((i) => i.id)]),
     ...(p.markers ?? []).map((m) => m.id),
   ];
-  let max = 0;
+  let max = p.ids?.[prefix] ?? 0;
   for (const id of ids) {
     const m = re.exec(id);
     if (m) max = Math.max(max, parseInt(m[1], 36));
   }
   return `${prefix}_${(max + 1).toString(36)}`;
+}
+
+/** nextId, recorded in `p.ids` so the id stays taken after its item is deleted. */
+function newId(p: Project, prefix: string): string {
+  const id = nextId(p, prefix);
+  (p.ids ??= {})[prefix] = parseInt(id.slice(prefix.length + 1), 36);
+  return id;
 }
 
 /** Ripple: shift every item on `t` starting at or after `from`. */
@@ -141,7 +148,7 @@ function fits(t: Track, start: number, duration: number): boolean {
 function addTrack(p: Project, kind: TrackKind, name?: string, magnetic?: boolean): Track {
   const letter = { video: "V", audio: "A", caption: "C", overlay: "O" }[kind];
   const t = {
-    id: nextId(p, "t"),
+    id: newId(p, "t"),
     name: name ?? `${letter}${p.tracks.filter((x) => x.kind === kind).length + 1}`,
     kind,
     ...(magnetic ? { magnetic } : {}),
@@ -168,7 +175,8 @@ export const ops: Record<string, OpDef<any>> = {
     "Register a media file (path relative to the project root). Idempotent by path and by content fingerprint; a probed asset whose file moved is re-pointed to the new path.",
     z.object({ path: z.string().min(1), kind: z.enum(["video", "audio", "image"]).optional() }),
     (p, a, ctx) => {
-      if (/^([/\\]|[a-zA-Z]:)/.test(a.path)) fail("invalid", `asset path must be relative to the project root: ${a.path}`);
+      if (/^([/\\]|[a-zA-Z]:)/.test(a.path) || a.path.split(/[/\\]/).includes(".."))
+        fail("invalid", `asset path must be relative to the project root and inside it: ${a.path}`);
       const existing = Object.values(p.assets).find((x) => x.path === a.path);
       if (existing) return `already imported as ${existing.id}`;
       const fp = ctx.fingerprint?.(a.path);
@@ -218,15 +226,15 @@ export const ops: Record<string, OpDef<any>> = {
         const duration =
           a.duration ??
           (len !== undefined ? Math.floor((len - sourceIn) * p.meta.fps) : fail("invalid", "duration required (asset duration unknown; run splicewright ingest)"));
-        item = { id: nextId(p, "i"), start: a.at, duration, assetId: asset.id, sourceIn };
+        item = { id: newId(p, "i"), start: a.at, duration, assetId: asset.id, sourceIn };
       } else if (a.component !== undefined) {
         kind = "overlay";
         const duration = a.duration ?? fail("invalid", "duration required");
-        item = { id: nextId(p, "i"), start: a.at, duration, component: a.component, props: a.props ?? {} };
+        item = { id: newId(p, "i"), start: a.at, duration, component: a.component, props: a.props ?? {} };
       } else {
         kind = "caption";
         const duration = a.duration ?? fail("invalid", "duration required");
-        item = { id: nextId(p, "c"), start: a.at, duration, mode: "free", text: a.text! };
+        item = { id: newId(p, "c"), start: a.at, duration, mode: "free", text: a.text! };
       }
       const t = a.trackId
         ? findTrack(p, a.trackId)
@@ -249,7 +257,7 @@ export const ops: Record<string, OpDef<any>> = {
         fail("invalid", `split point ${a.at} is not inside ${item.id} [${item.start}, ${end(item)})`);
       const offset = a.at - item.start;
       const second = structuredClone(item);
-      second.id = nextId(p, t.kind === "caption" ? "c" : "i");
+      second.id = newId(p, t.kind === "caption" ? "c" : "i");
       second.start = a.at;
       second.duration = item.duration - offset;
       item.duration = offset;
@@ -491,9 +499,10 @@ export const ops: Record<string, OpDef<any>> = {
     let n = 0;
     for (const s of segs) {
       const text = s.text.trim();
-      const cap: CaptionItem = { id: nextId(p, "c"), start: 0, duration: 1, mode: "anchored", itemId: item.id, sourceStart: s.start, sourceEnd: s.end, text };
+      const cap: CaptionItem = { id: "", start: 0, duration: 1, mode: "anchored", itemId: item.id, sourceStart: s.start, sourceEnd: s.end, text };
       // Only segments visible now; a later trim that extends the item won't pull in the others.
       if (!text || !itemSpan(p, cap)) continue;
+      cap.id = newId(p, "c");
       (t.items as Item[]).push(cap);
       n++;
     }
@@ -512,7 +521,7 @@ export const ops: Record<string, OpDef<any>> = {
     "Add a named marker (point or range) on the timeline.",
     z.object({ label: z.string(), start: Frames.min(0), duration: Frames.min(1).optional(), color: z.string().optional() }),
     (p, a) => {
-      const id = nextId(p, "m");
+      const id = newId(p, "m");
       (p.markers ??= []).push({ id, ...a });
       p.markers.sort((x, y) => x.start - y.start);
       return `added marker ${id} "${a.label}" at ${a.start}`;

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
 import { renderMedia, renderStill, selectComposition } from "@remotion/renderer";
 import { load, loadCtx } from "@splicewright/core/node";
+import { grid, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
 import { duckRanges } from "./duck.ts";
 
@@ -83,6 +84,25 @@ export async function still(dir: string, frame: number, output: string | null, m
     scale: maxWidth ? Math.min(1, maxWidth / composition.width) : 1,
   });
   return { frame, output, buffer };
+}
+
+/**
+ * `n` composition frames from timeline frames [from, to) as one grid, 320 px on the long side per tile:
+ * the edit as a viewer sees it, at a fraction of the tokens of `n` stills.
+ * ponytail: stills render one after another (~0.3 s each); render them concurrently if n grows.
+ */
+export async function storyboard(dir: string, { from = 0, to, n = 12 }: { from?: number; to?: number; n?: number } = {}) {
+  const { composition, ...opts } = await prepare(dir);
+  to = Math.min(to ?? composition.durationInFrames, composition.durationInFrames);
+  if (!(to > from)) throw new Error(`empty range [${from}, ${to}) of 0..${composition.durationInFrames}`);
+  n = Math.max(1, Math.min(24, Math.round(n), to - from));
+  const frames = [...new Set(spread(from, to, n).map(Math.floor))];
+  const scale = 320 / Math.max(composition.width, composition.height);
+  const image = await scratch(async (tmp) => {
+    for (const [k, frame] of frames.entries()) await renderStill({ ...opts, composition, frame, output: join(tmp, `${k}.jpg`), imageFormat: "jpeg", scale });
+    return grid(tmp, frames.length);
+  });
+  return { image, frames };
 }
 
 export interface RenderOptions {

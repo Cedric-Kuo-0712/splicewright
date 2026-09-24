@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { beatFrames, type AudioItem } from "@splicewright/core";
 import { load, readAssets, run } from "@splicewright/core/node";
-import { ingest } from "../src/index.ts";
+import { ingest, peek } from "../src/index.ts";
 
 const example = join(import.meta.dirname, "../../../examples/basic");
 const venv = join(import.meta.dirname, "../../../ingest/.venv/bin/python");
@@ -33,6 +33,17 @@ describe("ingest", () => {
     // insertItem can now default the duration from the probe.
     expect(run(dir, "insertItem", { assetId: "a_clip", at: 500 })).toMatchObject({ changes: { summary: expect.stringContaining("(60f)") } });
   }, 60_000);
+
+  it("peek reads the analysis proxy when spacing allows, else the source, and reports shown times", async () => {
+    const dir = project();
+    const before = await peek(dir, "a_clip", { n: 2 }); // no proxy yet
+    expect(before).toMatchObject({ source: "source", times: [0.5, 1.5] });
+    await ingest(dir, { only: ["analysis"] });
+    expect(await peek(dir, "a_clip", { n: 2 })).toMatchObject({ source: "analysis proxy", times: [0, 1] }); // 1 fps frames
+    expect(await peek(dir, "a_clip", { n: 4 })).toMatchObject({ source: "source", times: [0.25, 0.75, 1.25, 1.75] });
+    expect(before.image.subarray(0, 2)).toEqual(Buffer.from([0xff, 0xd8])); // JPEG
+    await expect(peek(dir, "a_clip", { from: 3 })).rejects.toThrow("empty range");
+  }, 30_000);
 
   it("re-points a moved file by fingerprint instead of importing it twice", async () => {
     const dir = project();

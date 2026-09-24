@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { availableParallelism } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { availableParallelism, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Asset } from "@splicewright/core";
@@ -45,6 +45,62 @@ function exec(cmd: string, args: string[], onData?: (b: Buffer) => void): Promis
 
 export const ffmpeg = (args: string[], onData?: (b: Buffer) => void) => exec("ffmpeg", ["-loglevel", "error", "-y", ...args], onData);
 
+// ---------- agent views ----------
+
+/** `n` evenly spaced points in [from, to), each in the middle of its slice. */
+export const spread = (from: number, to: number, n: number) => Array.from({ length: n }, (_, k) => from + ((k + 0.5) * (to - from)) / n);
+
+/**
+ * Tiles `<k>.jpg` (k = 0..n-1) from `dir` into one JPEG, row-major, up to 4 per row.
+ * ponytail: no burned-in labels (this ffmpeg has no drawtext); callers return the tile times as text.
+ */
+export async function grid(dir: string, n: number): Promise<Buffer> {
+  const cols = Math.min(4, n);
+  const out = join(dir, "grid.jpg");
+  await ffmpeg(["-framerate", "1", "-i", join(dir, "%d.jpg"), "-vf", `tile=${cols}x${Math.ceil(n / cols)}:padding=4`, "-frames:v", "1", "-q:v", "4", out]);
+  return readFileSync(out);
+}
+
+/** A temp dir for one call's frames, removed afterwards. */
+export async function scratch<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), "swr-"));
+  try {
+    return await fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A grid of `n` frames from a video asset's source seconds [from, to), 320 px per tile. Reads the analysis
+ * proxy when its frame spacing is fine enough (and it is current), else decodes the source.
+ */
+export async function peek(dir: string, assetId: string, { from = 0, to, n = 12 }: { from?: number; to?: number; n?: number } = {}) {
+  const asset = load(dir).assets[assetId];
+  if (!asset) throw new Error(`asset ${assetId} not found`);
+  if (asset.kind !== "video") throw new Error(`${assetId} is ${asset.kind}; peek reads video assets`);
+  const e = readAssets(dir)[assetId] as Entry | undefined;
+  const duration = e?.duration ?? (await probe(join(dir, asset.path), "video")).duration ?? 0;
+  to = Math.min(to ?? duration, duration);
+  if (!(to > from)) throw new Error(`empty range [${from}, ${to}) in ${assetId} (${duration.toFixed(2)} s)`);
+  n = Math.max(1, Math.min(24, Math.round(n)));
+  const step = analysisStep(duration);
+  const proxy = cacheDir(dir, "proxies", "analysis", `${assetId}.mp4`);
+  const useProxy = (to - from) / n >= step && existsSync(proxy) && !!e && e.done?.analysis === e.fingerprint;
+  // The proxy holds a frame every `step` s; report the frame actually shown, not the requested time.
+  const last = useProxy ? Math.floor((duration - 1e-3) / step) * step : duration - 0.05;
+  const times = spread(from, to, n).map((t) => +Math.min(useProxy ? Math.floor(t / step) * step : t, last).toFixed(2));
+  const image = await scratch(async (tmp) => {
+    await Promise.all(
+      times.map((t, k) =>
+        ffmpeg(["-ss", String(t), "-i", useProxy ? proxy : join(dir, asset.path), "-frames:v", "1", "-vf", "scale=320:320:force_original_aspect_ratio=decrease", "-q:v", "5", join(tmp, `${k}.jpg`)]),
+      ),
+    );
+    return grid(tmp, n);
+  });
+  return { image, times, source: useProxy ? "analysis proxy" : "source" };
+}
+
 // ---------- probe ----------
 
 export async function probe(file: string, kind: Asset["kind"]): Promise<Omit<Probe, "path" | "fingerprint">> {
@@ -84,9 +140,12 @@ async function editProxy(src: string, out: string) {
   await ffmpeg([...common, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", out]);
 }
 
-/** 360p at 0.5–1 fps: cheap frames for agent visual inspection. */
+/** Seconds between analysis-proxy frames. */
+const analysisStep = (duration = 0) => (duration > 60 ? 2 : 1);
+
+/** 360p at 0.5–1 fps: cheap frames for agent visual inspection (read by `peek`). */
 const analysisProxy = (src: string, out: string, duration = 0) =>
-  ffmpeg(["-i", src, "-vf", `fps=${duration > 60 ? 0.5 : 1},${shortSide(360)}`, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", out]);
+  ffmpeg(["-i", src, "-vf", `fps=${1 / analysisStep(duration)},${shortSide(360)}`, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", out]);
 
 /** One 72 px thumbnail per source second, named `<second>.jpg` (what the timeline requests), plus a 4×3 contact sheet. */
 async function thumbs(src: string, outDir: string, sheet: string, duration = 1) {

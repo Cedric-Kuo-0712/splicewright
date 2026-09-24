@@ -11,6 +11,7 @@
     "@remotion/bundler": "4.0.520",
     "@remotion/renderer": "4.0.520",
     "@splicewright/core": "*",
+    "@splicewright/ingest": "*",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "remotion": "4.0.520"

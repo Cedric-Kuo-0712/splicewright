@@ -5,12 +5,17 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { find, getItem, getRange, getSummary, ops, type OpResult } from "@splicewright/core";
 import { load, loadCtx, redo, run, undo } from "@splicewright/core/node";
-import { ingest, STEPS } from "@splicewright/ingest";
-import { renderStatus, startRender, still } from "@splicewright/render/node";
+import { ingest, peek, STEPS } from "@splicewright/ingest";
+import { renderStatus, startRender, still, storyboard } from "@splicewright/render/node";
 
 // Spec §7.2. Write tools map 1:1 to core ops; read tools return compact JSON.
 
 const json = (o: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(o) }] });
+const failed = (code: string, e: unknown) => ({ ...json({ code, message: (e as Error).message }), isError: true });
+/** A grid image plus what each tile shows; the tiles carry no labels. */
+const tiles = (image: Buffer, info: Record<string, unknown>) => ({
+  content: [{ type: "image" as const, data: image.toString("base64"), mimeType: "image/jpeg" }, { type: "text" as const, text: JSON.stringify({ layout: "row-major, 4 per row", ...info }) }],
+});
 
 function writeResult(r: OpResult) {
   if ("error" in r) return { ...json(r.error), isError: true };
@@ -69,7 +74,7 @@ export function createServer(dir: string): McpServer {
   );
   server.registerTool(
     "inspect_asset",
-    { description: "Asset metadata, full transcript text, and contact-sheet image path if ingested. No video.", inputSchema: { assetId: z.string() } },
+    { description: "Asset metadata, full transcript text, and contact-sheet image path if ingested. No video; use peek to see frames.", inputSchema: { assetId: z.string() } },
     async ({ assetId }) => {
       const asset = load(dir).assets[assetId];
       if (!asset) return { ...json({ code: "not_found", message: `asset ${assetId} not found` }), isError: true };
@@ -91,7 +96,37 @@ export function createServer(dir: string): McpServer {
         const { buffer } = await still(dir, frame, null, 960);
         return { content: [{ type: "image" as const, data: buffer!.toString("base64"), mimeType: "image/jpeg" }] };
       } catch (e) {
-        return { ...json({ code: "render_failed", message: (e as Error).message }), isError: true };
+        return failed("render_failed", e);
+      }
+    },
+  );
+  server.registerTool(
+    "peek",
+    {
+      description: "Look at a video asset before using it: n frames from source seconds [from, to) in one grid image (~320 px tiles), plus the time of each tile. Much cheaper than stills; reads the low-fps analysis proxy when the spacing allows.",
+      inputSchema: { assetId: z.string(), from: z.number().min(0).optional(), to: z.number().optional().describe("Default: end of the asset."), n: z.number().int().min(1).max(24).default(12) },
+    },
+    async ({ assetId, ...range }) => {
+      try {
+        const { image, times, source } = await peek(dir, assetId, range);
+        return tiles(image, { assetId, seconds: times, from: source });
+      } catch (e) {
+        return failed("peek_failed", e);
+      }
+    },
+  );
+  server.registerTool(
+    "storyboard",
+    {
+      description: "Check the edit: n composition frames from timeline frames [from, to) in one grid image (~320 px tiles), plus the frame of each tile. Use still for one frame at full detail.",
+      inputSchema: { from: z.number().int().min(0).optional(), to: z.number().int().min(1).optional().describe("Default: end of the timeline."), n: z.number().int().min(1).max(24).default(12) },
+    },
+    async (range) => {
+      try {
+        const { image, frames } = await storyboard(dir, range);
+        return tiles(image, { frames });
+      } catch (e) {
+        return failed("render_failed", e);
       }
     },
   );

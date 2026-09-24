@@ -250,6 +250,8 @@ Read tools are designed for token budget:
 | `find` | Search transcripts, labels, notes → matching items/ranges. |
 | `inspect_asset` | Metadata + transcript + contact-sheet path (image), no video. |
 | `still` | Rendered frame at t (JPEG, ≤ 960 px wide): what the composition actually shows. |
+| `peek` | Grid of n frames (~320 px tiles) from a video asset's source range + tile times. Reads the analysis proxy when its spacing allows. |
+| `storyboard` | Grid of n composition frames from a timeline range + tile frames: the edit at a glance. |
 | `render` | Starts a render job → job id; `render_status` polls it. |
 
 Every write tool accepts `baseRevision` (optional; if omitted, uses latest) and returns the new

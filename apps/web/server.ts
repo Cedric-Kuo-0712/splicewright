@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, watch } from "node:fs";
+import { createReadStream, createWriteStream, type ReadStream, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, watch } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
@@ -26,6 +26,9 @@ async function body(req: IncomingMessage): Promise<any> {
   return data ? JSON.parse(data) : {};
 }
 
+/** pipe() doesn't forward read errors; unhandled, one would take the server down. */
+const stream = (from: ReadStream, res: ServerResponse) => from.on("error", () => res.destroy()).pipe(res);
+
 /** Streams a file with HTTP Range support, which <video> seeking needs. */
 function sendFile(req: IncomingMessage, res: ServerResponse, file: string, type?: string) {
   const size = statSync(file).size;
@@ -33,16 +36,16 @@ function sendFile(req: IncomingMessage, res: ServerResponse, file: string, type?
   const m = /bytes=(\d*)-(\d*)/.exec(req.headers.range ?? "");
   if (!m) {
     res.writeHead(200, { ...headers, "Content-Length": size });
-    return createReadStream(file).pipe(res);
+    return stream(createReadStream(file), res);
   }
-  const start = m[1] ? Number(m[1]) : size - Number(m[2]);
+  const start = m[1] ? Number(m[1]) : Math.max(0, size - Number(m[2])); // a suffix longer than the file means all of it
   const end = m[1] && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1;
   if (start > end || start >= size) {
     res.writeHead(416, { "Content-Range": `bytes */${size}` });
     return res.end();
   }
   res.writeHead(206, { ...headers, "Content-Range": `bytes ${start}-${end}/${size}`, "Content-Length": end - start + 1 });
-  createReadStream(file, { start, end }).pipe(res);
+  stream(createReadStream(file, { start, end }), res);
 }
 
 const TYPES: Record<string, string> = { mp4: "video/mp4", mov: "video/quicktime", m4v: "video/mp4", webm: "video/webm", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", aac: "audio/aac", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml" };
@@ -156,13 +159,17 @@ function api(dir: string): Plugin {
             return send(res, 200, { assetId: id, ...snapshot() });
           }
           if (route === "POST /api/undo" || route === "POST /api/redo") {
-            // `steps` > 1 jumps through the history panel; stops at the first failure. `baseRevision`
-            // guards the first step: the client only undoes what it has on screen.
+            // `steps` > 1 jumps through the history panel; stops at the first failure but still returns
+            // the steps that landed. `baseRevision` guards the first step: the client only undoes what it has on screen.
             const b = await body(req);
             const steps = Math.max(1, Math.min(1000, Number(b.steps) || 1));
             const fn = route.endsWith("undo") ? undo : redo;
             let r = fn(dir, typeof b.baseRevision === "number" ? b.baseRevision : undefined);
-            for (let k = 1; k < steps && !("error" in r); k++) r = fn(dir);
+            for (let k = 1; k < steps && !("error" in r); k++) {
+              const next = fn(dir);
+              if ("error" in next) break;
+              r = next;
+            }
             return result(res, r);
           }
           if (route === "GET /api/history") return send(res, 200, historyList(dir));
@@ -182,7 +189,9 @@ function api(dir: string): Plugin {
           if (route === "GET /api/waveform") return res.end(readFileSync(await waveform(dir, asset.id, asset.path, limited)));
           send(res, 404, { error: `no route ${route}` });
         } catch (e) {
-          send(res, 500, { error: (e as Error).message });
+          // A failure after the headers went out (a stream error mid-file) can only end the response.
+          if (res.headersSent) res.destroy();
+          else send(res, 500, { error: (e as Error).message });
         }
       });
     },

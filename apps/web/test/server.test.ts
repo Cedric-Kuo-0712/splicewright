@@ -29,6 +29,8 @@ const get = (path: string, headers: Record<string, string> = {}) =>
 it("serves media byte ranges and nothing outside the project", async () => {
   const r = await get("/media/clip.mp4", { Range: "bytes=10-19" });
   expect([r.status, r.length, r.headers["content-type"]]).toEqual([206, 10, "video/mp4"]);
+  const all = await get("/media/clip.mp4");
+  expect(await get("/media/clip.mp4", { Range: "bytes=-999999999" })).toMatchObject({ status: 206, length: all.length });
   for (const path of ["/media/..%2fsecret.txt", "/media/%2e%2e%2fsecret.txt", "/media/..%5csecret.txt", "/media/%2fetc%2fhosts"])
     expect((await get(path)).status, path).toBe(404);
 });
@@ -40,6 +42,16 @@ it("applies ops against the client's revision", async () => {
   const ok = await post({ op: "addMarker", args: { label: "x", start: 5 }, baseRevision: project.revision });
   expect(ok).toMatchObject({ status: 200, data: { revision: project.revision + 1 } });
   expect(await post({ op: "addMarker", args: { label: "y", start: 6 }, baseRevision: project.revision })).toMatchObject({ status: 409, data: { error: { code: "conflict" } } });
+});
+
+it("undo past the oldest step lands the steps that exist", async () => {
+  const post = (path: string, body: unknown) => fetch(`${server.url}${path}`, { method: "POST", body: JSON.stringify(body) }).then((r) => r.json());
+  const { project } = await (await fetch(`${server.url}api/project`)).json();
+  const { revision } = await post("api/op", { op: "addMarker", args: { label: "z", start: 7 }, baseRevision: project.revision });
+  const r = await post("api/undo", { steps: 1000, baseRevision: revision });
+  expect(r.error).toBeUndefined();
+  expect(r.project.markers?.some((m: { label: string }) => m.label === "z")).toBeFalsy();
+  expect((await (await fetch(`${server.url}api/history`)).json()).undo).toEqual([]);
 });
 
 it("refuses writes from other sites", async () => {

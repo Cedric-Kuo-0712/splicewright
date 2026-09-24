@@ -168,6 +168,25 @@ function push(dir: string, stack: "undo" | "redo", entry: HistoryEntry) {
   writeAtomic(join(d, `${String(load(dir).revision).padStart(9, "0")}.json`), entry);
 }
 
+/** Byte-for-byte equal. Not fingerprint(): that includes mtime, which a fresh upload never shares,
+ * and a false match here would delete the upload. Hashes whole files, but only when sizes match. */
+function sameContent(a: string, b: string): boolean {
+  if (statSync(a).size !== statSync(b).size) return false;
+  const buf = Buffer.alloc(1 << 20);
+  const hash = (f: string) => {
+    // In chunks: readFileSync refuses files over 2 GiB, and phone footage gets there.
+    const h = createHash("sha256");
+    const fd = openSync(f, "r");
+    try {
+      for (let n; (n = readSync(fd, buf, 0, buf.length, null)); ) h.update(buf.subarray(0, n));
+    } finally {
+      closeSync(fd);
+    }
+    return h.digest("hex");
+  };
+  return hash(a) === hash(b);
+}
+
 /** Moves `tmp` into raw/ under a safe version of `name` and returns its project-relative path; if a
  * file there already has the same content, `tmp` is dropped and that file's path returned. */
 export function rawPath(dir: string, name: string, tmp: string): string {
@@ -178,6 +197,6 @@ export function rawPath(dir: string, name: string, tmp: string): string {
     const rel = join("raw", n === 1 ? clean : `${stem}-${n}${ext}`);
     const file = join(dir, rel);
     if (!existsSync(file)) return renameSync(tmp, file), rel;
-    if (fingerprint(file) === fingerprint(tmp)) return unlinkSync(tmp), rel;
+    if (sameContent(file, tmp)) return unlinkSync(tmp), rel;
   }
 }

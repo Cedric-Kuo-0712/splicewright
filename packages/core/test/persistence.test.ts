@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { commit, historyList, init, load, redo, run, undo } from "../src/persistence.ts";
+import { commit, historyList, init, load, rawPath, redo, run, undo } from "../src/persistence.ts";
 
 function project() {
   const dir = mkdtempSync(join(tmpdir(), "swr-"));
@@ -61,6 +61,17 @@ it("undo with a stale baseRevision is refused; undone ids stay taken", () => {
   expect(load(dir).markers).toHaveLength(2);
   expect(undo(dir, 2)).not.toHaveProperty("error");
   expect(run(dir, "addMarker", { label: "new", start: 9 })).toMatchObject({ changes: { summary: expect.stringContaining("m_3") } });
+});
+
+it("rawPath reuses a raw/ file only when the bytes match, whatever the mtime", () => {
+  const dir = project();
+  mkdirSync(join(dir, "raw"));
+  const tmp = (text: string) => (writeFileSync(join(dir, "tmp"), text), join(dir, "tmp"));
+  expect(rawPath(dir, "a.mp4", tmp("same"))).toBe(join("raw", "a.mp4"));
+  utimesSync(join(dir, "raw", "a.mp4"), 1, 1);
+  expect(rawPath(dir, "a.mp4", tmp("same"))).toBe(join("raw", "a.mp4"));
+  expect(rawPath(dir, "a.mp4", tmp("diff"))).toBe(join("raw", "a-2.mp4"));
+  expect(existsSync(join(dir, "tmp"))).toBe(false);
 });
 
 it("init refuses to overwrite", () => {

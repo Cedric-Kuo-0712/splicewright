@@ -113,7 +113,7 @@ switch (cmd) {
       if (!existsSync(abs)) out({ error: { code: "not_found", message: `${p} not found` } });
       mkdirSync(join(dir, "raw"), { recursive: true });
       const tmp = join(dir, "raw", `.import-${process.pid}`);
-      cpSync(abs, tmp, { preserveTimestamps: true }); // keeps the fingerprint, so importing it again finds the copy
+      cpSync(abs, tmp);
       return rawPath(dir, basename(abs), tmp);
     });
     const results = paths.map((path) => opResult(run(dir, "importAsset", { path })));

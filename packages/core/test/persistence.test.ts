@@ -23,6 +23,17 @@ it("run commits atomically and reads probe + transcript caches", () => {
   expect(readdirSync(dir).filter((f) => f.includes(".tmp"))).toEqual([]);
 });
 
+it("cutRanges is one undo step", () => {
+  const dir = project();
+  run(dir, "importAsset", { path: "raw/clip.mp4" });
+  run(dir, "insertItem", { assetId: "a_clip", at: 0 });
+  const before = load(dir).tracks;
+  expect(run(dir, "cutRanges", { itemId: "i_1", ranges: [[0.5, 1], [2, 2.5]] })).not.toHaveProperty("error");
+  expect(load(dir).tracks[0].items).toHaveLength(3);
+  undo(dir);
+  expect(load(dir).tracks).toEqual(before);
+});
+
 it("stale writes are rejected, not merged", () => {
   const dir = project();
   run(dir, "addMarker", { label: "a", start: 0 });

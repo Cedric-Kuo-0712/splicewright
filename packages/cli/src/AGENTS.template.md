@@ -33,6 +33,9 @@ Op names below are the `splicewright_<op>` tools.
 6. **Sound.** Music on an audio track with `volume` and fades; `detectBeats` then `fitToBeats` to cut a montage on
    the beat. `normalizeLoudness` (after `ingest --only loudness`) before mixing dialogue and music; `setKeyframe` on an
    audio item's `volume` for manual ducking.
+   **Cutting fillers and dead air.** `find_fillers` (add `itemId` for one clip); if it returns `hints`, run
+   `ingest --only transcript` first. Show the user the proposed cuts (`what` and times) and cut with `cutRanges`
+   only after they confirm; then `still` a few cut points or `storyboard` the range to check.
 7. **Captions.** `addCaptionsFromTranscript`, then `editCaption` for names and mishearings.
 8. **Review.** `storyboard` over what changed, `still` on a few key frames, `render` preset `draft` for a full pass.
    Report changes with timecodes so the human can jump to them; `render` master when they approve.

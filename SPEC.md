@@ -217,6 +217,7 @@ The adapters (UI/CLI/MCP) only call ops and persist the result.
 | `trim` | itemId, edge: "start"\|"end", to (frame), ripple? | Trimming "start" moves `start` and `sourceIn` together, so the right edge stays put. |
 | `move` | itemId, to, trackId?, ripple? | Rejects overlap unless `ripple`. |
 | `delete` | itemIds[], ripple? | Ripple closes the gap on magnetic tracks. |
+| `cutRanges` | itemId, ranges[[sourceStart, sourceEnd]] (asset s), ripple? = true | Splits at each range and deletes it, latest first; one undo step (§13.5). |
 | `closeGap` | trackId, at | Closes the empty span containing `at`; later non-anchored items shift left. |
 | `setProps` | itemId, patch | Whitelisted fields only (volume, fit, transform, effects, crop, mask, blend, keyframes, fades, transition, speed, props, label, note; mask and blend also on overlays). `speed` here keeps the duration. |
 | `setKeyframe` | itemId, prop, at, value \| null, ease? | Video items, any prop; audio items, `volume` only. Keys `prop` at timeline frame `at` (inside the item), replacing a key within half a frame; null removes it. |
@@ -286,6 +287,7 @@ Read tools are designed for token budget:
 | `get_range` | Items + captions intersecting [a, b], with ids, timings, labels, notes. |
 | `get_item` | One item, its asset metadata, and transcript text in its visible range. |
 | `find` | Search transcripts, labels, notes → matching items/ranges. |
+| `find_fillers` | Filler words and long silences → per item, source ranges (asset s) to feed `cutRanges` (§13.5). |
 | `inspect_asset` | Metadata + transcript + contact-sheet path (image), no video. |
 | `still` | Rendered frame at t (JPEG, ≤ 960 px wide): what the composition actually shows. |
 | `peek` | Grid of n frames (~320 px tiles) from a video asset's source range + tile times. Reads the analysis proxy when its spacing allows. |
@@ -367,7 +369,7 @@ ids or paths), and invokes them from the CLI. Steps, each cached by fingerprint:
 | analysis proxy | `proxies/analysis/*.mp4` | 360p, 0.5–1 fps (current `make_proxy.py`) |
 | thumbs + contact sheet | `thumbs/`, `contact-sheets/` | |
 | waveform | `waveforms/*.json` | peaks for UI |
-| transcript | `transcripts/*.json` | faster-whisper / mlx-whisper, asset time |
+| transcript | `transcripts/*.json` | faster-whisper / mlx-whisper, asset time; segments carry `words: [{ start, end, text }]` (format 2) |
 | scenes | `scenes/*.json` | optional |
 | beats | `beats/*.json` | audio assets only; see §15.3 |
 | loudness | `assets.json` (`loudness`, LUFS) | ffmpeg `ebur128` integrated loudness; assets with an audio stream. Silent assets (−70 LUFS gate floor) get no value. Runs by default on import (it is in `STEPS`) and decodes the whole audio once per asset. Read by `normalizeLoudness`. |
@@ -464,7 +466,7 @@ explained, not hidden.
 | M8.5 | Shortcuts from the CapCut comparison (§13.2a) | each new key has a menu or button showing it; `detachAudio` op tested (split/undo keep audio in sync) | ✅ done (keys verified by hand; detach is Alt+S, not CapCut's Cmd+Shift+S) |
 | M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | ✅ done (limiter render-only, -1 dBFS before AAC, ≤ ~1 dB overshoot after; no `meta` op to toggle it) |
 | M10 | More transitions + PIP presets (§13.4) | still-frame snapshot mid-transition per kind; handles invariant (§4.4 #4) holds | ✅ done (mid-frame still per kind at t=0.5, up/down covered by `look()` string tests only; PIP `border` not built; UI verified by typecheck only) |
-| M11 | Transcript cuts: fillers and silences (§13.5) | on `examples/`, one `batch` removes the listed words; anchored captions stay in sync | planned |
+| M11 | Transcript cuts: fillers and silences (§13.5) | on `examples/`, one `batch` removes the listed words; anchored captions stay in sync | ✅ done (unit-tested on synthetic transcripts; `findFillers` checked on real Whisper word output from TTS speech, zh + en; the re-transcribe path is not run end to end; no CLI verb for `findFillers`, MCP only) |
 
 ---
 
@@ -602,6 +604,19 @@ Already built: item volume, fades, ducking, volume keyframes on video items.
 - Agent workflow (AGENTS.template.md): propose the cut list first, cut only after the user confirms,
   then `still`/contact sheet to self-check (video-use's ask → confirm → execute → self-eval).
 - Reference: video-use's `pack_transcripts.py` (compact transcript for the LLM) and `timeline_view.py`.
+- **As built:** ranges are **source seconds** (asset time, the unit of `sourceIn` and of the transcript), so they
+  are stable across speed changes and match what `find`/`inspect_asset` show. `findFillers` (MCP `find_fillers`;
+  no CLI verb, the CLI only runs ops) returns `{ items: [{ itemId, assetId, ranges, what }], hints? }`. A filler
+  word grows by 2 frames each side; a silence *shrinks* by 2 frames each side so the cut never clips the
+  neighbouring words (deviation from "pad each range"). Silences are gaps between consecutive words only, not
+  before the first or after the last. Ranges are clamped to the item's visible source and merged. Items whose
+  transcript lacks `words` come back in `hints` (`ingest --only transcript`); the step re-runs because its
+  done-stamp is `fingerprint#t2` (`TRANSCRIPT_FORMAT` in `packages/ingest/src/index.ts`). `cutRanges` calls
+  `split` and `delete` internally (overlapping ranges merge, out-of-item ranges are ignored, nothing left = no-op
+  message but still a revision). Splitting drops `fadeOut` on earlier pieces and `fadeIn` on later ones, and a
+  cut that removes an item's tail also removes its `transition`. Whisper writes Mandarin in simplified characters
+  even for Taiwanese speech (checked with `say -v Meijia`: 那个, and 呃 heard as 二), so the default word list
+  also has 那个; 呃 is not reliably transcribed.
 
 ### 13.6 Later (not scheduled)
 Caption styles and templates (font, stroke, box, per-word highlight; see video-autopilot-kit), keyframes

@@ -39,7 +39,7 @@ export function transitionOf(t: Track, it: Item) {
   const next = tr && (t.items as VideoItem[]).find((i) => i.start === it.start + it.duration);
   if (!tr || !next) return undefined;
   const half = Math.floor(tr.duration / 2);
-  return { kind: tr.kind, next, before: Math.min(half, it.duration), after: Math.min(tr.duration - half, next.duration) };
+  return { kind: tr.kind, direction: tr.direction, next, before: Math.min(half, it.duration), after: Math.min(tr.duration - half, next.duration) };
 }
 
 export function videoItems(project: Project): Map<string, VideoItem> {

@@ -3,7 +3,7 @@ import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
 import { anchorOf, animate, ASPECTS, BLENDS, FPS_CHOICES, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, valueAt, withKey, type Animatable, type AudioItem, type Item, type OverlayItem, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
 import { mediaBox, SplicewrightProject, type Props } from "@splicewright/render";
-import { addMarker, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
+import { addMarker, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, pipEntries, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
 import { app, dnd, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 
@@ -456,7 +456,7 @@ function MediaBin({ p }: { p: Project }) {
 }
 
 /** Text or number input that commits on Enter or blur; empty clears the field. */
-const TRANSITIONS = ["dissolve", "dip", "wipe"] as const;
+const TRANSITIONS = ["dissolve", "dip", "wipe", "slide", "push", "zoom"] as const;
 
 function Field({ label, value, onCommit, type = "text", mark }: { label: string; value: unknown; onCommit: (v: string | number | null) => void; type?: "text" | "number"; mark?: React.ReactNode }) {
   const initial = value === undefined || value === null ? "" : String(value);
@@ -618,6 +618,10 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
         </select>
       </label>
       <Slider itemId={item.id} label="volume" min={0} max={2} step={0.01} zero={1} value={now.volume ?? 1} mark={mark("volume", now.volume ?? 1)} patch={(v) => (keyed("volume") ? keyPatch("volume", v) : { volume: v === 1 ? null : v })} />
+      <h4>
+        transform
+        <button onClick={(e) => openMenu(e, pipEntries(p, item))}>PIP ▾</button>
+      </h4>
       {(["x", "y", "scale", "rotation", "opacity"] as const).map((k) => {
         const v = (now.transform as Record<string, number> | undefined)?.[k];
         const dflt = k === "scale" || k === "opacity" ? 1 : 0;
@@ -641,6 +645,14 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
         </select>
       </label>
       {tr && <Field label="transition (f)" type="number" value={tr.duration} onCommit={(v) => Number(v) >= 2 && set({ transition: { ...tr, duration: Math.round(Number(v)) } })} />}
+      {tr && (tr.kind === "wipe" || tr.kind === "slide" || tr.kind === "push") && (
+        <label className="field">
+          <span>direction</span>
+          <select value={tr.direction ?? "left"} onChange={(e) => set({ transition: { ...tr, direction: e.target.value } })}>
+            {["left", "right", "up", "down"].map((d) => <option key={d}>{d}</option>)}
+          </select>
+        </label>
+      )}
       <h4>
         effects
         <button onClick={(e) => openMenu(e, lookEntries(item))}>Look ▾</button>

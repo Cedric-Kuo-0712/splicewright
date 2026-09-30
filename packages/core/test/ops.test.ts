@@ -322,6 +322,18 @@ describe("ops", () => {
     expect(item(cut, "i_3").transition).toMatchObject({ kind: "dissolve" });
   });
 
+  it("slide, push and zoom need handles like dissolve; direction round-trips", () => {
+    const slipped = ok(apply(fixture(), "slip", { itemId: "i_2", deltaSec: -5 }, ctx)); // i_2 now starts at source 0
+    for (const kind of ["slide", "push", "zoom"]) {
+      const patch = { transition: { kind, duration: 30, direction: "up" } };
+      expect(err(apply(slipped, "setProps", { itemId: "i_1", patch }, ctx))).toBe("invalid");
+      const p = ok(apply(fixture(), "setProps", { itemId: "i_1", patch }, ctx));
+      expect(item(p, "i_1").transition).toEqual({ kind, duration: 30, direction: "up" });
+      expect(item(ok(apply(p, "split", { itemId: "i_1", at: 30 }, ctx)), "i_3").transition?.direction).toBe("up");
+    }
+    expect(err(apply(fixture(), "setProps", { itemId: "i_1", patch: { transition: { kind: "wipe", duration: 30, direction: "diagonal" } } }, ctx))).toBe("invalid");
+  });
+
   it("batch is atomic: all or nothing, one revision", () => {
     const p = fixture();
     const swap = ok(

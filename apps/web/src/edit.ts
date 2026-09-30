@@ -1,4 +1,5 @@
 import { anchorOf, durationFrames, frameOf, itemSpan, nextId, secPerFrame, type Item, type Project, type Track, type TrackKind, type VideoItem } from "@splicewright/core";
+import { pip, type PipPreset } from "@splicewright/render";
 import { app, history, ioRange, op, player, playhead, refresh, say, seek, type MenuEntry } from "./store.ts";
 
 // Editing commands shared by the keyboard, the toolbar, and the context menus. Multi-op edits go out
@@ -377,7 +378,7 @@ function setSpeed(item: VideoItem) {
   if (v >= 0.1 && v <= 10) return op("setSpeed", { itemId: item.id, speed: v });
 }
 
-const TRANSITION_NAME = { dissolve: "Dissolve", dip: "Dip to black", wipe: "Wipe" } as const;
+const TRANSITION_NAME = { dissolve: "Dissolve", dip: "Dip to black", wipe: "Wipe", slide: "Slide", push: "Push", zoom: "Zoom" } as const;
 
 function transitionEntries(p: Project, t: Track, item: VideoItem): MenuEntry[] {
   const next = t.items.some((i) => i.start === end(item));
@@ -403,7 +404,20 @@ export const LOOKS: Record<string, VideoItem["effects"]> = {
   Vintage: { sepia: 0.45, contrast: 0.9, saturation: 0.8, brightness: 1.05 },
   Vivid: { saturation: 1.4, contrast: 1.15 },
   Faded: { contrast: 0.8, saturation: 0.7, brightness: 1.1 },
+  Cinematic: { contrast: 1.2, saturation: 0.85, brightness: 0.95, hue: -6 },
+  Sepia: { sepia: 1 },
+  Fresh: { saturation: 1.2, brightness: 1.08, contrast: 1.05, hue: 4 },
 };
+
+const PIP_NAME: Record<PipPreset, string> = { tl: "Top left", tr: "Top right", bl: "Bottom left", br: "Bottom right", left: "Left half", right: "Right half", circle: "Circle" };
+
+/** Picture-in-picture presets: one setProps with pip()'s transform/mask patch. Keyed x/y/scale would override it. */
+export const pipEntries = (p: Project, item: VideoItem): MenuEntry[] =>
+  (Object.keys(PIP_NAME) as PipPreset[]).map((k) => ({
+    label: `PIP: ${PIP_NAME[k]}`,
+    run: () => op("setProps", { itemId: item.id, patch: pip(p, item, app.get().sizes[item.assetId], k) }),
+    disabled: k !== "circle" && !!(item.keyframes?.x || item.keyframes?.y || item.keyframes?.scale),
+  }));
 
 export const lookEntries = (item: VideoItem): MenuEntry[] => [
   ...Object.entries(LOOKS).map(([label, effects]) => ({ label, run: () => op("setProps", { itemId: item.id, patch: { effects } }) })),
@@ -513,6 +527,7 @@ export function itemMenu(p: Project, t: Track, item: Item, frame: number): MenuE
     }
     if ("keyframes" in item && item.keyframes) out.push({ label: "Previous keyframe", hint: KEYS.prevKey, run: () => stepKey(-1) }, { label: "Next keyframe", hint: KEYS.nextKey, run: () => stepKey(1) });
     out.push("-", ...transitionEntries(p, t, item as VideoItem));
+    out.push("-", ...pipEntries(p, item as VideoItem).map((e) => (e === "-" ? e : { ...e, disabled: e.disabled || t.locked })));
     if (p.assets[item.assetId]?.kind !== "image") out.push({ label: "Slip…", hint: "⌥drag, ⌥, ⌥.", run: () => say("hold Alt and drag the item, or press Alt+, / Alt+. to slip a frame") });
   }
   if (t.kind === "audio") {

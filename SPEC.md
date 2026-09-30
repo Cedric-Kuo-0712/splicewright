@@ -144,8 +144,8 @@ interface VideoItem extends ItemBase {
   fadeIn?: Frames;                  // opacity and volume ramps
   fadeOut?: Frames;
   // Into the next item on the track when they touch, centred on the cut (Diffusion Studio's model).
-  // dissolve/wipe play duration/2 frames of source past both sides of the cut; dip needs no handles.
-  transition?: { kind: "dissolve" | "dip" | "wipe"; duration: Frames };
+  // every kind but dip plays duration/2 frames of source past both sides of the cut; dip needs no handles.
+  transition?: { kind: "dissolve" | "dip" | "wipe" | "slide" | "push" | "zoom"; duration: Frames; direction?: "left" | "right" | "up" | "down" };
 }
 
 interface AudioItem extends ItemBase {
@@ -330,7 +330,8 @@ Evolves from `video-cut/apps/editor`. Every mutation goes through core ops.
     Alt-drag a caption or overlay re-attaches it to the video under its new start.
   - Double-click a caption to edit it in place: Enter saves, Shift+Enter breaks the line, Esc cancels, Tab saves and edits the next.
   - Audio and video items show fade-in/out handles and a volume line (0–2, with dB) on hover or selection.
-  - Video item menu and inspector: Speed… (setSpeed), transition into the next item (dissolve, dip to black, wipe);
+  - Video item menu and inspector: Speed… (setSpeed), transition into the next item (dissolve, dip to black, wipe, slide, push, zoom; the
+    inspector sets wipe/slide/push `direction`), PIP presets (`PIP ▾` and the item menu);
     the timeline marks each transition across its cut.
   - With one video item selected under the playhead, a box on the player drags its transform: body moves (snaps to center, Alt bypasses),
     corners scale, the top knob rotates (Shift: 15°), double-click resets. The box fits the visible picture (probed size).
@@ -462,7 +463,7 @@ explained, not hidden.
 | M8 | Masks + blend modes (§13.2) | still-frame snapshots per shape, feather, invert; mask keyframes survive split/trim | ✅ done (pixel probes on an ellipse, an inverted feathered rect and blend; other shapes by `maskStyle` string tests; no player drag box; 90°/270° assets unrendered) |
 | M8.5 | Shortcuts from the CapCut comparison (§13.2a) | each new key has a menu or button showing it; `detachAudio` op tested (split/undo keep audio in sync) | ✅ done (keys verified by hand; detach is Alt+S, not CapCut's Cmd+Shift+S) |
 | M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | ✅ done (limiter render-only, -1 dBFS before AAC, ≤ ~1 dB overshoot after; no `meta` op to toggle it) |
-| M10 | More transitions + PIP presets (§13.4) | still-frame snapshot mid-transition per kind; handles invariant (§4.4 #4) holds | planned |
+| M10 | More transitions + PIP presets (§13.4) | still-frame snapshot mid-transition per kind; handles invariant (§4.4 #4) holds | ✅ done (mid-frame still per kind at t=0.5, up/down covered by `look()` string tests only; PIP `border` not built; UI verified by typecheck only) |
 | M11 | Transcript cuts: fillers and silences (§13.5) | on `examples/`, one `batch` removes the listed words; anchored captions stay in sync | planned |
 
 ---
@@ -581,6 +582,14 @@ Already built: item volume, fades, ducking, volume keyframes on video items.
   Optional `border?: { width: px; color }` and rounded corners come from the mask `radius`.
 - More Look presets as data (still `effects`); LUTs stay deferred.
 - Reference: Remotion's `@remotion/transitions` presentations *(names unverified)*.
+- **As built:** `direction` is the side the incoming picture enters from (default `left`); wipe, slide and push
+  use it, the others ignore it. `look()` (exported) also returns `dx`, `dy` (frame fractions) and `zoom`;
+  slide moves only the incoming item, push also shoves the outgoing one out the opposite side, zoom fades the
+  incoming item in while it settles from 1.25× and the outgoing one grows to 1.25×. `transitionOf` carries
+  `direction`. PIP is the pure `pip(p, item, size, preset)` in `Composition.tsx` (`tl|tr|bl|br|left|right|circle`);
+  placement targets the visible region (mask box, else crop box, else the whole picture), other transform
+  fields survive, rotation is ignored. Side presets scale the visible region to fit its half. `border` is not
+  built (needs a schema field). Looks added: Cinematic, Sepia, Fresh.
 
 ### 13.5 M11 — Transcript cuts: fillers and silences
 - Ingest `transcript` gains word timestamps (faster-whisper `word_timestamps=True`):

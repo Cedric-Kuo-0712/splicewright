@@ -71,32 +71,52 @@ const Captions: React.FC<{ p: Project; t: Track; Layer: React.ComponentType<{ te
 type Transition = NonNullable<ReturnType<typeof transitionOf>>;
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 
+/** Unit vector from the frame centre toward the side a transition's incoming picture enters from. */
+const ENTRY = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] } as const;
+/** CSS inset() order (top right bottom left) → the side a wipe shrinks: opposite the entry side. */
+const WIPE_SIDE = { left: 1, right: 3, up: 2, down: 0 } as const;
+
 /** How a video item looks and sounds at timeline frame `f`: its fades, plus the transition into it
- * (`inc`, from the item before) and out of it. dissolve and wipe lay the incoming item over the
- * outgoing one across the cut; dip darkens to black before the cut and back after it. */
-function look(item: VideoItem, f: number, inc?: Transition, out?: Transition) {
+ * (`inc`, from the item before) and out of it. Every kind but dip lays the incoming item over the
+ * outgoing one across the cut: dissolve fades it in, wipe reveals it from the entry side, slide moves it
+ * in (`dx`, `dy` are frame fractions), push also moves the outgoing one out, zoom fades it in while
+ * `zoom` (a scale multiplier) settles; dip darkens to black before the cut and back after it. */
+export function look(item: VideoItem, f: number, inc?: Transition, out?: Transition) {
   const end = item.start + item.duration;
   let opacity = 1;
   let bright = 1;
   let gain = 1;
   let clip: string | undefined;
+  let dx = 0;
+  let dy = 0;
+  let zoom = 1;
   if (item.fadeIn) gain *= clamp01((f - item.start) / item.fadeIn);
   if (item.fadeOut) gain *= clamp01((end - f) / item.fadeOut);
   opacity *= gain;
   if (inc) {
     const t = clamp01((f - item.start + inc.before) / (inc.before + inc.after));
     const d = clamp01((f - item.start) / inc.after);
-    if (inc.kind === "dissolve") (opacity *= t), (gain *= t);
-    else if (inc.kind === "wipe") (clip = `inset(0 ${(1 - t) * 100}% 0 0)`), (gain *= t);
-    else (bright *= d), (gain *= d);
+    const dir = inc.direction ?? "left";
+    const [vx, vy] = ENTRY[dir];
+    if (inc.kind === "dip") (bright *= d), (gain *= d);
+    else gain *= t;
+    if (inc.kind === "dissolve") opacity *= t;
+    else if (inc.kind === "wipe") clip = `inset(${(["0", "0", "0", "0"] as string[]).map((z, i) => (i === WIPE_SIDE[dir] ? `${(1 - t) * 100}%` : z)).join(" ")})`;
+    else if (inc.kind === "slide" || inc.kind === "push") (dx += vx * (1 - t)), (dy += vy * (1 - t));
+    else if (inc.kind === "zoom") (opacity *= t), (zoom *= 1.25 - 0.25 * t);
   }
   if (out) {
     const t = clamp01((f - end + out.before) / (out.before + out.after));
     const d = clamp01((end - f) / out.before);
     if (out.kind === "dip") (bright *= d), (gain *= d);
-    else gain *= 1 - t; // stays in view under the incoming item
+    else {
+      gain *= 1 - t; // stays in view under the incoming item
+      const [vx, vy] = ENTRY[out.direction ?? "left"];
+      if (out.kind === "push") (dx -= vx * t), (dy -= vy * t);
+      else if (out.kind === "zoom") zoom *= 1 + 0.25 * t;
+    }
   }
-  return { opacity, bright, gain, clip };
+  return { opacity, bright, gain, clip, dx, dy, zoom };
 }
 
 /**
@@ -115,6 +135,41 @@ export function mediaBox(p: Project, item: VideoItem, size?: [number, number]) {
   const [vw, vh] = [Math.min(ew, w * s), Math.min(eh, h * s)];
   const turn = ((Math.round(a / 90) % 4) + 4) % 4;
   return { ew, eh, vw, vh, rot, turn, display: (turn % 2 ? [vh, vw] : [vw, vh]) as [number, number] };
+}
+
+export type PipPreset = "tl" | "tr" | "bl" | "br" | "left" | "right" | "circle";
+
+/**
+ * Picture-in-picture as a setProps patch (transform and/or mask only). Corners scale to 0.3 with a 4%
+ * margin; left/right fill half the frame side by side. Placement targets the visible region (mask box,
+ * else crop box, else the whole upright picture), so a masked or cropped item lands where it shows.
+ * circle only adds a centred circular mask and keeps the transform. Transform x, y are the picture
+ * centre's px offset from the frame centre, as in the web transform box.
+ * ponytail: rotation is ignored (the visible box is measured upright); handle it if rotated PIPs matter.
+ */
+export function pip(p: Project, item: VideoItem, size: [number, number] | undefined, preset: PipPreset) {
+  const { width: W, height: H } = p.meta;
+  const [vw, vh] = mediaBox(p, item, size).display;
+  if (preset === "circle") {
+    const d = Math.min(vw, vh);
+    const [w, h] = [d / vw, d / vh];
+    return { mask: { shape: "ellipse" as const, x: (1 - w) / 2, y: (1 - h) / 2, w, h } };
+  }
+  const { mask, crop = {} } = item;
+  // An inverted mask shows what is outside its box, so place the crop box instead.
+  const [rx, ry, rw, rh] = mask && !mask.invert
+    ? [mask.x, mask.y, mask.w, mask.h]
+    : [crop.left ?? 0, crop.top ?? 0, 1 - (crop.left ?? 0) - (crop.right ?? 0), 1 - (crop.top ?? 0) - (crop.bottom ?? 0)];
+  const [bw, bh] = [rw * vw, rh * vh]; // visible box at scale 1
+  const [ox, oy] = [(rx + rw / 2 - 0.5) * vw, (ry + rh / 2 - 0.5) * vh]; // its centre relative to the picture's
+  const side = preset === "left" || preset === "right";
+  const scale = side ? Math.min(W / 2 / bw, H / bh) : 0.3;
+  const m = 0.04 * Math.min(W, H);
+  // Where the visible box's centre goes, in px from the frame centre.
+  const cx = side ? (preset === "left" ? -W / 4 : W / 4) : (preset.endsWith("l") ? -1 : 1) * (W / 2 - m - (scale * bw) / 2);
+  const cy = side ? 0 : (preset.startsWith("t") ? -1 : 1) * (H / 2 - m - (scale * bh) / 2);
+  const t = item.transform ?? {};
+  return { transform: { ...t, x: +(cx - scale * ox).toFixed(2), y: +(cy - scale * oy).toFixed(2), scale: +scale.toFixed(4) } };
 }
 
 const SIDES = ["top", "right", "bottom", "left"] as const;
@@ -223,7 +278,7 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; mu
         opacity: (opacity ?? 1) * l.opacity,
         filter: l.bright < 1 ? `brightness(${l.bright})` : undefined,
         clipPath: l.clip,
-        transform: x || y || scale !== 1 ? `translate(${x}px, ${y}px) scale(${scale})` : undefined,
+        transform: x || y || scale !== 1 || l.dx || l.dy || l.zoom !== 1 ? `translate(${x + l.dx * p.meta.width}px, ${y + l.dy * p.meta.height}px) scale(${scale * l.zoom})` : undefined,
       }}
     >
       {item.mask ? (
@@ -278,7 +333,7 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
               if (!span) return null;
               const inc = k > 0 ? transitionOf(t, list[k - 1]) : undefined;
               const out = transitionOf(t, item);
-              // dissolve and wipe play the handles: the incoming item starts early, the outgoing one runs late.
+              // every kind but dip plays the handles: the incoming item starts early, the outgoing one runs late.
               const lead = inc && inc.next === item && inc.kind !== "dip" ? inc.before : 0;
               const tail = out && out.kind !== "dip" ? out.after : 0;
               return (

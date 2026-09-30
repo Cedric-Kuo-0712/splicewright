@@ -128,9 +128,16 @@ export const VideoItem = z.object({
   /** Opacity and volume ramps at the ends, in frames. */
   fadeIn: Frames.min(0).optional(),
   fadeOut: Frames.min(0).optional(),
-  /** Into the next item on the track when they touch, centred on the cut. dissolve and wipe need
-   * duration/2 frames of source past both sides of the cut; dip goes through black and needs none. */
-  transition: z.object({ kind: z.enum(["dissolve", "dip", "wipe"]), duration: Frames.min(2) }).optional(),
+  /** Into the next item on the track when they touch, centred on the cut. Every kind but dip needs
+   * duration/2 frames of source past both sides of the cut; dip goes through black and needs none.
+   * `direction` is the side the incoming picture enters from (default left); wipe, slide and push use it. */
+  transition: z
+    .object({
+      kind: z.enum(["dissolve", "dip", "wipe", "slide", "push", "zoom"]),
+      duration: Frames.min(2),
+      direction: z.enum(["left", "right", "up", "down"]).optional(),
+    })
+    .optional(),
 });
 
 export const AudioItem = z.object({

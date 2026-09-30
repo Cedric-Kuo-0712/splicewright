@@ -133,6 +133,26 @@ function shift(t: Track, from: number, delta: number) {
   for (const i of t.items) if (i.start >= from) i.start += delta;
 }
 
+/** After items `ids` are gone: drop captions anchored to them, and detach overlays in place (those are hand-authored). */
+function dropAnchored(p: Project, ids: string[]) {
+  let orphans = 0;
+  let detached = 0;
+  for (const t of p.tracks) {
+    if (t.kind === "caption") {
+      const keep = t.items.filter((c) => !(c.mode === "anchored" && ids.includes(c.itemId)));
+      orphans += t.items.length - keep.length;
+      t.items = keep;
+    }
+    if (t.kind === "overlay")
+      for (const o of t.items)
+        if (o.anchor && ids.includes(o.anchor.itemId)) {
+          delete o.anchor;
+          detached++;
+        }
+  }
+  return (orphans ? `; removed ${orphans} anchored captions` : "") + (detached ? `; detached ${detached} overlays in place` : "");
+}
+
 /** The empty span [from, to) containing frame `at` on `t`, if items follow it. Anchored items don't count. */
 export function gapAt(t: Track, at: number): [number, number] | undefined {
   const free = t.items.filter((i) => !anchorOf(i));
@@ -347,27 +367,7 @@ export const ops: Record<string, OpDef<any>> = {
         t.items.splice(t.items.indexOf(item as never), 1);
         if (a.ripple ?? t.magnetic) shift(t, end(item), -item.duration);
       }
-      let orphans = 0;
-      let detached = 0;
-      for (const t of p.tracks) {
-        if (t.kind === "caption") {
-          const keep = t.items.filter((c) => !(c.mode === "anchored" && ids.includes(c.itemId)));
-          orphans += t.items.length - keep.length;
-          t.items = keep;
-        }
-        // Overlays are hand-authored: keep them at their last position rather than lose them.
-        if (t.kind === "overlay")
-          for (const o of t.items)
-            if (o.anchor && ids.includes(o.anchor.itemId)) {
-              delete o.anchor;
-              detached++;
-            }
-      }
-      return (
-        `deleted ${ids.join(", ")}` +
-        (orphans ? `; removed ${orphans} anchored captions` : "") +
-        (detached ? `; detached ${detached} overlays in place` : "")
-      );
+      return `deleted ${ids.join(", ")}` + dropAnchored(p, ids);
     },
   ),
 
@@ -464,10 +464,10 @@ export const ops: Record<string, OpDef<any>> = {
   }),
 
   removeTrack: def(
-    'Remove a track and its items.',z.object({ trackId: Id }), (p, a) => {
+    'Remove a track and its items. Captions anchored to its items go too; overlays attached to them are detached in place.',z.object({ trackId: Id }), (p, a) => {
     const t = findTrack(p, a.trackId);
     p.tracks.splice(p.tracks.indexOf(t), 1);
-    return `removed track ${t.id} with ${t.items.length} items`;
+    return `removed track ${t.id} with ${t.items.length} items` + dropAnchored(p, t.items.map((i) => i.id));
   }),
 
   setTrack: def(

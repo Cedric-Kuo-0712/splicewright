@@ -234,7 +234,17 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
   const tally = Object.fromEntries(["probe", ...steps].map((s) => [s, { ran: 0, cached: 0, skipped: 0, failed: 0 } as Tally]));
   const errors: string[] = [];
   const fail = (step: string, id: string, e: unknown) => (tally[step].failed++, errors.push(`${step} ${id}: ${(e as Error).message ?? e}`));
-  const save = () => (mkdirSync(cacheDir(dir), { recursive: true }), writeAtomic(cacheDir(dir, "assets.json"), cache));
+  /** Ids whose entry this run changed. */
+  const dirty = new Set<string>();
+  // Merge into what is on disk now, not the snapshot from the start: another process (MCP, web) may have
+  // probed other assets meanwhile, and writing the whole snapshot back would drop them.
+  // ponytail: read-merge-rename is not a lock; two saves in the same instant can still lose an entry. Add a lockfile if that shows up.
+  const save = () => {
+    const disk = readAssets(dir);
+    for (const id of dirty) disk[id] = cache[id];
+    mkdirSync(cacheDir(dir), { recursive: true });
+    writeAtomic(cacheDir(dir, "assets.json"), disk);
+  };
 
   // probe
   const ready: Entry[] = [];
@@ -250,6 +260,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
       try {
         const done = cache[a.id]?.fingerprint === fp ? cache[a.id].done : undefined; // renamed, same content
         cache[a.id] = { path: a.path, fingerprint: fp, ...(await run(() => probe(src, a.kind))), ...(done && { done }) };
+        dirty.add(a.id);
         tally.probe.ran++;
         log(`probe ${a.id}`);
         ready.push(cache[a.id]);
@@ -284,7 +295,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
       if (e.done?.[step] === e.fingerprint && existsSync(outputs[step](idOf.get(e)!))) return tally[step].cached++, false;
       return true;
     });
-  const mark = (e: Entry, step: Step) => ((e.done ??= {})[step] = e.fingerprint);
+  const mark = (e: Entry, step: Step) => (dirty.add(idOf.get(e)!), ((e.done ??= {})[step] = e.fingerprint));
 
   const ff: Record<"proxy" | "analysis" | "thumbs" | "waveform", (e: Entry, id: string, out: string) => Promise<unknown>> = {
     proxy: (e, _, out) => run(() => editProxy(join(dir, e.path), out)),

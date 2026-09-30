@@ -1,10 +1,10 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, renameSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { beatFrames, type AudioItem } from "@splicewright/core";
-import { load, readAssets, run } from "@splicewright/core/node";
+import { cacheDir, load, readAssets, run, writeAtomic } from "@splicewright/core/node";
 import { ingest, peek } from "../src/index.ts";
 
 const example = join(import.meta.dirname, "../../../examples/basic");
@@ -32,6 +32,18 @@ describe("ingest", () => {
     expect(again.steps).toMatchObject({ probe: { ran: 0, cached: 1 }, proxy: { ran: 0, cached: 1 }, thumbs: { cached: 1 } });
     // insertItem can now default the duration from the probe.
     expect(run(dir, "insertItem", { assetId: "a_clip", at: 500 })).toMatchObject({ changes: { summary: expect.stringContaining("(60f)") } });
+  }, 60_000);
+
+  it("keeps entries another process wrote to assets.json while this run was probing", async () => {
+    const dir = project();
+    const other = { path: "raw/other.mp4", fingerprint: "abc", kind: "video", duration: 3 };
+    // `log` runs after the probe and before the save, which is where a second ingest's write would land.
+    const r = await ingest(dir, {
+      only: [],
+      log: () => (mkdirSync(cacheDir(dir), { recursive: true }), writeAtomic(cacheDir(dir, "assets.json"), { a_other: other })),
+    });
+    expect(r.errors).toBeUndefined();
+    expect(readAssets(dir)).toMatchObject({ a_clip: { kind: "video", duration: 2 }, a_other: other });
   }, 60_000);
 
   it("peek reads the analysis proxy when spacing allows, else the source, and reports shown times", async () => {

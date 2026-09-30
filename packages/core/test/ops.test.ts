@@ -209,6 +209,18 @@ describe("ops", () => {
     expect(item(ok(r), "i_3").anchor).toBeUndefined();
   });
 
+  it("removeTrack on a video track removes its anchored captions and detaches overlays, like delete", () => {
+    let p = ok(apply(fixture(), "addCaptionsFromTranscript", { itemId: "i_1" }, ctx));
+    p = ok(apply(p, "insertItem", { component: "Card", props: {}, at: 100, duration: 30 }, ctx)); // i_3 over i_2
+    p = ok(apply(p, "attach", { itemId: "i_3", to: "i_2" }, ctx));
+    const r = apply(p, "removeTrack", { trackId: "t_1" }, ctx);
+    expect("changes" in r && r.changes.summary).toMatch(/removed \d+ anchored captions; detached 1 overlays/);
+    const after = ok(r);
+    expect(item(after, "i_3")).toMatchObject({ start: 100, duration: 30 });
+    expect(item(after, "i_3").anchor).toBeUndefined();
+    expect(after.tracks.find((t) => t.kind === "caption")!.items).toHaveLength(0);
+  });
+
   it("editCaption with empty text hides; markers add and remove", () => {
     let p = ok(apply(fixture(), "insertItem", { text: "hi", at: 0, duration: 30 }, ctx));
     p = ok(apply(p, "editCaption", { captionId: "c_1", text: "" }, ctx));

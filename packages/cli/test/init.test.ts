@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,15 @@ it("init writes the agent files once and keeps other MCP servers", () => {
   writeFileSync(join(dir, "AGENTS.md"), "mine");
   expect(init(dir).created).toEqual([]);
   expect(readFileSync(join(dir, "AGENTS.md"), "utf8")).toBe("mine");
+});
+
+it("init --preset sets the aspect, and refuses --size with it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "swr-preset-"));
+  const cli = (...args: string[]) => spawnSync(process.execPath, [CLI, "init", ...args], { cwd: dir, encoding: "utf8" });
+  expect(cli("--preset", "9:16", "--size", "640x480").status).toBe(1);
+  expect(cli("--preset", "constructor").status).toBe(1);
+  expect(cli("--preset", "4:5").status).toBe(0);
+  expect(JSON.parse(readFileSync(join(dir, "project.json"), "utf8")).meta).toMatchObject({ width: 1080, height: 1350 });
 });
 
 it("import copies files from outside the project into raw/, once", () => {

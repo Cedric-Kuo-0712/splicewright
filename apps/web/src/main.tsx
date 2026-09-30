@@ -4,5 +4,8 @@ import { app, listen, refresh } from "./store.ts";
 import { fitZoom } from "./Timeline.tsx";
 
 createRoot(document.getElementById("root")!).render(<App />);
-refresh().then(() => app.set({ pxPerFrame: fitZoom(app.get().project!) }));
+refresh().then(() => {
+  const { project } = app.get();
+  if (project) app.set({ pxPerFrame: fitZoom(project) });
+});
 listen();

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, extname, join } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { apply, createProject, type OpResult } from "./ops.ts";
 import type { Ctx, Project } from "./schema.ts";
 import { validate } from "./validate.ts";
@@ -24,6 +25,29 @@ export function init(dir: string, meta: Project["meta"]): Project | Err {
   const p = createProject(meta);
   writeAtomic(join(dir, "project.json"), p);
   return p;
+}
+
+export interface Recent { path: string; title: string; openedAt: string }
+// SPLICEWRIGHT_HOME replaces the home dir, so tests never touch the real one.
+const recentFile = () => join(process.env.SPLICEWRIGHT_HOME ?? homedir(), ".splicewright", "recent.json");
+
+export function recentProjects(): Recent[] {
+  try {
+    const l = JSON.parse(readFileSync(recentFile(), "utf8"));
+    return Array.isArray(l) ? l.filter((r) => typeof r?.path === "string" && typeof r.title === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Most recent first, one entry per absolute path, at most 20. A convenience list: failing to write it is not an error. */
+export function addRecent(dir: string, title: string) {
+  const path = resolve(dir);
+  const list = [{ path, title, openedAt: new Date().toISOString() }, ...recentProjects().filter((r) => resolve(r.path) !== path)].slice(0, 20);
+  try {
+    mkdirSync(dirname(recentFile()), { recursive: true });
+    writeAtomic(recentFile(), list);
+  } catch {}
 }
 
 export function load(dir: string): Project {

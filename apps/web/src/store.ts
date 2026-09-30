@@ -26,6 +26,10 @@ function store<T>(initial: T) {
 
 export interface State {
   project: Project | null;
+  /** The server's folder has no project.json yet: show the New project form. */
+  empty: boolean;
+  /** Projects the server will switch to (~/.splicewright/recent.json), minus the open one. */
+  recent: { path: string; title: string }[];
   duck: Record<string, Ranges>;
   /** Asset ids with an edit proxy in .splicewright/proxies/edit/. */
   proxies: string[];
@@ -70,7 +74,7 @@ const hash = new URLSearchParams(location.hash.slice(1));
 const num = (v: string | null) => (v === null || v === "" || isNaN(Number(v)) ? null : Number(v));
 
 export const app = store<State>({
-  project: null, duck: {}, proxies: [], durations: {}, sizes: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
+  project: null, empty: false, recent: [], duck: {}, proxies: [], durations: {}, sizes: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
   io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, cropping: false, ingesting: {}, uploads: [], reveal: null,
 });
 export const playhead = store({ frame: 0 });
@@ -89,7 +93,29 @@ async function call(path: string, body?: unknown) {
 }
 
 export async function refresh() {
-  take((await call("/api/project")).data);
+  const { data } = await call("/api/project");
+  app.set({ empty: !!data.empty, recent: data.recent ?? [] });
+  if (!data.empty) take(data);
+}
+
+const fail = (text: string) => app.set({ message: { text, error: true } });
+
+export async function newProject(form: { title: string; preset: string; fps: number }) {
+  const { data } = await call("/api/init", form);
+  if (data.error) return fail(data.error.message);
+  location.reload();
+}
+
+/** The server restarts on the chosen folder; wait until it answers from there, then reload. */
+export async function switchProject(path: string) {
+  const { data } = await call("/api/switch", { path });
+  if (data.error) return fail(data.error.message);
+  for (let k = 0; k < 50; k++) {
+    await new Promise((ok) => setTimeout(ok, 200));
+    const now = await fetch("/api/project").then((r) => r.json(), () => null);
+    if (now?.dir === data.dir) return location.reload();
+  }
+  fail("the server did not come back");
 }
 
 /** Runs a core op against the revision on screen. A conflict means someone else (an agent) wrote first. */

@@ -4,9 +4,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
-import { createServer, type Plugin } from "vite";
-import { historyList, load, loadCtx, rawPath, readAssets, redo, run, sizesOf, undo } from "@splicewright/core/node";
-import { sourceAt } from "@splicewright/core";
+import type { AddressInfo } from "node:net";
+import { createServer, type Plugin, type ViteDevServer } from "vite";
+import { addRecent, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo } from "@splicewright/core/node";
+import { ASPECTS, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
 import { ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
 import { duckRanges } from "@splicewright/render/node";
 
@@ -64,7 +65,16 @@ function sameOrigin(req: IncomingMessage): boolean {
   }
 }
 
-function api(dir: string): Plugin {
+interface Hooks {
+  home: string;
+  /** Writes the agent files after /api/init; lives in the cli, which imports this module. */
+  onInit?: (dir: string, meta: Project["meta"]) => string[];
+  /** Restarts the server on another folder once the response is out. */
+  switchTo: (dir: string) => void;
+}
+
+function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
+  const hasProject = () => existsSync(join(dir, "project.json"));
   const clients = new Set<ServerResponse>();
   const broadcast = (m: unknown) => clients.forEach((c) => c.write(`data: ${JSON.stringify(m)}\n\n`));
   // One ingest at a time: concurrent runs would each rewrite assets.json from their own snapshot.
@@ -76,11 +86,11 @@ function api(dir: string): Plugin {
     }));
   let timer: NodeJS.Timeout | undefined;
   // project.json is replaced by rename, so watch the folder, not the file.
-  watch(dir, (_, name) => {
+  const watcher = watch(dir, (_, name) => {
     if (name !== "project.json") return;
     clearTimeout(timer);
     timer = setTimeout(() => {
-      broadcast({ revision: load(dir).revision });
+      if (hasProject()) broadcast({ revision: load(dir).revision });
     }, 30);
   });
 
@@ -100,6 +110,8 @@ function api(dir: string): Plugin {
     resolveId: (id) => (id === "virtual:swr-config" ? "\0swr-config" : undefined),
     load: (id) => (id === "\0swr-config" ? (existsSync(config) ? `export { default } from ${JSON.stringify(config)};` : "export default {};") : undefined),
     configureServer(server) {
+      // A switch starts a new server on another folder; this one's watcher must not outlive it.
+      server.httpServer?.on("close", () => (clearTimeout(timer), watcher.close()));
       server.middlewares.use(async (req, res, next) => {
         const url = new URL(req.url ?? "/", "http://x");
         try {
@@ -114,7 +126,28 @@ function api(dir: string): Plugin {
           // (Vite's host check, which runs first, already stops DNS rebinding.)
           if (req.method !== "GET" && !sameOrigin(req)) return send(res, 403, { error: { code: "forbidden", message: "cross-origin request refused" } });
           const route = `${req.method} ${url.pathname}`;
-          if (route === "GET /api/project") return send(res, 200, { dir, ...snapshot() });
+          const recent = () => recentProjects().filter((r) => resolve(r.path) !== dir);
+          if (route === "GET /api/project") return send(res, 200, hasProject() ? { dir, recent: recent(), ...snapshot() } : { dir, empty: true, recent: recent() });
+          if (route === "POST /api/init") {
+            if (hasProject()) return send(res, 409, { error: { code: "exists", message: "project.json already exists" } });
+            const b = await body(req);
+            const size = Object.hasOwn(ASPECTS, b.preset) ? ASPECTS[b.preset] : undefined;
+            if (!size || !FPS_CHOICES.includes(b.fps)) return send(res, 400, { error: { code: "usage", message: "preset and fps must be one of the form's choices" } });
+            const meta = { title: String(b.title ?? "").trim() || basename(dir), fps: b.fps, width: size[0], height: size[1] };
+            const r = init(dir, meta);
+            if ("error" in r) return send(res, 400, r);
+            addRecent(dir, meta.title);
+            return send(res, 200, { created: ["project.json", ...(onInit?.(dir, meta) ?? [])] });
+          }
+          if (route === "POST /api/switch") {
+            // Only the startup folder or an entry of recent.json: the browser never names an arbitrary path.
+            const path = resolve(String((await body(req)).path ?? ""));
+            if (path !== home && !recentProjects().some((r) => resolve(r.path) === path)) return send(res, 403, { error: { code: "forbidden", message: "not a recent project" } });
+            if (!existsSync(join(path, "project.json"))) return send(res, 404, { error: { code: "not_found", message: `no project.json in ${path}` } });
+            send(res, 200, { dir: path });
+            return path === dir ? undefined : switchTo(path);
+          }
+          if (!hasProject()) return send(res, 409, { error: { code: "no_project", message: "no project in this folder yet; create one with POST /api/init" } });
           if (route === "POST /api/op") {
             const b = await body(req);
             return result(res, run(dir, b.op, b.args, b.baseRevision));
@@ -198,18 +231,53 @@ function api(dir: string): Plugin {
   };
 }
 
-export async function open(dir: string, { port = 5190 } = {}) {
-  dir = resolve(dir);
-  if (!existsSync(join(dir, "project.json"))) throw new Error(`no project.json in ${dir}; run splicewright init`);
-  const server = await createServer({
-    configFile: false,
-    root: here,
-    logLevel: "warn",
-    plugins: [react(), api(dir)],
-    // Project components import react/remotion but the project folder has no node_modules.
-    resolve: { dedupe: ["react", "react-dom", "remotion"], alias: { splicewright: join(here, "../../packages/render/src/config.ts") } },
-    server: { host: "127.0.0.1", port, fs: { allow: [dir, join(here, "../..")] }, watch: { ignored: [join(dir, ".splicewright") + "/**"] } },
-  });
-  await server.listen();
-  return { url: server.resolvedUrls!.local[0], dir: relative(process.cwd(), dir) || ".", close: () => server.close() };
+export async function open(dir: string, { port = 5190, onInit }: { port?: number; onInit?: Hooks["onInit"] } = {}) {
+  const home = resolve(dir);
+  let server!: ViteDevServer;
+  let current = home;
+  let bound = port;
+  // The folder is baked into the Vite config (fs.allow, the project's config import), so a switch is a restart.
+  const start = async (dir: string, port: number, strictPort: boolean) => {
+    if (existsSync(join(dir, "project.json"))) {
+      const title = (() => {
+        try {
+          return String(load(dir).meta.title);
+        } catch {
+          return basename(dir); // a corrupt project.json still opens; /api/project shows the error
+        }
+      })();
+      addRecent(dir, title);
+    }
+    server = await createServer({
+      configFile: false,
+      root: here,
+      logLevel: "warn",
+      plugins: [react(), api(dir, { home, onInit, switchTo })],
+      // Project components import react/remotion but the project folder has no node_modules.
+      resolve: { dedupe: ["react", "react-dom", "remotion"], alias: { splicewright: join(here, "../../packages/render/src/config.ts") } },
+      server: { host: "127.0.0.1", port, strictPort, fs: { allow: [dir, join(here, "../..")] }, watch: { ignored: [join(dir, ".splicewright") + "/**"] } },
+    });
+    await server.listen();
+    current = dir;
+  };
+  // Switches run one at a time, each after a delay so its /api/switch response gets out before the
+  // old server drops its connections. A failed start falls back to the previous folder: never no server.
+  let queue = Promise.resolve();
+  const switchTo = (next: string) =>
+    (queue = queue.then(async () => {
+      await new Promise((ok) => setTimeout(ok, 50));
+      const prev = current;
+      await server.close();
+      for (const dir of [next, prev]) {
+        try {
+          return await start(dir, bound, true);
+        } catch (e) {
+          console.error(`could not serve ${dir}: ${(e as Error).message}`);
+          await server.close().catch(() => {});
+        }
+      }
+    }));
+  await start(home, port, false);
+  bound = (server.httpServer!.address() as AddressInfo).port;
+  return { url: server.resolvedUrls!.local[0], dir: relative(process.cwd(), home) || ".", close: () => server.close() };
 }

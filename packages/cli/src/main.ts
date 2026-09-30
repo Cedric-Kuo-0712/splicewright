@@ -2,7 +2,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { ASPECTS, getSummary } from "@splicewright/core";
+import { ASPECTS, FONT_PAIRS, FONTS, getSummary } from "@splicewright/core";
 import { init, load, rawPath, redo, run, undo } from "@splicewright/core/node";
 import { displayable, ingest, STEPS, type Step } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
@@ -54,6 +54,16 @@ const [cmd, ...args] = positionals;
 const dir = process.cwd();
 const fail = (e: Error): never => out({ error: { code: "render_failed", message: e.message } });
 
+/** The built-in fonts and pairings as markdown, for AGENTS.md's Type section. */
+const fontGuide = () =>
+  [
+    "| Font | `fontFamily` | Weights | Feel | Use for | Avoid |",
+    "|---|---|---|---|---|---|",
+    ...FONTS.map((f) => `| ${f.core ? "★ " : ""}${f.name} | \`${f.family}\` | ${f.weights.length === 2 && f.family.endsWith("Variable") ? f.weights.join("–") : f.weights.join(", ")} | ${f.feel} | ${f.use} | ${f.avoid} |`),
+    "",
+    "Pairings (title / supporting): " + FONT_PAIRS.map((p) => `${p.style}: ${p.title} / ${p.support}`).join("; ") + ".",
+  ].join("\n");
+
 /**
  * AGENTS.md (the brief), CLAUDE.md (points Claude Code at it) and .mcp.json (starts `splicewright mcp` here).
  * Existing files are kept; .mcp.json only gains a splicewright entry if it has none. Returns what was written.
@@ -67,7 +77,8 @@ function agentFiles(dir: string, meta: { title: string; fps: number; width: numb
     written.push(name);
   };
   const template = readFileSync(join(import.meta.dirname, "AGENTS.template.md"), "utf8");
-  const agents = template.replace(/\{\{(\w+)\}\}/g, (_, k: keyof typeof meta) => String(meta[k]));
+  const vars = { ...meta, fonts: fontGuide() };
+  const agents = template.replace(/\{\{(\w+)\}\}/g, (_, k: keyof typeof vars) => String(vars[k]));
   const agentsPath = join(dir, "AGENTS.md");
   if (refresh && existsSync(agentsPath)) {
     const sections = (text: string) => text.split(/^(?=## )/m);

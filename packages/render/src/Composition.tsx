@@ -1,5 +1,6 @@
 import React, { useMemo } from "react";
 import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame } from "remotion";
+import "./fonts.ts";
 import { animate, itemSpan, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem } from "@splicewright/core";
 import type { Config } from "./config.ts";
 import { duckGain, type Ranges } from "./duck.ts";

@@ -226,6 +226,7 @@ The adapters (UI/CLI/MCP) only call ops and persist the result.
 | `setSpeed` | itemId, speed, ripple? | Video only: keeps the source range, scales the duration; ripple (default on magnetic) moves later items. |
 | `slip` | itemId, deltaSec | Changes `sourceIn` only; timeline position unchanged. |
 | `addTrack` / `removeTrack` / `setTrack` | … | Empty tracks are allowed (unlike OpenCut). |
+| `setMeta` | title?, background?, limiter? | null unsets background/limiter. `fps`, `width`, `height` are refused: frame positions and normalized transforms/masks would need retiming or rescaling. |
 | `moveTrack` | trackId, to | Moves a track to layer index `to` (0 = bottom). |
 | `addCaptionsFromTranscript` | itemId, trackId? | Creates anchored captions from the asset transcript. |
 | `editCaption` | captionId, text \| "" | Empty text hides the caption (replaces the `----` convention). |
@@ -276,6 +277,7 @@ existing project): `AGENTS.md` (the per-project brief and notes, from `packages/
 `CLAUDE.md` (`@AGENTS.md`, for Claude Code) and `.mcp.json` (adds a `splicewright` server that runs this CLI's
 `mcp` by absolute path). How to use the tools is not in AGENTS.md: it is the MCP server's `instructions` (§7.2),
 so it stays current with the tools. Project state is not in AGENTS.md either: agents read it with `get_summary`.
+`init --refresh-agents` rewrites `AGENTS.md` from the current template and `meta`, keeping its `## Brief` and `## Notes` sections.
 
 ### 7.2 MCP server
 Write tools map 1:1 to core ops (`splicewright_split`, `splicewright_trim`, …, `splicewright_batch`).
@@ -464,7 +466,7 @@ explained, not hidden.
 | M7 | New-project flow + aspect presets (§13.1) | `open` in an empty folder → form → project renders; recent list only opens listed paths | ✅ done (browser pass by hand; switch fallback path untested) |
 | M8 | Masks + blend modes (§13.2) | still-frame snapshots per shape, feather, invert; mask keyframes survive split/trim | ✅ done (pixel probes on an ellipse, an inverted feathered rect and blend; other shapes by `maskStyle` string tests; no player drag box; 90°/270° assets unrendered) |
 | M8.5 | Shortcuts from the CapCut comparison (§13.2a) | each new key has a menu or button showing it; `detachAudio` op tested (split/undo keep audio in sync) | ✅ done (keys verified by hand; detach is Alt+S, not CapCut's Cmd+Shift+S) |
-| M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | ✅ done (limiter render-only, -1 dBFS before AAC, ≤ ~1 dB overshoot after; no `meta` op to toggle it) |
+| M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | ✅ done (limiter render-only, -1 dBFS before AAC, ≤ ~1 dB overshoot after; toggled by `setMeta`) |
 | M10 | More transitions + PIP presets (§13.4) | still-frame snapshot mid-transition per kind; handles invariant (§4.4 #4) holds | ✅ done (mid-frame still per kind at t=0.5, up/down covered by `look()` string tests only; PIP `border` not built; UI verified by typecheck only) |
 | M11 | Transcript cuts: fillers and silences (§13.5) | on `examples/`, one `batch` removes the listed words; anchored captions stay in sync | ✅ done (unit-tested on synthetic transcripts; `findFillers` checked on real Whisper word output from TTS speech, zh + en; the re-transcribe path is not run end to end; no CLI verb for `findFillers`, MCP only) |
 
@@ -568,7 +570,7 @@ Already built: item volume, fades, ducking, volume keyframes on video items.
   scales the peak back up to 0 dBFS. The preview has no limiter (no Web Audio), so it can differ from the
   render on peaks above −1 dBFS. The limiter sets a −1 dBFS sample peak before encoding; after AAC, peaks can
   overshoot by up to ~1 dB on dense, loud material (measured 0.3–1.2 dB on pink noise) but do not clip. A strict
-  post-encode −1 dBTP would need true-peak detection or a measure-and-re-encode pass; deferred. `meta` has no op: existing projects stay off; edit `project.json` to turn it on.
+  post-encode −1 dBTP would need true-peak detection or a measure-and-re-encode pass; deferred. Existing projects stay off; `setMeta { limiter: true }` turns it on.
   As built also: audio item volume keys are edited through the inspector slider + ◇ button and drawn as ◆
   on the item; `normalizeLoudness` is its own op (not a `setProps` batch) so it can check loudness and keys.
 - Reference: OpenCut classic `apps/web/src/media/audio-mastering.ts` (limiter: −1 dB threshold,

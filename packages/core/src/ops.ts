@@ -577,6 +577,16 @@ export const ops: Record<string, OpDef<any>> = {
     return `updated track ${t.id}: ${Object.keys(a.patch).join(", ")}`;
   }),
 
+  // fps and size are not settable: frame positions and normalized transforms/masks would need retiming or rescaling.
+  setMeta: def(
+    "Patch project meta: title, background, limiter (render-only −1 dBFS master limiter). null unsets background/limiter. fps and size are fixed at init.",
+    z.object({ title: z.string().min(1).optional(), background: z.string().nullable().optional(), limiter: z.boolean().nullable().optional() }).strict(),
+    (p, a) => {
+      patch(p.meta as Record<string, unknown>, a, ["title", "background", "limiter"], "meta");
+      return `updated meta: ${Object.keys(a).join(", ")}`;
+    },
+  ),
+
   moveTrack: def(
     "Move a track to index `to` in the layer order (0 = bottom).",
     z.object({ trackId: Id, to: z.number().int().min(0) }),

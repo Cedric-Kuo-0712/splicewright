@@ -24,6 +24,8 @@
     "@fontsource/lato": "^5.3.0",
     "@fontsource/poppins": "^5.3.0",
     "@remotion/bundler": "4.0.520",
+    "@remotion/effects": "4.0.520",
+    "@remotion/media": "4.0.520",
     "@remotion/renderer": "4.0.520",
     "@splicewright/core": "*",
     "@splicewright/ingest": "*",

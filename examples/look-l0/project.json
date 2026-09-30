@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "revision": 0,
+  "meta": {
+    "title": "L0 Canvas Key Test",
+    "fps": 30,
+    "width": 320,
+    "height": 180,
+    "background": "#000000"
+  },
+  "assets": {
+    "a_background": { "id": "a_background", "path": "blue.png", "kind": "image" },
+    "a_green_red": { "id": "a_green_red", "path": "green-red.mp4", "kind": "video" }
+  },
+  "tracks": [
+    {
+      "id": "t_background",
+      "name": "Blue background",
+      "kind": "video",
+      "items": [{ "id": "i_background", "start": 0, "duration": 60, "assetId": "a_background", "sourceIn": 0 }]
+    },
+    {
+      "id": "t_key",
+      "name": "Keyed foreground",
+      "kind": "video",
+      "items": [{
+        "id": "i_keyed",
+        "start": 0,
+        "duration": 60,
+        "assetId": "a_green_red",
+        "sourceIn": 0,
+        "key": { "kind": "chroma", "color": "#00ff00", "similarity": 0.45, "smoothness": 0.08 }
+      }]
+    }
+  ]
+}

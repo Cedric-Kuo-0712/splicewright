@@ -1,5 +1,7 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame } from "remotion";
+import { Video as CanvasVideo } from "@remotion/media";
+import { colorKey } from "@remotion/effects/color-key";
 import "./fonts.ts";
 import { animate, itemSpan, sourceAt, textCss, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem, type Word, type FontRole, type TextStyle } from "@splicewright/core";
 import type { Config } from "./config.ts";
@@ -267,6 +269,57 @@ const FILTERS = [
 export const filterOf = (e: VideoItem["effects"] | null = {}) =>
   FILTERS.flatMap(([k, fn, unit, zero]) => (e?.[k] !== undefined && e[k] !== zero ? [`${fn}(${e[k]}${unit})`] : [])).join(" ") || undefined;
 
+export function canvasVideoErrorHandler(itemName: string, onFailure: (error: Error) => void) {
+  return (error: Error): "fail" => {
+    error.message = `Video look decode failed for item "${itemName}": ${error.message}`;
+    onFailure(error);
+    return "fail";
+  };
+}
+
+const CanvasVideoPath: React.FC<{
+  itemName: string;
+  src: string;
+  trimBefore: number;
+  speed: number;
+  volume: (frame: number) => number;
+  muted?: boolean;
+  fit: VideoItem["fit"];
+  style: React.CSSProperties;
+  keyLook: NonNullable<VideoItem["key"]>;
+}> = ({ itemName, src, trimBefore, speed, volume, muted, fit, style, keyLook }) => {
+  const [decodeError, setDecodeError] = useState<Error | null>(null);
+  return (
+    <>
+      {decodeError ? (
+        <div style={{ position: "absolute", top: 8, right: 8, zIndex: 10, padding: "4px 8px", color: "#fff", background: "#9b1c1c", borderRadius: 4, font: "12px sans-serif" }}>look off: can&apos;t decode ({itemName})</div>
+      ) : (
+        <CanvasVideo
+          src={src}
+          trimBefore={trimBefore}
+          playbackRate={speed}
+          volume={volume}
+          muted={muted || speed !== 1}
+          objectFit={fit ?? "contain"}
+          style={{ ...style, objectFit: undefined }}
+          disallowFallbackToOffthreadVideo
+          onError={canvasVideoErrorHandler(itemName, setDecodeError)}
+          effects={[
+            // L0 establishes the stable per-pixel order: beauty → grade → curves → LUT → key.
+            colorKey({
+              keyColor: keyLook.color,
+              similarity: keyLook.similarity,
+              smoothness: keyLook.smoothness,
+              spillSuppression: keyLook.spill,
+            }),
+          ]}
+        />
+      )}
+      {!decodeError && speed !== 1 && <Audio src={src} trimBefore={trimBefore} playbackRate={speed} volume={volume} muted={muted} />}
+    </>
+  );
+};
+
 const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; muted?: boolean; from: number; inc?: Transition; out?: Transition }> = ({ p, item: raw, size, muted, from, inc, out }) => {
   const asset = p.assets[raw.assetId];
   const f = from + useCurrentFrame();
@@ -286,22 +339,23 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; mu
     filter: filterOf(item.effects),
     clipPath: cropPath(box, item.crop),
   };
-  const media =
-    asset.kind === "image" ? (
-      <Img src={staticFile(asset.path)} style={style} />
-    ) : (
-      // ponytail: sourceIn is rounded to whole frames, as video-cut did; pass seconds if sub-frame seeks matter.
-      // trimBefore is in source frames (Remotion doesn't scale it by playbackRate); `from` may sit before
-      // item.start when a transition plays the incoming item early.
-      <OffthreadVideo
-        src={staticFile(asset.path)}
-        trimBefore={Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps)}
-        playbackRate={speed}
-        volume={(v) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain}
-        muted={muted}
-        style={style}
-      />
-    );
+  const trimBefore = Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps);
+  const volume = (v: number) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain;
+  const media = asset.kind === "image" ? (
+    <Img src={staticFile(asset.path)} style={style} />
+  ) : raw.key ? (
+    <CanvasVideoPath key={asset.path} itemName={raw.label ?? raw.id} src={staticFile(asset.path)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted} fit={item.fit} style={style} keyLook={raw.key} />
+  ) : (
+    // Legacy items stay on OffthreadVideo; only pixel-look items opt into the canvas decoder.
+    <OffthreadVideo
+      src={staticFile(asset.path)}
+      trimBefore={trimBefore}
+      playbackRate={speed}
+      volume={volume}
+      muted={muted}
+      style={style}
+    />
+  );
   return (
     <AbsoluteFill
       style={{

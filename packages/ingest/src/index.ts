@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Asset } from "@splicewright/core";
-import { cacheDir, fingerprint, load, readAssets, writeAtomic, type Probe } from "@splicewright/core/node";
+import { HEIF, type Asset } from "@splicewright/core";
+import { cacheDir, fingerprint, load, rawPath, readAssets, writeAtomic, type Probe } from "@splicewright/core/node";
 
 // Spec §8. ffmpeg steps run here; transcript and beats need Python libraries and run ingest/*.py.
 // Every step is cached by content fingerprint: a probe entry records, per step, the fingerprint it ran on.
@@ -44,6 +44,15 @@ function exec(cmd: string, args: string[], onData?: (b: Buffer) => void): Promis
 }
 
 export const ffmpeg = (args: string[], onData?: (b: Buffer) => void) => exec("ffmpeg", ["-loglevel", "error", "-y", ...args], onData);
+
+/** The path to import for a project-relative `path`: HEIC/HEIF becomes a JPEG in raw/ (the original stays), anything else is itself. */
+export async function displayable(dir: string, path: string): Promise<string> {
+  if (!HEIF.test(path)) return path;
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  const tmp = join(dir, "raw", `.heif-${process.pid}-${Date.now()}.jpg`);
+  await ffmpeg(["-i", join(dir, path), "-frames:v", "1", "-q:v", "2", tmp]);
+  return rawPath(dir, basename(path).replace(HEIF, ".jpg"), tmp);
+}
 
 // ---------- agent views ----------
 

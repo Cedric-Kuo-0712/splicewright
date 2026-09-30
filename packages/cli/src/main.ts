@@ -4,7 +4,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { ASPECTS, getSummary } from "@splicewright/core";
 import { init, load, rawPath, redo, run, undo } from "@splicewright/core/node";
-import { ingest, STEPS, type Step } from "@splicewright/ingest";
+import { displayable, ingest, STEPS, type Step } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
 import { render, still } from "@splicewright/render/node";
 import { migrateVideoCut } from "./migrate.ts";
@@ -108,7 +108,7 @@ switch (cmd) {
   }
   case "import": {
     if (!args.length) out({ error: { code: "usage", message: "import <paths...>" } });
-    const paths = args.map((p) => {
+    const copied = args.map((p) => {
       const abs = resolve(p);
       const rel = relative(dir, abs);
       if (!isAbsolute(rel) && rel.split(sep)[0] !== "..") return rel;
@@ -119,6 +119,7 @@ switch (cmd) {
       cpSync(abs, tmp);
       return rawPath(dir, basename(abs), tmp);
     });
+    const paths = await Promise.all(copied.map((p) => displayable(dir, p).catch(fail)));
     const results = paths.map((path) => opResult(run(dir, "importAsset", { path })));
     const ids = Object.values(load(dir).assets).filter((a) => paths.includes(a.path)).map((a) => a.id);
     out({ results, ...(!flags["no-ingest"] && ids.length && { ingest: await ingest(dir, { assets: ids, jobs, log }) }) });

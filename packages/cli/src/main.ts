@@ -2,7 +2,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { ASPECTS, FONT_PAIRS, FONTS, getSummary } from "@splicewright/core";
+import { ASPECTS, FONT_PAIRS, FONTS, getSummary, THEME_IDS } from "@splicewright/core";
 import { init, load, rawPath, redo, run, undo } from "@splicewright/core/node";
 import { displayable, ingest, STEPS, type Step } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
@@ -77,7 +77,7 @@ function agentFiles(dir: string, meta: { title: string; fps: number; width: numb
     written.push(name);
   };
   const template = readFileSync(join(import.meta.dirname, "AGENTS.template.md"), "utf8");
-  const vars = { ...meta, fonts: fontGuide() };
+  const vars = { ...meta, fonts: fontGuide(), themes: THEME_IDS.join(", ") };
   const agents = template.replace(/\{\{(\w+)\}\}/g, (_, k: keyof typeof vars) => String(vars[k]));
   const agentsPath = join(dir, "AGENTS.md");
   if (refresh && existsSync(agentsPath)) {

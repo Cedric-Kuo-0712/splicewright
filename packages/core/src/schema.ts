@@ -156,6 +156,25 @@ export const AudioItem = z.object({
   downbeats: z.array(Seconds.min(0)).optional(),
 });
 
+export const FONT_ROLES = ["title", "subtitle", "emphasis", "handwritten"] as const;
+export const FontRole = z.enum(FONT_ROLES);
+
+/** SPEC-LOOK.md §3. `font` is a FONTS name; `size` is px at output resolution. */
+export const TextStyle = z.object({
+  font: z.string().optional(),
+  weight: z.number().optional(),
+  size: z.number().positive().optional(),
+  color: z.string().optional(),
+  tracking: z.number().optional(),
+  lineHeight: z.number().positive().optional(),
+  upper: z.boolean().optional(),
+  align: z.enum(["left", "center", "right"]).optional(),
+  stroke: z.object({ color: z.string(), width: z.number().min(0) }).optional(),
+  shadow: z.object({ color: z.string(), blur: z.number().min(0), y: z.number() }).optional(),
+  box: z.object({ color: z.string(), radius: z.number().min(0), pad: z.number().min(0) }).optional(),
+});
+export const Theme = z.object({ name: z.string(), roles: z.partialRecord(FontRole, TextStyle) });
+
 export const CaptionItem = z.discriminatedUnion("mode", [
   z.object({
     ...itemBase,
@@ -183,7 +202,7 @@ export const OverlayItem = z.object({
 export const Track = z.discriminatedUnion("kind", [
   z.object({ ...trackBase, kind: z.literal("video"), items: z.array(VideoItem) }),
   z.object({ ...trackBase, kind: z.literal("audio"), volume: z.number().min(0).optional(), items: z.array(AudioItem) }),
-  z.object({ ...trackBase, kind: z.literal("caption"), style: z.string().optional(), items: z.array(CaptionItem) }),
+  z.object({ ...trackBase, kind: z.literal("caption"), style: z.string().optional(), textStyle: TextStyle.optional(), highlight: z.enum(["none", "word"]).optional(), items: z.array(CaptionItem) }),
   z.object({ ...trackBase, kind: z.literal("overlay"), items: z.array(OverlayItem) }),
 ]);
 
@@ -206,7 +225,10 @@ export const Project = z.object({
     background: z.string().optional(),
     /** Render-only master limiter at −1 dBFS; the preview is unlimited. */
     limiter: z.boolean().optional(),
+    /** A built-in theme id or a key of `themes`; role-bound text takes its look from it. */
+    theme: z.string().optional(),
   }),
+  themes: z.record(Id, Theme).optional(),
   assets: z.record(Id, Asset),
   tracks: z.array(Track),
   markers: z.array(Marker).optional(),
@@ -214,6 +236,9 @@ export const Project = z.object({
   ids: z.record(z.string(), z.number().int().min(0)).optional(),
 });
 
+export type FontRole = z.infer<typeof FontRole>;
+export type TextStyle = z.infer<typeof TextStyle>;
+export type Theme = z.infer<typeof Theme>;
 export type Asset = z.infer<typeof Asset>;
 export type Anchor = z.infer<typeof Anchor>;
 export type VideoItem = z.infer<typeof VideoItem>;

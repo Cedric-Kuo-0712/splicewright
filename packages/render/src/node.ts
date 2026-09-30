@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
 import { renderMedia, renderStill, selectComposition } from "@remotion/renderer";
 import { load, loadCtx, readAssets, sizesOf } from "@splicewright/core/node";
-import type { Project } from "@splicewright/core";
+import { captionWords, type Project } from "@splicewright/core";
 import { ffmpeg, grid, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
 import { duckRanges } from "./duck.ts";
@@ -63,7 +63,8 @@ export function bundleProject(dir: string): Promise<string> {
 
 async function prepare(dir: string) {
   const project = load(dir);
-  const inputProps = { project, duck: duckRanges(project, loadCtx(dir)), sizes: sizesOf(readAssets(dir)) };
+  const ctx = loadCtx(dir);
+  const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(readAssets(dir)), words: captionWords(project, ctx) };
   const serveUrl = await bundleProject(dir);
   const opts = { serveUrl, inputProps, browserExecutable: browserExecutable() };
   const composition = await selectComposition({ ...opts, id: ID });

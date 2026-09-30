@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { PlayerRef } from "@remotion/player";
-import { durationFrames, gapAt, type Project, type VideoItem } from "@splicewright/core";
+import { durationFrames, gapAt, type Project, type VideoItem, type Word } from "@splicewright/core";
 import type { Ranges } from "@splicewright/render";
 
 // Two stores (§7.3): project state changes per op; the frame ticks at playback rate and only the
@@ -31,6 +31,8 @@ export interface State {
   /** Projects the server will switch to (~/.splicewright/recent.json), minus the open one. */
   recent: { path: string; title: string }[];
   duck: Record<string, Ranges>;
+  /** Transcript words per caption on a word-highlight track. */
+  words: Record<string, Word[]>;
   /** Asset ids with an edit proxy in .splicewright/proxies/edit/. */
   proxies: string[];
   /** Probed durations in seconds, from .splicewright/assets.json. */
@@ -78,17 +80,17 @@ const hash = new URLSearchParams(location.hash.slice(1));
 const num = (v: string | null) => (v === null || v === "" || isNaN(Number(v)) ? null : Number(v));
 
 export const app = store<State>({
-  project: null, empty: false, recent: [], duck: {}, proxies: [], durations: {}, sizes: {}, loudness: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
+  project: null, empty: false, recent: [], duck: {}, words: {}, proxies: [], durations: {}, sizes: {}, loudness: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
   io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, cropping: false, masking: false, ingesting: {}, uploads: [], reveal: null,
 });
 export const playhead = store({ frame: 0 });
 
-type Snapshot = Pick<State, "project" | "duck" | "proxies" | "durations" | "sizes" | "loudness">;
-const take = ({ project, duck, proxies, durations, sizes, loudness }: Snapshot) =>
+type Snapshot = Pick<State, "project" | "duck" | "words" | "proxies" | "durations" | "sizes" | "loudness">;
+const take = ({ project, duck, words, proxies, durations, sizes, loudness }: Snapshot) =>
   app.set(({ gap }) => {
     // Drop a gap selection that an undo, redo, or another writer filled.
     const t = gap && project?.tracks.find((t) => t.id === gap.trackId);
-    return { project, duck, proxies, durations, sizes, loudness, gap: t && gapAt(t, gap.at) ? gap : null };
+    return { project, duck, words, proxies, durations, sizes, loudness, gap: t && gapAt(t, gap.at) ? gap : null };
   });
 
 async function call(path: string, body?: unknown) {

@@ -1,7 +1,8 @@
 import { z } from "zod";
-import { ANIMATABLE, MASK_PROPS, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
+import { ANIMATABLE, FontRole, MASK_PROPS, TextStyle, Theme, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type OverlayItem, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
 import { keyAt, withKey } from "./keyframes.ts";
 import { beatFrames, snap, snapPoints, snapSpan } from "./timing.ts";
+import { badFont, isTheme, THEME_IDS } from "./themes.ts";
 import { anchorOf, frameOf, itemSpan, secPerFrame, sourceAt, validate, videoItems } from "./validate.ts";
 
 // Spec §5. Every op mutates a private clone; `apply` bumps the revision and validates.
@@ -66,7 +67,7 @@ const ITEM_PROPS: Record<TrackKind, string[]> = {
 const TRACK_PROPS: Record<TrackKind, string[]> = {
   video: ["name", "muted", "hidden", "locked", "magnetic"],
   audio: ["name", "muted", "hidden", "locked", "magnetic", "volume"],
-  caption: ["name", "muted", "hidden", "locked", "magnetic", "style"],
+  caption: ["name", "muted", "hidden", "locked", "magnetic", "style", "textStyle", "highlight"],
   overlay: ["name", "muted", "hidden", "locked", "magnetic"],
 };
 
@@ -188,6 +189,16 @@ function patch(target: Record<string, unknown>, changes: Record<string, unknown>
     if (v === null) delete target[k];
     else target[k] = v;
   }
+}
+
+/** A Text overlay's `props.role` / `props.textStyle`: valid shape, known font. */
+function checkText(props: Record<string, unknown>) {
+  if (props.role !== undefined && !FontRole.safeParse(props.role).success) fail("invalid", `role "${props.role}" is not one of title, subtitle, emphasis, handwritten`);
+  if (props.textStyle === undefined) return;
+  const s = TextStyle.safeParse(props.textStyle);
+  if (!s.success) fail("invalid", `textStyle: ${s.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
+  const bad = badFont(s.data);
+  if (bad) fail("invalid", bad);
 }
 
 // ---------- ops ----------
@@ -449,7 +460,7 @@ export const ops: Record<string, OpDef<any>> = {
   ),
 
   setProps: def(
-    'Patch item fields: volume, fit, transform, effects {brightness, contrast, saturation, hue, blur, grayscale, sepia, invert}, crop {top, right, bottom, left} (fractions), mask {shape: rect|ellipse|diamond|star|polygon, x, y, w, h (fractions of the fitted picture box, x,y = top-left, w,h > 0), radius (rect only, 0..0.5 of min(w,h)), points [[x,y],...] (polygon only, >= 3, fractions of the mask box), feather (px, 0..200), invert} (video and overlay; drawn after crop), blend (video and overlay: normal|multiply|screen|overlay|darken|lighten|difference), keyframes (whole map; use setKeyframe to key one value), fadeIn, fadeOut, transition {kind: dissolve|dip|wipe|slide|push|zoom, duration, direction (left|right|up|down: side the incoming picture enters from, default left; wipe/slide/push)}, speed (video; speed here keeps duration, so the source range scales; setSpeed keeps the source range); volume, fadeIn, fadeOut (audio); props (overlay); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
+    'Patch item fields: volume, fit, transform, effects {brightness, contrast, saturation, hue, blur, grayscale, sepia, invert}, crop {top, right, bottom, left} (fractions), mask {shape: rect|ellipse|diamond|star|polygon, x, y, w, h (fractions of the fitted picture box, x,y = top-left, w,h > 0), radius (rect only, 0..0.5 of min(w,h)), points [[x,y],...] (polygon only, >= 3, fractions of the mask box), feather (px, 0..200), invert} (video and overlay; drawn after crop), blend (video and overlay: normal|multiply|screen|overlay|darken|lighten|difference), keyframes (whole map; use setKeyframe to key one value), fadeIn, fadeOut, transition {kind: dissolve|dip|wipe|slide|push|zoom, duration, direction (left|right|up|down: side the incoming picture enters from, default left; wipe/slide/push)}, speed (video; speed here keeps duration, so the source range scales; setSpeed keeps the source range); volume, fadeIn, fadeOut (audio); props (overlay; a Text overlay takes text, role title|subtitle|emphasis|handwritten (default title), textStyle {font (a built-in font name), weight, size px, color, tracking em, lineHeight, upper, align, stroke {color,width}, shadow {color,blur,y}, box {color,radius,pad}} over the theme role, style raw CSS); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
     const { track: t, item } = locate(p, a.itemId);
     patch(item as Record<string, unknown>, a.patch, ITEM_PROPS[t.kind], `${t.kind} item ${item.id}`);
     const v = item as VideoItem;
@@ -458,6 +469,7 @@ export const ops: Record<string, OpDef<any>> = {
       for (const k of Object.keys(MASK_PROPS)) delete v.keyframes[k as keyof typeof MASK_PROPS];
       if (!Object.keys(v.keyframes).length) delete v.keyframes;
     }
+    if (t.kind === "overlay" && (item as OverlayItem).component === "Text") checkText((item as OverlayItem).props);
     return `updated ${item.id}: ${Object.keys(a.patch).join(", ")}`;
   }),
 
@@ -571,18 +583,29 @@ export const ops: Record<string, OpDef<any>> = {
   }),
 
   setTrack: def(
-    'Patch track fields: name, muted, hidden, locked, magnetic, volume (audio), style (caption). null unsets.',z.object({ trackId: Id, patch: Patch }), (p, a) => {
+    'Patch track fields: name, muted, hidden, locked, magnetic, volume (audio), style (caption), textStyle (caption; TextStyle over the theme subtitle role, see setProps), highlight (caption: none|word, per-word highlight in the emphasis style on anchored captions). null unsets.',z.object({ trackId: Id, patch: Patch }), (p, a) => {
     const t = findTrack(p, a.trackId);
     patch(t as Record<string, unknown>, a.patch, TRACK_PROPS[t.kind], `${t.kind} track ${t.id}`);
+    if (t.kind === "caption") {
+      const bad = badFont(t.textStyle);
+      if (bad) fail("invalid", bad);
+    }
     return `updated track ${t.id}: ${Object.keys(a.patch).join(", ")}`;
   }),
 
   // fps and size are not settable: frame positions and normalized transforms/masks would need retiming or rescaling.
   setMeta: def(
-    "Patch project meta: title, background, limiter (render-only −1 dBFS master limiter). null unsets background/limiter. fps and size are fixed at init.",
-    z.object({ title: z.string().min(1).optional(), background: z.string().nullable().optional(), limiter: z.boolean().nullable().optional() }).strict(),
+    `Patch project meta: title, background, limiter (render-only −1 dBFS master limiter), theme (one op restyles every role-bound Text overlay and caption track; built-in: ${THEME_IDS.join(", ")}, or a key of themes), themes ({id: {name, roles: {title|subtitle|emphasis|handwritten: TextStyle}}}, project-defined themes; whole map). null unsets background/limiter/theme/themes. fps and size are fixed at init.`,
+    z.object({ title: z.string().min(1).optional(), background: z.string().nullable().optional(), limiter: z.boolean().nullable().optional(), theme: z.string().nullable().optional(), themes: z.record(z.string().min(1), Theme).nullable().optional() }).strict(),
     (p, a) => {
-      patch(p.meta as Record<string, unknown>, a, ["title", "background", "limiter"], "meta");
+      const { themes, ...meta } = a;
+      patch(p.meta as Record<string, unknown>, meta, ["title", "background", "limiter", "theme"], "meta");
+      if (themes !== undefined) {
+        if (themes === null) delete p.themes;
+        else p.themes = themes;
+      }
+      for (const t of Object.values(p.themes ?? {})) for (const s of Object.values(t.roles)) checkText({ textStyle: s });
+      if (p.meta.theme && !isTheme(p, p.meta.theme)) fail("invalid", `unknown theme "${p.meta.theme}"; one of: ${[...THEME_IDS, ...Object.keys(p.themes ?? {})].join(", ")}`);
       return `updated meta: ${Object.keys(a).join(", ")}`;
     },
   ),

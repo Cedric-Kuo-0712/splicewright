@@ -37,6 +37,8 @@ export interface State {
   durations: Record<string, number>;
   /** Coded pixel sizes per asset, for crop and the transform box. */
   sizes: Record<string, [number, number]>;
+  /** Integrated LUFS per asset from the `loudness` ingest step; silent or unmeasured assets are absent. */
+  loudness: Record<string, number>;
   useProxies: boolean;
   selection: string[];
   /** A clicked empty span on a track, closed by Delete; kept apart from `selection` (items only). */
@@ -74,17 +76,17 @@ const hash = new URLSearchParams(location.hash.slice(1));
 const num = (v: string | null) => (v === null || v === "" || isNaN(Number(v)) ? null : Number(v));
 
 export const app = store<State>({
-  project: null, empty: false, recent: [], duck: {}, proxies: [], durations: {}, sizes: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
+  project: null, empty: false, recent: [], duck: {}, proxies: [], durations: {}, sizes: {}, loudness: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
   io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, cropping: false, ingesting: {}, uploads: [], reveal: null,
 });
 export const playhead = store({ frame: 0 });
 
-type Snapshot = Pick<State, "project" | "duck" | "proxies" | "durations" | "sizes">;
-const take = ({ project, duck, proxies, durations, sizes }: Snapshot) =>
+type Snapshot = Pick<State, "project" | "duck" | "proxies" | "durations" | "sizes" | "loudness">;
+const take = ({ project, duck, proxies, durations, sizes, loudness }: Snapshot) =>
   app.set(({ gap }) => {
     // Drop a gap selection that an undo, redo, or another writer filled.
     const t = gap && project?.tracks.find((t) => t.id === gap.trackId);
-    return { project, duck, proxies, durations, sizes, gap: t && gapAt(t, gap.at) ? gap : null };
+    return { project, duck, proxies, durations, sizes, loudness, gap: t && gapAt(t, gap.at) ? gap : null };
   });
 
 async function call(path: string, body?: unknown) {

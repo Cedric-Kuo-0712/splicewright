@@ -523,11 +523,34 @@ function Inspector({ p }: { p: Project }) {
           <Field label="fade out (f)" type="number" value={item.fadeOut} onCommit={(v) => set({ fadeOut: v })} />
         </>
       )}
+      {(t.kind === "audio" || t.kind === "video") && "assetId" in item && p.assets[item.assetId]?.kind !== "image" && <LoudnessFields p={p} item={item as AudioItem | VideoItem} />}
       {t.kind === "audio" && <BeatFields p={p} item={item as AudioItem} />}
       {t.kind === "video" && "assetId" in item && <VideoFields p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as VideoItem} fps={fps} still={p.assets[item.assetId]?.kind === "image"} set={set} />}
       {"component" in item && <MaskFields p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as OverlayItem} set={set} />}
       {"component" in item && <PropsField value={item.props} onCommit={(props) => set({ props })} />}
     </div>
+  );
+}
+
+/** Asset LUFS, Normalize to −14 (disabled on the same grounds normalizeLoudness refuses), and the project-wide render limiter. */
+function LoudnessFields({ p, item }: { p: Project; item: AudioItem | VideoItem }) {
+  const lufs = app.use((s) => s.loudness[item.assetId]);
+  const why = lufs === undefined ? "no loudness yet: run splicewright ingest --only loudness (silent assets have none)" : item.keyframes?.volume ? "has volume keyframes: remove them first" : null;
+  return (
+    <>
+      <h4>audio</h4>
+      <p className="dim">{lufs === undefined ? "loudness —" : `loudness ${lufs.toFixed(1)} LUFS`}</p>
+      <div className="buttons">
+        <button disabled={!!why} title={why ?? "Set volume so the asset plays at −14 LUFS (one undo step)"} onClick={() => op("normalizeLoudness", { itemIds: [item.id], target: -14 })}>
+          Normalize to −14
+        </button>
+      </div>
+      {why && <p className="dim">{why}</p>}
+      <label className="field" title="Render-only −1 dBFS master limiter for the whole project; the preview has no limiter">
+        <span>limiter (render)</span>
+        <input type="checkbox" checked={!!p.meta.limiter} onChange={(e) => op("setMeta", { limiter: e.target.checked })} />
+      </label>
+    </>
   );
 }
 

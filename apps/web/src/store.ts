@@ -62,6 +62,8 @@ export interface State {
   live: { itemId: string; patch: Partial<VideoItem> } | null;
   /** Crop handles instead of transform handles on the preview (Shift+C). */
   cropping: boolean;
+  /** Mask box handles instead of transform handles on the preview (Shift+K); never on with `cropping`. */
+  masking: boolean;
   /** Assets with ingest running on the server → the step last reported. */
   ingesting: Record<string, string>;
   /** File names being uploaded. */
@@ -77,7 +79,7 @@ const num = (v: string | null) => (v === null || v === "" || isNaN(Number(v)) ? 
 
 export const app = store<State>({
   project: null, empty: false, recent: [], duck: {}, proxies: [], durations: {}, sizes: {}, loudness: {}, useProxies: true, selection: [], gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
-  io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, cropping: false, ingesting: {}, uploads: [], reveal: null,
+  io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, cropping: false, masking: false, ingesting: {}, uploads: [], reveal: null,
 });
 export const playhead = store({ frame: 0 });
 

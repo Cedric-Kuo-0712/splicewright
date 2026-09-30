@@ -137,6 +137,10 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .crop-h { position: absolute; background: #fcc419; opacity: 0.8; }
 .crop-h.top, .crop-h.bottom { left: 30%; right: 30%; height: 6px; cursor: ns-resize; } .crop-h.top { top: 0; } .crop-h.bottom { bottom: 0; }
 .crop-h.left, .crop-h.right { top: 30%; bottom: 30%; width: 6px; cursor: ew-resize; } .crop-h.left { left: 0; } .crop-h.right { right: 0; }
+/* The mask may leave the picture (x/y/w/h outside 0..1), so the box does not clip in mask mode. */
+.tf-box.masking { border-style: dashed; }
+.mask-rect { position: absolute; border: 1px dashed #74c0fc; box-shadow: 0 0 0 1px #0008; cursor: move; }
+.mask-rect.ellipse { border-radius: 50%; }
 .kf { position: absolute; bottom: 4px; width: 8px; height: 8px; margin-left: -4px; background: #74c0fc; border: 1px solid #000; transform: rotate(45deg); z-index: 5; cursor: pointer; }
 .kf-btn { margin-left: 4px; padding: 0 3px; border: 0; background: none; color: #777; font-size: 11px; line-height: 1; cursor: pointer; }
 .kf-btn.keyed { color: #74c0fc; }

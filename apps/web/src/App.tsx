@@ -3,7 +3,7 @@ import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
 import { anchorOf, animate, ASPECTS, BLENDS, FPS_CHOICES, MASK_PROPS, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, valueAt, withKey, type Animatable, type AudioItem, type Item, type OverlayItem, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
 import { mediaBox, SplicewrightProject, type Props } from "@splicewright/render";
-import { addMarker, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, pipEntries, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
+import { addMarker, addText, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, pipEntries, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
 import { app, dnd, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 
@@ -148,6 +148,7 @@ function Toolbar({ p }: { p: Project }) {
       ) : (
         <button onClick={() => split([playhead.get().frame])} title="Split selection at the playhead; all items under it if nothing is selected (S / Cmd+B)">Split</button>
       )}
+      <button onClick={() => addText(playhead.get().frame)} title="Add a text overlay at the playhead (T)">+ Text</button>
       <button
         disabled={!selection.length && !gap && !range}
         onClick={() => rippleDelete(true)}
@@ -534,6 +535,7 @@ function Field({ label, value, onCommit, type = "text", mark }: { label: string;
       </span>
       <input
         id={id}
+        name={label}
         key={initial}
         type={type}
         step="any"
@@ -591,8 +593,27 @@ function Inspector({ p }: { p: Project }) {
       {t.kind === "audio" && <BeatFields p={p} item={item as AudioItem} />}
       {t.kind === "video" && "assetId" in item && <VideoFields p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as VideoItem} fps={fps} still={p.assets[item.assetId]?.kind === "image"} set={set} />}
       {"component" in item && <MaskFields p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as OverlayItem} set={set} />}
+      {"component" in item && item.component === "Text" && <TextFields item={item} set={set} />}
       {"component" in item && <PropsField value={item.props} onCommit={(props) => set({ props })} />}
     </div>
+  );
+}
+
+/** Text overlay basics: the string, size and color. Each edit rewrites props (one undo step); anything else stays in the JSON field below. */
+function TextFields({ item, set }: { item: OverlayItem; set: (patch: Record<string, unknown>) => void }) {
+  const props = item.props as { text?: string; style?: Record<string, unknown> };
+  const style = props.style ?? {};
+  const put = (next: Record<string, unknown>) => set({ props: { ...props, ...next } });
+  const putStyle = (k: string, v: unknown) => {
+    const { [k]: _, ...rest } = style;
+    put({ style: v === null ? rest : { ...rest, [k]: v } });
+  };
+  return (
+    <>
+      <Field label="text" value={props.text} onCommit={(v) => put({ text: v ?? "" })} />
+      <Field label="size (px)" type="number" value={style.fontSize ?? 64} onCommit={(v) => putStyle("fontSize", v === null ? null : Number(v))} />
+      <Field label="color" value={style.color ?? "#ffffff"} onCommit={(v) => putStyle("color", v)} />
+    </>
   );
 }
 
@@ -1033,6 +1054,7 @@ function onKey(e: KeyboardEvent) {
   if (!mod && key === "i") return setIO("in", frame);
   if (!mod && key === "o") return setIO("out", frame);
   if (!mod && key === "/") return handled(), s.looping ? player.ref?.pause() : loopRange();
+  if (!mod && !e.altKey && !e.shiftKey && key === "t") return handled(), addText(frame);
   if (!mod && key === "m") return addMarker(frame);
   if (!mod && key === "b") return handled(), tapBeat(frame);
   if (!mod && key === "n") return app.set({ snapping: !s.snapping, message: { text: `snapping ${s.snapping ? "off" : "on"}` } });

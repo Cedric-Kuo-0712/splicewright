@@ -431,6 +431,15 @@ const spanOf = (p: Project, i: Item) => itemSpan(p, i) ?? i;
 
 export const selectItems = (ids: string[]) => app.set({ selection: ids, gap: null, message: { text: `selected ${ids.length}` } });
 
+/** A 3 s Text overlay at the playhead (first overlay track with room, else a new one), selected with its text field ready to type. */
+export async function addText(frame: number) {
+  const p = app.get().project!;
+  const id = idMaker(p)("i");
+  if (!(await op("insertItem", { component: "Text", props: { text: "Text" }, at: frame, duration: 3 * p.meta.fps, ripple: false }))) return;
+  selectItems([id]);
+  requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.inspector input[name="text"]')?.select());
+}
+
 /** Items on `tracks` that start at or after `from` (anchored ones by their current span). */
 export function itemsAfter(p: Project, tracks: Track[], from = 0) {
   return tracks.flatMap((t) => t.items.filter((i) => spanOf(p, i).start >= from).map((i) => i.id));

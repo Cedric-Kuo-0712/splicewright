@@ -13,6 +13,11 @@ export const STEPS = ["proxy", "analysis", "thumbs", "waveform", "transcript", "
 export type Step = (typeof STEPS)[number];
 type Entry = Probe & { done?: Partial<Record<Step, string>> };
 
+/** Shape of ingest/transcribe.py's output; bump when it changes so cached transcripts re-run (2: word timestamps). */
+export const TRANSCRIPT_FORMAT = 2;
+/** What a step records as done: the content fingerprint, plus the format version for transcripts. */
+export const stamp = (fingerprint: string, step: Step) => (step === "transcript" ? `${fingerprint}#t${TRANSCRIPT_FORMAT}` : fingerprint);
+
 const pyDir = join(dirname(fileURLToPath(import.meta.url)), "../../../ingest");
 
 /** FIFO limit on concurrent jobs. */
@@ -312,10 +317,10 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
   const todo = (step: Step) =>
     ready.filter((e) => {
       if (!applies[step](e)) return tally[step].skipped++, false;
-      if (e.done?.[step] === e.fingerprint && (step === "loudness" || existsSync(outputs[step](idOf.get(e)!)))) return tally[step].cached++, false;
+      if (e.done?.[step] === stamp(e.fingerprint, step) && (step === "loudness" || existsSync(outputs[step](idOf.get(e)!)))) return tally[step].cached++, false;
       return true;
     });
-  const mark = (e: Entry, step: Step) => (dirty.add(idOf.get(e)!), ((e.done ??= {})[step] = e.fingerprint));
+  const mark = (e: Entry, step: Step) => (dirty.add(idOf.get(e)!), ((e.done ??= {})[step] = stamp(e.fingerprint, step)));
 
   const ff: Record<"proxy" | "analysis" | "thumbs" | "waveform", (e: Entry, id: string, out: string) => Promise<unknown>> = {
     proxy: (e, _, out) => run(() => editProxy(join(dir, e.path), out)),

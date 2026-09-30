@@ -80,6 +80,51 @@ export function getItem(p: Project, itemId: string, ctx: Ctx = {}) {
   return undefined;
 }
 
+const trimWord = (s: string) => s.replace(/^[\s\p{P}]+|[\s\p{P}]+$/gu, "").toLowerCase();
+
+/**
+ * Source ranges (seconds, the unit of sourceIn) to cut for cutRanges: filler words, and silences between
+ * consecutive words longer than `minSilence`. A word range grows by 2 frames each side (Whisper's stamps are
+ * loose); a silence shrinks by 2 frames each side, so the cut never clips the neighbouring words. Ranges are
+ * clamped to the item's visible source span and merged when they touch. Items whose asset has a transcript
+ * without word timestamps come back in `hints` (re-run `ingest --only transcript`).
+ */
+export function findFillers(p: Project, ctx: Ctx = {}, { itemId, words = ["um", "uh", "嗯", "那個", "那个", "就是"], minSilence = 0.6 }: { itemId?: string; words?: string[]; minSilence?: number } = {}) {
+  const fillers = new Set(words.map(trimWord));
+  const pad = 2 / p.meta.fps;
+  const items: { itemId: string; assetId: string; ranges: [number, number][]; what: string[] }[] = [];
+  const hints: string[] = [];
+  const r3 = (n: number) => +n.toFixed(3);
+  for (const t of p.tracks)
+    for (const item of t.items) {
+      if (!("assetId" in item) || (itemId && item.id !== itemId)) continue;
+      const segs = ctx.transcript?.(item.assetId);
+      const ws = segs?.flatMap((s) => s.words ?? []).sort((a, b) => a.start - b.start);
+      if (!ws?.length) {
+        if (itemId || segs?.length) hints.push(`${item.id}: asset ${item.assetId} has no word timestamps; run ingest with --only transcript to re-transcribe`);
+        continue;
+      }
+      const [lo, hi] = [item.sourceIn, sourceAt(p, item, end(item))];
+      const cuts: { range: [number, number]; what: string }[] = [];
+      ws.forEach((w, i) => {
+        const text = trimWord(w.text);
+        if (fillers.has(text)) cuts.push({ range: [w.start - pad, w.end + pad], what: text });
+        const next = ws[i + 1];
+        if (next && next.start - w.end > minSilence && next.start - w.end > 2 * pad) cuts.push({ range: [w.end + pad, next.start - pad], what: `silence ${(next.start - w.end).toFixed(2)}s` });
+      });
+      const merged: typeof cuts = [];
+      for (const c of cuts.sort((a, b) => a.range[0] - b.range[0])) {
+        const range: [number, number] = [Math.max(lo, c.range[0]), Math.min(hi, c.range[1])];
+        if (range[1] <= range[0]) continue;
+        const last = merged.at(-1);
+        if (last && range[0] <= last.range[1]) (last.range[1] = Math.max(last.range[1], range[1])), (last.what += `, ${c.what}`);
+        else merged.push({ range, what: c.what });
+      }
+      if (merged.length) items.push({ itemId: item.id, assetId: item.assetId, ranges: merged.map((m) => [r3(m.range[0]), r3(m.range[1])]), what: merged.map((m) => m.what) });
+    }
+  return { items, ...(hints.length && { hints }) };
+}
+
 /** Case-insensitive search over labels, notes, caption text, overlay props, and visible transcript. */
 export function find(p: Project, query: string, ctx: Ctx = {}, limit = 50) {
   const q = query.toLowerCase();

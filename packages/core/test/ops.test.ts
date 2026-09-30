@@ -334,6 +334,29 @@ describe("ops", () => {
     expect(err(apply(fixture(), "setProps", { itemId: "i_1", patch: { transition: { kind: "wipe", duration: 30, direction: "diagonal" } } }, ctx))).toBe("invalid");
   });
 
+  it("cutRanges removes source ranges in one revision; captions follow; ripple false leaves gaps; outside ranges are ignored", () => {
+    const base = ok(apply(fixture(), "addCaptionsFromTranscript", { itemId: "i_1" }, ctx)); // "hello" at source 0.5–1.5 → frames 15–45
+    const ranges = [[2, 2.5], [0.1, 0.3]]; // frames 60–75 and 3–9, out of order on purpose
+    const v1 = (p: Project) => items(p, "t_1").map((i) => [i.start, i.duration]);
+    const cap = (p: Project) => item(p, "c_1");
+
+    const p = ok(apply(base, "cutRanges", { itemId: "i_1", ranges }, ctx));
+    expect(p.revision).toBe(base.revision + 1); // one op, one undo step
+    expect(v1(p)).toEqual([[0, 3], [3, 51], [54, 15], [69, 60]]); // 150 − 21 frames, no gaps
+    expect(cap(p)).toMatchObject({ start: 9, duration: 30 }); // 6 frames were removed before it
+    expect(validate(p, base, ctx)).toEqual([]);
+
+    const gaps = ok(apply(base, "cutRanges", { itemId: "i_1", ranges, ripple: false }, ctx));
+    expect(v1(gaps)).toEqual([[0, 3], [9, 51], [75, 15], [90, 60]]);
+    expect(cap(gaps)).toMatchObject({ start: 15 });
+
+    // a range straddling the item's end is clamped; one outside it (and a sub-frame one) cuts nothing
+    expect(v1(ok(apply(base, "cutRanges", { itemId: "i_1", ranges: [[2.5, 9]] }, ctx)))).toEqual([[0, 75], [75, 60]]);
+    expect(v1(ok(apply(base, "cutRanges", { itemId: "i_1", ranges: [[8, 9], [1, 1.01]] }, ctx)))).toEqual([[0, 90], [90, 60]]);
+    expect(v1(ok(apply(base, "cutRanges", { itemId: "i_1", ranges: [[0, 1], [0.5, 1.5]] }, ctx)))).toEqual([[0, 45], [45, 60]]); // overlapping ranges merge
+    expect(err(apply(base, "cutRanges", { itemId: "c_1", ranges: [[0, 1]] }, ctx))).toBe("invalid");
+  });
+
   it("batch is atomic: all or nothing, one revision", () => {
     const p = fixture();
     const swap = ok(

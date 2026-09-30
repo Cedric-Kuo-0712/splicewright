@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { beatFrames, type AudioItem } from "@splicewright/core";
 import { cacheDir, load, readAssets, run, writeAtomic } from "@splicewright/core/node";
-import { ingest, peek } from "../src/index.ts";
+import { ingest, peek, stamp, TRANSCRIPT_FORMAT } from "../src/index.ts";
 
 const example = join(import.meta.dirname, "../../../examples/basic");
 const venv = join(import.meta.dirname, "../../../ingest/.venv/bin/python");
@@ -108,4 +108,10 @@ describe("ingest", () => {
     const item = song();
     expect(beatFrames(load(dir), item)).toEqual([8, 68, 128, 188, 248, 308, 368, 428, 488, 548]);
   }, 60_000);
+});
+
+it("a transcript is done only at the current format, so word-less transcripts re-run", () => {
+  expect(stamp("abc", "transcript")).toBe(`abc#t${TRANSCRIPT_FORMAT}`);
+  expect(stamp("abc", "transcript")).not.toBe("abc"); // what a pre-words run recorded
+  expect(stamp("abc", "waveform")).toBe("abc");
 });

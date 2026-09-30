@@ -1,5 +1,6 @@
 """Speech transcript (§8), ported from video-cut/scripts/transcribe.py. Output, in asset seconds:
-{ language, segments: [{ start, end, text }] }. Model: $SPLICEWRIGHT_WHISPER_MODEL (default "base")."""
+{ language, segments: [{ start, end, text, words: [{ start, end, text }] }] }. Bump TRANSCRIPT_FORMAT
+in packages/ingest/src/index.ts when this shape changes, so cached transcripts re-run. Model: $SPLICEWRIGHT_WHISPER_MODEL (default "base")."""
 import os
 import platform
 
@@ -18,8 +19,17 @@ except Exception:
 
 
 def transcribe(path):
-    segments, info = model.transcribe(decode(path, 16000), beam_size=5, vad_filter=True)
-    segs = [{"start": round(s.start, 2), "end": round(s.end, 2), "text": s.text.strip()} for s in segments if s.text.strip()]
+    segments, info = model.transcribe(decode(path, 16000), beam_size=5, vad_filter=True, word_timestamps=True)
+    segs = [
+        {
+            "start": round(s.start, 2),
+            "end": round(s.end, 2),
+            "text": s.text.strip(),
+            "words": [{"start": round(w.start, 2), "end": round(w.end, 2), "text": w.word} for w in s.words or []],
+        }
+        for s in segments
+        if s.text.strip()
+    ]
     return {"language": info.language if segs else None, "segments": segs}
 
 

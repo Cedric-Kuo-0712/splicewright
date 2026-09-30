@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ANIMATABLE, MASK_PROPS, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
 import { keyAt, withKey } from "./keyframes.ts";
 import { beatFrames, snap, snapPoints, snapSpan } from "./timing.ts";
-import { anchorOf, itemSpan, secPerFrame, sourceAt, validate, videoItems } from "./validate.ts";
+import { anchorOf, frameOf, itemSpan, secPerFrame, sourceAt, validate, videoItems } from "./validate.ts";
 
 // Spec §5. Every op mutates a private clone; `apply` bumps the revision and validates.
 
@@ -371,6 +371,41 @@ export const ops: Record<string, OpDef<any>> = {
         if (a.ripple ?? t.magnetic) shift(t, end(item), -item.duration);
       }
       return `deleted ${ids.join(", ")}` + dropAnchored(p, ids);
+    },
+  ),
+
+  cutRanges: def(
+    "Remove source ranges [sourceStart, sourceEnd] (asset seconds, as findFillers returns them) from an item: splits at each range and deletes the piece, latest first, in one undo step. Ripple (default on) closes the gaps; false leaves them. Ranges outside the item's visible source are clamped or ignored. Anchored captions follow as for split and delete.",
+    z.object({ itemId: Id, ranges: z.array(z.tuple([z.number().min(0), z.number().min(0)])).min(1), ripple: z.boolean().optional() }),
+    (p, a, ctx) => {
+      const { track: t, item } = locate(p, a.itemId);
+      if (!("sourceIn" in item)) fail("invalid", `${item.id} has no source to cut`);
+      const media = item as VideoItem | AudioItem;
+      const whole = [media.start, end(media)];
+      // Source seconds → timeline frames, clamped to the item as it is now; later cuts leave earlier frames untouched.
+      const cuts = a.ranges
+        .map(([s, e]) => [Math.max(whole[0], Math.round(frameOf(p, media, s))), Math.min(whole[1], Math.round(frameOf(p, media, e)))])
+        .filter(([from, to]) => to > from)
+        .sort((x, y) => x[0] - y[0]);
+      const merged: number[][] = [];
+      for (const c of cuts) {
+        const last = merged.at(-1);
+        if (last && c[0] <= last[1]) last[1] = Math.max(last[1], c[1]);
+        else merged.push([...c]);
+      }
+      let removed = 0;
+      for (const [from, to] of merged.reverse()) {
+        // The item keeps the earliest piece, so each cut splits it again.
+        if (to < end(media)) ops.split.run(p, { itemId: media.id, at: to }, ctx);
+        let mid: Item = media;
+        if (from > media.start) {
+          ops.split.run(p, { itemId: media.id, at: from }, ctx);
+          mid = t.items.find((i) => i !== media && i.start === from)!;
+        }
+        ops.delete.run(p, { itemIds: [mid.id], ripple: a.ripple ?? true }, ctx);
+        removed += to - from;
+      }
+      return removed ? `cut ${merged.length} ranges from ${a.itemId} (${removed}f)` : `no range inside ${a.itemId}; nothing cut`;
     },
   ),
 

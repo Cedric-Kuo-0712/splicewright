@@ -230,8 +230,8 @@ export type Project = z.infer<typeof Project>;
 export interface Ctx {
   /** Probed durations in seconds, from .splicewright/assets.json. */
   assetDurations?: Record<string, number>;
-  /** Transcript segments in asset time, from .splicewright/transcripts/. */
-  transcript?: (assetId: string) => { start: number; end: number; text: string }[] | undefined;
+  /** Transcript segments in asset time, from .splicewright/transcripts/. `words` (format 2+) is absent in older transcripts. */
+  transcript?: (assetId: string) => { start: number; end: number; text: string; words?: { start: number; end: number; text: string }[] }[] | undefined;
   /** Beat analysis in asset seconds, from .splicewright/beats/ (§15.3). */
   beats?: (assetId: string) => BeatAnalysis | undefined;
   /** Content fingerprints recorded by the last probe, by asset id. */

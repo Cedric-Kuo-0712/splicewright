@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { find, getItem, getRange, getSummary, ops, type OpResult } from "@splicewright/core";
+import { find, findFillers, getItem, getRange, getSummary, ops, type OpResult } from "@splicewright/core";
 import { load, loadCtx, redo, run, undo } from "@splicewright/core/node";
 import { ingest, peek, STEPS } from "@splicewright/ingest";
 import { renderStatus, startRender, still, storyboard } from "@splicewright/render/node";
@@ -93,6 +93,18 @@ export function createServer(dir: string): McpServer {
     "find",
     { description: "Search transcripts, labels, notes, caption text, overlay props → matching items with timeline frames.", inputSchema: { query: z.string().min(1) } },
     async ({ query }) => json(find(load(dir), query, loadCtx(dir))),
+  );
+  server.registerTool(
+    "find_fillers",
+    {
+      description: "Filler words and long silences in the transcript → per item, source ranges in asset seconds (padded 2 frames, clamped to what the item shows, merged) with what each is. Show them to the user, then cut with cutRanges. `hints` lists assets that need re-transcribing for word timestamps.",
+      inputSchema: {
+        itemId: z.string().optional().describe("Default: every item whose asset has word timestamps."),
+        words: z.array(z.string()).optional().describe('Default: ["um","uh","嗯","那個","那个","就是"]; case-insensitive, punctuation ignored. Whisper writes Chinese in simplified characters, so list both forms.'),
+        minSilence: z.number().min(0).optional().describe("Seconds of gap between words that counts as a silence; default 0.6."),
+      },
+    },
+    async (args) => json(findFillers(load(dir), loadCtx(dir), args)),
   );
   server.registerTool(
     "inspect_asset",

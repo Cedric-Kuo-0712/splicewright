@@ -23,8 +23,8 @@ Origin: extracted from the `video-cut` Kaohsiung vlog project (`apps/editor` + `
    without forking the tool.
 
 ### Non-goals (v1)
-- Bezier keyframe curves, masks, chroma key, curves/LUT color grading, speed ramps, stickers.
-  (These are OpenCut features we may add later — see §13.)
+- Bezier keyframe curves, chroma key, curves/LUT color grading, speed ramps, stickers.
+  (These are OpenCut features we may add later — see §13. Masks moved into the roadmap as M8.)
 - Cloud sync, accounts, collaboration server.
 - Mobile / touch UI.
 - In-browser export. Export always goes through Remotion render on the local machine.
@@ -446,14 +446,111 @@ explained, not hidden.
 | M4 | `apps/web` ported to core ops, file watching, edit proxies, thumbs/waveforms; adaptive ruler + snapping (§15.1–15.2) | manual pass over §7.3 checklist; `rulerTicks`/`snap` unit tests | ✅ done (UI plays edit proxies if present; generating them is M5) |
 | M5 | `ingest` generic port | fresh project from raw files → first render with no manual steps | ✅ done (no `scenes` step) |
 | M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow | ✅ done (real-music F-measure: tool `ingest/beat_eval.py` ready; number pending a hand-tapped reference) |
+| M7 | New-project flow + aspect presets (§13.1) | `open` in an empty folder → form → project renders; recent list only opens listed paths | ✅ done (browser pass by hand; switch fallback path untested) |
+| M8 | Masks + blend modes (§13.2) | still-frame snapshots per shape, feather, invert; mask keyframes survive split/trim | planned |
+| M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | planned |
+| M10 | More transitions + PIP presets (§13.4) | still-frame snapshot mid-transition per kind; handles invariant (§4.4 #4) holds | planned |
+| M11 | Transcript cuts: fillers and silences (§13.5) | on `examples/`, one `batch` removes the listed words; anchored captions stay in sync | planned |
 
 ---
 
-## 13. Later (candidate features, informed by OpenCut classic)
-Bezier keyframe curves, keyframes on overlay props and audio items, text styles and templates,
-masks, multi-select and group operations, nested sequences, and a desktop wrapper
-(Tauri or Electron). Each one is added as a core op plus a schema extension with a schemaVersion
-migration.
+## 13. Roadmap (M7–M11, in build order) and later candidates
+
+Each milestone is a core op and/or schema extension, then render, then UI, then MCP/CLI exposure
+(automatic, since they wrap core ops). Every new field is **optional**, so existing projects stay valid
+and `schemaVersion` stays 1; bump it only for a change that alters the meaning of an existing field.
+Everything renders through the DOM/CSS Remotion composition, so preview and render stay identical;
+features that would break that (EQ, pan, LUT, chroma key) are deferred on purpose.
+
+References: OpenCut classic (MIT, archived, `github.com/OpenCut-app/opencut-classic`), borrowed for
+design, not code: its masks and blend modes partly live in a Rust/WASM compositor, ours are CSS.
+video-use (`github.com/browser-use/video-use`) for transcript-driven cutting; video-autopilot-kit
+(`github.com/Hao0321/video-autopilot-kit`) for caption styling and pre-export checks.
+
+### 13.1 M7 — New-project flow and aspect presets
+Today a project needs `splicewright init` then `splicewright open`, and the server serves one folder.
+- `splicewright open` in a folder without `project.json` serves a **New project** form instead of an
+  error: title, aspect preset, fps. Submit calls the existing `init()`; importing happens afterwards in the editor through the normal Import/drop flow.
+- Aspect presets: 16:9 (1920×1080), 9:16 (1080×1920), 1:1 (1080×1080), 4:5 (1080×1350); fps 24/25/30/60.
+  `init --preset 9:16` does the same from the CLI (`--preset` and `--size` together is a usage error).
+  The table lives in `packages/core/src/presets.ts`. The form posts to `POST /api/init`; the cli passes
+  `onInit` (its `agentFiles`) into `open()`, so web never imports cli. Until a project exists every
+  `/api` route except `GET /api/project` (`{ dir, empty: true }`) and `POST /api/init` answers 409.
+- Recent projects: `~/.splicewright/recent.json` (path, title, last opened), written by `open`, listed
+  on the form page. **Security:** the server switches only to a path in that list or the folder it
+  was started in, never to an arbitrary path from the browser; the foreign-`Origin` refusal (§7.3) and
+  the `127.0.0.1` bind stay. `SPLICEWRIGHT_HOME` overrides the home dir (tests). `POST /api/switch { path }`
+  (403 unlisted, 404 no `project.json`) closes the Vite server and starts a new one on the same port
+  with the new folder (the folder is baked into its config); the client polls, then reloads, which
+  also restarts the file watcher and clears undo UI state.
+- Reference: OpenCut classic `apps/web/src/app/projects/page.tsx`, `core/managers/project-manager.ts`,
+  `fps/presets.ts`.
+
+### 13.2 M8 — Masks and blend modes
+```ts
+// on VideoItem and OverlayItem
+mask?: { shape: "rect" | "ellipse" | "diamond" | "star" | "heart" | "polygon";
+         x: number; y: number; w: number; h: number;   // fractions of the visible picture, like crop
+         rotation?: number; radius?: number;            // rect corner radius, fraction of min(w, h)
+         points?: [number, number][];                   // polygon only, fractions of the box
+         feather?: number;                              // px at output resolution
+         invert?: boolean };
+blend?: "normal" | "multiply" | "screen" | "overlay" | "darken" | "lighten" | "difference";
+```
+- Render: shape → `clip-path` (`inset(... round r)`, `ellipse()`, `polygon()`); feather or invert →
+  `mask-image` (radial/linear gradient or an inline SVG with a blur) with `mask-composite: exclude`
+  for invert. `blend` → `mix-blend-mode` on the item's layer. Composes with `crop` (crop first).
+- Keyframes: `maskX`, `maskY`, `maskW`, `maskH`, `maskFeather` join the keyable props (source time, as §4).
+- UI: inspector Mask ▾ picker; a mask box on the player like the crop mode (Shift+K), drag body/corners.
+- Circle picture-in-picture is `mask: { shape: "ellipse" }` plus `transform`; no separate feature.
+- Reference: OpenCut classic `apps/web/src/masks/` (builtin shapes, `feather.ts`, freeform path,
+  `toggle-mask-inverted.ts`) and `rust/crates/compositor/src/blend_mode.rs`.
+- Not included: chroma key and luma key (need per-pixel canvas/WebGL; see Later).
+
+### 13.3 M9 — Audio: item keyframes, loudness, master limiter
+Already built: item volume, fades, ducking, volume keyframes on video items.
+- **Audio item keyframes:** `AudioItem.keyframes` with prop `volume` only, same shape and semantics as
+  video keyframes (source seconds), so `setKeyframe` accepts audio items. UI: the existing volume line
+  gains keys on click, like the ◇ inspector button.
+- **Loudness:** new ingest step `loudness` (ffmpeg `ebur128`) caches integrated LUFS per asset in
+  `assets.json`. Op `normalizeLoudness { itemIds, target = -14 }` sets each item's `volume` so its asset
+  hits the target (clamped to 0..2); it is an ordinary `setProps` batch, undoable.
+- **Master limiter:** `meta.limiter?: boolean` (default off for existing projects, on for new ones).
+  Preview uses a Web Audio `DynamicsCompressor` on the output. *Render support is unverified:* Remotion's
+  `<Audio>` exposes per-frame `volume`, not a node graph, so the render side may need an ffmpeg
+  `alimiter` pass after encode. Check Remotion's docs before building; if it needs the ffmpeg pass,
+  preview and render differ slightly and that is documented here.
+- Reference: OpenCut classic `apps/web/src/media/audio-mastering.ts` (limiter: −1 dB threshold,
+  ratio 20, 1 ms attack, 120 ms release).
+- Deferred: EQ, pan, noise reduction (no per-frame equivalent in the render path; would need baked audio).
+
+### 13.4 M10 — More transitions and PIP presets
+- `transition.kind` adds `slide`, `push`, `zoom`, and `wipe` gains `direction?: "left"|"right"|"up"|"down"`
+  (default `left`, today's behaviour). Each is one more branch in `look()` in `Composition.tsx`;
+  handle rules follow dissolve (both sides need `duration/2` of source).
+- Picture-in-picture presets (inspector and item menu): corner (TL/TR/BL/BR at 30% scale, 4% margin),
+  side-by-side, circle (uses the M8 ellipse mask). Presets only write `transform`/`mask`; no new schema.
+  Optional `border?: { width: px; color }` and rounded corners come from the mask `radius`.
+- More Look presets as data (still `effects`); LUTs stay deferred.
+- Reference: Remotion's `@remotion/transitions` presentations *(names unverified)*.
+
+### 13.5 M11 — Transcript cuts: fillers and silences
+- Ingest `transcript` gains word timestamps (faster-whisper `word_timestamps=True`):
+  `segments[].words: [{ start, end, text }]`. Today segments carry no words (`ingest/transcribe.py`).
+  Assets transcribed before this re-run the step (fingerprint includes a transcript format version).
+- Query `findFillers { itemId?, words = ["um","uh","嗯","那個","就是"], minSilence = 0.6 }` returns source
+  ranges (words, and gaps between words longer than `minSilence`), padded 2 frames each side.
+- Op `cutRanges { itemId, ranges: [sourceStart, sourceEnd][], ripple = true }`: splits and ripple-deletes
+  each range in one batch (one undo step); anchored captions follow via the existing split logic.
+- Agent workflow (AGENTS.template.md): propose the cut list first, cut only after the user confirms,
+  then `still`/contact sheet to self-check (video-use's ask → confirm → execute → self-eval).
+- Reference: video-use's `pack_transcripts.py` (compact transcript for the LLM) and `timeline_view.py`.
+
+### 13.6 Later (not scheduled)
+Caption styles and templates (font, stroke, box, per-word highlight; see video-autopilot-kit), keyframes
+on overlay props, Bezier keyframe curves, a pre-export check op (`lint`: gaps on the main track, captions
+off-screen, clipped audio), stickers/GIF overlays, reverse playback (needs a reversed proxy from ingest),
+nested sequences, chroma/luma key, LUT and curves (WebGL), EQ/pan, and a desktop wrapper (Tauri or Electron).
 
 ---
 

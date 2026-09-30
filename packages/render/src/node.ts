@@ -66,7 +66,10 @@ async function prepare(dir: string) {
   const ctx = loadCtx(dir);
   const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(readAssets(dir)), words: captionWords(project, ctx) };
   const serveUrl = await bundleProject(dir);
-  const opts = { serveUrl, inputProps, browserExecutable: browserExecutable() };
+  // Canvas effects need a WebGL2 context in Remotion's headless Chromium. Keep the legacy render
+  // defaults for projects that do not opt into the per-pixel path.
+  const needsCanvasEffects = project.tracks.some((track) => track.kind === "video" && track.items.some((item) => item.key));
+  const opts = { serveUrl, inputProps, browserExecutable: browserExecutable(), ...(needsCanvasEffects ? { chromiumOptions: { gl: "angle" as const } } : {}) };
   const composition = await selectComposition({ ...opts, id: ID });
   return { ...opts, composition };
 }

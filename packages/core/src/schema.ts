@@ -43,6 +43,15 @@ export const Effects = z.object({
   invert: z.number().min(0).max(1).optional(),
 });
 
+/** L0's chroma subset of the future key union; luma key remains a later milestone. */
+export const ChromaKey = z.object({
+  kind: z.literal("chroma"),
+  color: z.string().min(1),
+  similarity: z.number().min(0).max(1),
+  smoothness: z.number().min(0).max(1),
+  spill: z.number().min(0).max(1).optional(),
+});
+
 /** Fractions of the picture cut from each side, in the picture's own orientation. */
 export const Crop = z
   .object({ top: z.number().min(0).optional(), right: z.number().min(0).optional(), bottom: z.number().min(0).optional(), left: z.number().min(0).optional() })
@@ -118,6 +127,7 @@ export const VideoItem = z.object({
   fit: z.enum(["contain", "cover"]).optional(),
   transform: Transform.optional(),
   effects: Effects.optional(),
+  key: ChromaKey.optional(),
   crop: Crop.optional(),
   mask: Mask.optional(),
   blend: z.enum(BLENDS).optional(),

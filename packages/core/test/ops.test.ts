@@ -130,6 +130,10 @@ describe("ops", () => {
     const p = fixture();
     const v = ok(apply(p, "setProps", { itemId: "i_1", patch: { volume: 0.5, fit: "cover" } }, ctx));
     expect(item(v, "i_1")).toMatchObject({ volume: 0.5, fit: "cover" });
+    const keyed = ok(apply(v, "setProps", { itemId: "i_1", patch: { key: { kind: "chroma", color: "#00ff00", similarity: 0.45, smoothness: 0.08 } } }, ctx));
+    expect(item(keyed, "i_1").key).toEqual({ kind: "chroma", color: "#00ff00", similarity: 0.45, smoothness: 0.08 });
+    expect(err(apply(v, "setProps", { itemId: "i_1", patch: { key: { kind: "chroma", color: "", similarity: 0.45, smoothness: 0.08 } } }, ctx))).toBe("invalid");
+    expect(err(apply(v, "setProps", { itemId: "i_1", patch: { key: { kind: "chroma", color: "green", similarity: 1.1, smoothness: 0.08 } } }, ctx))).toBe("invalid");
     expect(item(ok(apply(v, "setProps", { itemId: "i_1", patch: { volume: null } }, ctx)), "i_1").volume).toBeUndefined();
     expect(err(apply(p, "setProps", { itemId: "i_1", patch: { start: 5 } }, ctx))).toBe("invalid");
     expect(err(apply(p, "setProps", { itemId: "i_1", patch: { volume: 9 } }, ctx))).toBe("invalid");

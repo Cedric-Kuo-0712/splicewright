@@ -1,0 +1,32 @@
+{
+  "startedAtUtc": "2026-09-30T16:12:48.164Z",
+  "commit": "bca8111e3fc881df2669f0e039e572c56e1b4d86",
+  "sourcePatchSha256": "2dd366a7daaeeabee3bd80f7e64a87e188d0590082be54e88f03f32acaafcf35",
+  "runtime": {
+    "node": "v26.8.1",
+    "remotion": "4.0.520",
+    "remotionMedia": "4.0.520",
+    "remotionEffects": "4.0.520"
+  },
+  "draftRender": {
+    "fixture": "Generated 320x180@30 synthetic H.264 green background/red square over blue image track",
+    "preset": "draft (scale 0.5, CRF 28)",
+    "range": "[0,30), 30 frames",
+    "warmups": "one render for each path before timing",
+    "measuredRuns": 1,
+    "legacyOffthreadVideo": { "seconds": 0.878, "framesPerSecond": 34.18 },
+    "canvasVideoWithChromaKey": { "seconds": 1.071, "framesPerSecond": 28.01 },
+    "interpretation": "Single-run smoke measurement; not a statistically reliable throughput comparison."
+  },
+  "rawHevc": {
+    "fixture": "Generated HEVC Main/hvc1, 320x180@30, asset path points directly to raw file with proxies disabled",
+    "result": "still render passed through canvas path",
+    "probedCodec": "hevc",
+    "probedProfile": "Main",
+    "checkedAtUtc": "2026-09-30T16:13:30.104Z"
+  },
+  "logs": [
+    "/tmp/splicewright-l0-balanced-probe.log",
+    "/tmp/splicewright-l0-hevc-final.log"
+  ]
+}

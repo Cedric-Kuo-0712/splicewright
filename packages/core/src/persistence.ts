@@ -22,7 +22,7 @@ export function writeAtomic(file: string, data: unknown) {
 export function init(dir: string, meta: Project["meta"]): Project | Err {
   if (existsSync(join(dir, "project.json"))) return { error: { code: "exists", message: `${dir}/project.json already exists` } };
   mkdirSync(dir, { recursive: true });
-  const p = createProject(meta);
+  const p = createProject({ ...meta, limiter: true });
   writeAtomic(join(dir, "project.json"), p);
   return p;
 }
@@ -66,6 +66,8 @@ export interface Probe {
   /** Display-matrix rotation as ffprobe reports it. */
   rotation?: number;
   audio?: boolean;
+  /** Integrated loudness in LUFS (ebur128); absent for silent assets. */
+  loudness?: number;
 }
 
 export function readAssets(dir: string): Record<string, Probe> {
@@ -101,13 +103,16 @@ export function loadCtx(dir: string): Ctx {
   const probed = readAssets(dir);
   const assetDurations: Record<string, number> = {};
   const fingerprints: Record<string, string> = {};
+  const loudness: Record<string, number> = {};
   for (const [id, a] of Object.entries(probed)) {
     if (typeof a.duration === "number") assetDurations[id] = a.duration;
+    if (typeof a.loudness === "number") loudness[id] = a.loudness;
     fingerprints[id] = a.fingerprint;
   }
   return {
     assetDurations,
     fingerprints,
+    loudness,
     fingerprint: (path) => fingerprint(join(dir, path)),
     transcript: (assetId) => readJson(cacheDir(dir, "transcripts", `${assetId}.json`))?.segments,
     beats: (assetId) => readJson(cacheDir(dir, "beats", `${assetId}.json`)),

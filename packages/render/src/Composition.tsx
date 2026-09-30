@@ -236,10 +236,10 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; mu
 };
 
 const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges }> = ({ p, t, item, ranges }) => {
-  const base = (item.volume ?? 1) * ("volume" in t ? (t.volume ?? 1) : 1);
+  const track = "volume" in t ? (t.volume ?? 1) : 1;
   const { duration: d, fadeIn = 0, fadeOut = 0 } = item;
   const volume = (f: number) => {
-    let v = base;
+    let v = (valueAt(p, item, "volume", item.start + f) ?? item.volume ?? 1) * track;
     if (fadeIn) v *= Math.min(1, f / fadeIn);
     if (fadeOut) v *= Math.min(1, (d - f) / fadeOut);
     if (item.duck && ranges) v *= duckGain(item.start + f, ranges, item.duck.level);

@@ -9,7 +9,7 @@ import { cacheDir, fingerprint, load, rawPath, readAssets, writeAtomic, type Pro
 // Spec §8. ffmpeg steps run here; transcript and beats need Python libraries and run ingest/*.py.
 // Every step is cached by content fingerprint: a probe entry records, per step, the fingerprint it ran on.
 
-export const STEPS = ["proxy", "analysis", "thumbs", "waveform", "transcript", "beats"] as const;
+export const STEPS = ["proxy", "analysis", "thumbs", "waveform", "transcript", "beats", "loudness"] as const;
 export type Step = (typeof STEPS)[number];
 type Entry = Probe & { done?: Partial<Record<Step, string>> };
 
@@ -31,13 +31,13 @@ export function limiter(n: number) {
   };
 }
 
-function exec(cmd: string, args: string[], onData?: (b: Buffer) => void): Promise<string> {
+function exec(cmd: string, args: string[], onData?: (b: Buffer) => void, onErr?: (b: Buffer) => void): Promise<string> {
   return new Promise((ok, fail) => {
     const p = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     let err = "";
     p.stdout.on("data", onData ?? ((d) => (out += d)));
-    p.stderr.on("data", (d) => (err += d));
+    p.stderr.on("data", (d) => (onErr?.(d), (err = (err + d).slice(-400))));
     p.on("error", fail);
     p.on("close", (code) => (code === 0 ? ok(out) : fail(Object.assign(new Error(err.trim().slice(-400) || `${cmd} exited ${code}`), { code, out }))));
   });
@@ -201,6 +201,15 @@ export async function waveform(dir: string, assetId: string, path: string, run =
   return out;
 }
 
+/** Integrated loudness in LUFS from ebur128's summary; undefined when the audio is silent (ebur128 floors it at -70, sometimes prints -inf). */
+export async function loudness(file: string): Promise<number | undefined> {
+  let tail = "";
+  await exec("ffmpeg", ["-hide_banner", "-nostats", "-i", file, "-vn", "-af", "ebur128", "-f", "null", "-"], undefined, (d) => (tail = (tail + d).slice(-2000)));
+  const m = /Integrated loudness:\s+I:\s+(\S+) LUFS/.exec(tail);
+  if (!m) throw new Error("ebur128 printed no summary");
+  return +m[1] > -70 ? +m[1] : undefined;
+}
+
 // ---------- python steps ----------
 
 const python = () => process.env.SPLICEWRIGHT_PYTHON ?? (existsSync(join(pyDir, ".venv/bin/python")) ? join(pyDir, ".venv/bin/python") : "python3");
@@ -267,8 +276,8 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
         return ready.push(cache[a.id]);
       }
       try {
-        const done = cache[a.id]?.fingerprint === fp ? cache[a.id].done : undefined; // renamed, same content
-        cache[a.id] = { path: a.path, fingerprint: fp, ...(await run(() => probe(src, a.kind))), ...(done && { done }) };
+        const same = cache[a.id]?.fingerprint === fp ? cache[a.id] : undefined; // renamed, same content
+        cache[a.id] = { path: a.path, fingerprint: fp, ...(await run(() => probe(src, a.kind))), ...(same?.done && { done: same.done }), ...(same?.loudness !== undefined && { loudness: same.loudness }) };
         dirty.add(a.id);
         tally.probe.ran++;
         log(`probe ${a.id}`);
@@ -281,7 +290,8 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
   save();
 
   const idOf = new Map(ready.map((e) => [e, Object.keys(cache).find((k) => cache[k] === e)!]));
-  const outputs: Record<Step, (id: string) => string> = {
+  // loudness has no file: its value lives on the probe entry.
+  const outputs: Record<Exclude<Step, "loudness">, (id: string) => string> = {
     proxy: (id) => cacheDir(dir, "proxies", "edit", `${id}.mp4`),
     analysis: (id) => cacheDir(dir, "proxies", "analysis", `${id}.mp4`),
     thumbs: (id) => cacheDir(dir, "contact-sheets", `${id}.jpg`),
@@ -296,12 +306,13 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
     waveform: (e) => e.kind !== "image" && !!e.audio,
     transcript: (e) => e.kind === "video" && !!e.audio,
     beats: (e) => e.kind === "audio",
+    loudness: (e) => e.kind !== "image" && !!e.audio,
   };
   /** Entries this step still has to process; the rest are tallied as cached or skipped. */
   const todo = (step: Step) =>
     ready.filter((e) => {
       if (!applies[step](e)) return tally[step].skipped++, false;
-      if (e.done?.[step] === e.fingerprint && existsSync(outputs[step](idOf.get(e)!))) return tally[step].cached++, false;
+      if (e.done?.[step] === e.fingerprint && (step === "loudness" || existsSync(outputs[step](idOf.get(e)!)))) return tally[step].cached++, false;
       return true;
     });
   const mark = (e: Entry, step: Step) => (dirty.add(idOf.get(e)!), ((e.done ??= {})[step] = e.fingerprint));
@@ -330,6 +341,24 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
       }),
     ),
   );
+  save();
+
+  if (steps.has("loudness"))
+    await Promise.all(
+      todo("loudness").map(async (e) => {
+        const id = idOf.get(e)!;
+        try {
+          const l = await run(() => loudness(join(dir, e.path)));
+          if (l === undefined) delete e.loudness;
+          else e.loudness = l;
+          mark(e, "loudness");
+          tally.loudness.ran++;
+          log(`loudness ${id}${l === undefined ? " (silent)" : ""}`);
+        } catch (err) {
+          fail("loudness", id, err);
+        }
+      }),
+    );
   save();
 
   for (const step of ["transcript", "beats"] as const) {

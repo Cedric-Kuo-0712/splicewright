@@ -436,7 +436,7 @@ export function Timeline() {
                         {t.kind === "audio" && !(live && live.mode !== "move") && <BeatTicks p={p} item={item as AudioItem} ppf={ppf} />}
                         {live?.mode === "slip" && <SlipEnds p={p} item={shown as Item & { assetId: string; sourceIn: number }} />}
                         {"sourceIn" in item && !t.locked && !live && <FadeHandles item={item} ppf={ppf} />}
-                        {"keyframes" in shown && shown.keyframes && <KeyMarks p={p} item={shown as VideoItem} ppf={ppf} />}
+                        {"keyframes" in shown && shown.keyframes && <KeyMarks p={p} item={shown as VideoItem | AudioItem} ppf={ppf} />}
                         <span className="name">
                           {"text" in item ? item.text : "component" in item ? item.component : (item.label ?? p.assets[item.assetId]?.path)}
                           {"speed" in item && item.speed ? ` · ${item.speed}×` : ""}
@@ -602,7 +602,7 @@ function SlipEnds({ p, item }: { p: Project; item: Item & { assetId: string; sou
 
 /** The span a transition covers across the cut after `item`. */
 /** A diamond per keyed frame (all props merged); click one to put the playhead on it. */
-function KeyMarks({ p, item, ppf }: { p: Project; item: VideoItem; ppf: number }) {
+function KeyMarks({ p, item, ppf }: { p: Project; item: VideoItem | AudioItem; ppf: number }) {
   const at = new Map<number, string[]>();
   for (const [prop, keys] of Object.entries(item.keyframes ?? {}))
     for (const k of keys) {

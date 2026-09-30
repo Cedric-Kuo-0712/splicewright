@@ -82,7 +82,7 @@ type Seconds = number;  // float, source media time
 interface Project {
   schemaVersion: 1;
   revision: number;                 // incremented by core on every committed op
-  meta: { title: string; fps: number; width: number; height: number; background?: string };
+  meta: { title: string; fps: number; width: number; height: number; background?: string; limiter?: boolean };  // limiter: render-only −1 dBFS master limiter, on for new projects
   assets: Record<AssetId, Asset>;
   tracks: Track[];                  // render order: index 0 is bottom-most
   markers?: Marker[];               // named ranges/points: chapters, notes, "sections"
@@ -152,6 +152,7 @@ interface AudioItem extends ItemBase {
   assetId: AssetId;
   sourceIn: Seconds;
   volume?: number;
+  keyframes?: Partial<Record<"volume", { t: Seconds; v: number; ease?: "linear" | "ease" }[]>>;  // source seconds, like video
   fadeIn?: Frames;
   fadeOut?: Frames;
   duck?: { under: TrackId[]; level: number };  // v1: duck while speech exists on those tracks
@@ -218,8 +219,9 @@ The adapters (UI/CLI/MCP) only call ops and persist the result.
 | `delete` | itemIds[], ripple? | Ripple closes the gap on magnetic tracks. |
 | `closeGap` | trackId, at | Closes the empty span containing `at`; later non-anchored items shift left. |
 | `setProps` | itemId, patch | Whitelisted fields only (volume, fit, transform, effects, crop, mask, blend, keyframes, fades, transition, speed, props, label, note; mask and blend also on overlays). `speed` here keeps the duration. |
-| `setKeyframe` | itemId, prop, at, value \| null, ease? | Video only: key `prop` at timeline frame `at` (inside the item), replacing a key within half a frame; null removes it. |
-| `detachAudio` | itemId | Video clip only: audio item (same asset, start, duration, sourceIn, volume, fades) on the first audio track that is unlocked, unmuted, visible, at volume 1 and has room, else a new one; the video's `volume` becomes 0. Not linked afterwards. Refused for images, speed ≠ 1, volume keyframes, volume already 0, a muted or hidden video track. |
+| `setKeyframe` | itemId, prop, at, value \| null, ease? | Video items, any prop; audio items, `volume` only. Keys `prop` at timeline frame `at` (inside the item), replacing a key within half a frame; null removes it. |
+| `normalizeLoudness` | itemIds, target = -14 | Audio or video items: `volume` = clamp(10^((target − L)/20), 0, 2), L = the asset's LUFS from the `loudness` step. One undo step. Refused for assets without loudness (run `ingest --only loudness`) and items with volume keyframes. |
+| `detachAudio` | itemId | Video clip only: audio item (same asset, start, duration, sourceIn, volume, fades) on the first audio track that is unlocked, unmuted, visible, at volume 1 and has room, else a new one; the video's `volume` becomes 0 and its volume keyframes move to the audio item. Not linked afterwards. Refused for images, speed ≠ 1, volume already 0, a muted or hidden video track. |
 | `setSpeed` | itemId, speed, ripple? | Video only: keeps the source range, scales the duration; ripple (default on magnetic) moves later items. |
 | `slip` | itemId, deltaSec | Changes `sourceIn` only; timeline position unchanged. |
 | `addTrack` / `removeTrack` / `setTrack` | … | Empty tracks are allowed (unlike OpenCut). |
@@ -257,7 +259,7 @@ Snapping, the adaptive ruler, and beat points are specified in §15.
 ```
 splicewright init [--fps 30 --size 1920x1080]  # also AGENTS.md, CLAUDE.md, .mcp.json
 splicewright import <paths...> [--no-ingest]  # register + ingest; files outside the project are copied into raw/
-splicewright ingest [--only probe,proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
+splicewright ingest [--only probe,proxy,analysis,thumbs,waveform,transcript,beats,loudness] [--jobs N]
 splicewright status                         # compact JSON summary (see get_summary)
 splicewright op <opName> '<json args>'      # any core op
 splicewright open                           # start the UI for the current folder
@@ -367,6 +369,7 @@ ids or paths), and invokes them from the CLI. Steps, each cached by fingerprint:
 | transcript | `transcripts/*.json` | faster-whisper / mlx-whisper, asset time |
 | scenes | `scenes/*.json` | optional |
 | beats | `beats/*.json` | audio assets only; see §15.3 |
+| loudness | `assets.json` (`loudness`, LUFS) | ffmpeg `ebur128` integrated loudness; assets with an audio stream. Silent assets (−70 LUFS gate floor) get no value. Runs by default on import (it is in `STEPS`) and decodes the whole audio once per asset. Read by `normalizeLoudness`. |
 
 Concurrency is configurable (default: cores − 2). Hardware acceleration is detected, not assumed,
 so the tool also runs on Linux.
@@ -458,7 +461,7 @@ explained, not hidden.
 | M7 | New-project flow + aspect presets (§13.1) | `open` in an empty folder → form → project renders; recent list only opens listed paths | ✅ done (browser pass by hand; switch fallback path untested) |
 | M8 | Masks + blend modes (§13.2) | still-frame snapshots per shape, feather, invert; mask keyframes survive split/trim | ✅ done (pixel probes on an ellipse, an inverted feathered rect and blend; other shapes by `maskStyle` string tests; no player drag box; 90°/270° assets unrendered) |
 | M8.5 | Shortcuts from the CapCut comparison (§13.2a) | each new key has a menu or button showing it; `detachAudio` op tested (split/undo keep audio in sync) | ✅ done (keys verified by hand; detach is Alt+S, not CapCut's Cmd+Shift+S) |
-| M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | planned |
+| M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | ✅ done (limiter render-only, -1 dBFS before AAC, ≤ ~1 dB overshoot after; no `meta` op to toggle it) |
 | M10 | More transitions + PIP presets (§13.4) | still-frame snapshot mid-transition per kind; handles invariant (§4.4 #4) holds | planned |
 | M11 | Transcript cuts: fillers and silences (§13.5) | on `examples/`, one `batch` removes the listed words; anchored captions stay in sync | planned |
 
@@ -537,7 +540,7 @@ Cmd+N/Cmd+O are the browser's (the M7 form and Recent… cover them). Added:
 | X | Range from selection | I/O set to the selection's outer span; Alt+X still clears |
 | Alt+← / Alt+→ | Previous / next keyframe | on the selected item (else the item under the playhead); Cmd+← is the browser's Back on macOS |
 | Alt+wheel | Scroll the timeline horizontally | plain wheel stays vertical; Cmd+wheel still zooms |
-| Alt+S | Detach audio | CapCut's Cmd+Shift+S is taken by the macOS screenshot shortcut, which a page can't intercept. New op `detachAudio {itemId}` (see §5). Volume keys move over once M9 gives audio items keyframes; until then they, and `speed` ≠ 1, are refused. |
+| Alt+S | Detach audio | CapCut's Cmd+Shift+S is taken by the macOS screenshot shortcut, which a page can't intercept. New op `detachAudio {itemId}` (see §5). Volume keys move to the audio item (M9); `speed` ≠ 1 is refused. |
 | F | Fullscreen preview | Player's fullscreen; Esc leaves. Not Cmd+F (browser find) |
 
 **Discoverability:** every action that has a key shows it where the action lives: context-menu entries through the
@@ -556,10 +559,15 @@ Already built: item volume, fades, ducking, volume keyframes on video items.
   `assets.json`. Op `normalizeLoudness { itemIds, target = -14 }` sets each item's `volume` so its asset
   hits the target (clamped to 0..2); it is an ordinary `setProps` batch, undoable.
 - **Master limiter:** `meta.limiter?: boolean` (default off for existing projects, on for new ones).
-  Preview uses a Web Audio `DynamicsCompressor` on the output. *Render support is unverified:* Remotion's
-  `<Audio>` exposes per-frame `volume`, not a node graph, so the render side may need an ffmpeg
-  `alimiter` pass after encode. Check Remotion's docs before building; if it needs the ffmpeg pass,
-  preview and render differ slightly and that is documented here.
+  **As built: render only.** Remotion's `<Audio>` exposes a per-frame `volume` curve, not a node graph, so
+  `render()` runs an ffmpeg pass after `renderMedia` (`-c:v copy -af alimiter=limit=0.891:attack=1:release=120:level=disabled`,
+  0.891 ≈ −1 dBFS) and replaces the output. `level=disabled` is required: alimiter's default auto-level
+  scales the peak back up to 0 dBFS. The preview has no limiter (no Web Audio), so it can differ from the
+  render on peaks above −1 dBFS. The limiter sets a −1 dBFS sample peak before encoding; after AAC, peaks can
+  overshoot by up to ~1 dB on dense, loud material (measured 0.3–1.2 dB on pink noise) but do not clip. A strict
+  post-encode −1 dBTP would need true-peak detection or a measure-and-re-encode pass; deferred. `meta` has no op: existing projects stay off; edit `project.json` to turn it on.
+  As built also: audio item volume keys are edited through the inspector slider + ◇ button and drawn as ◆
+  on the item; `normalizeLoudness` is its own op (not a `setProps` batch) so it can check loudness and keys.
 - Reference: OpenCut classic `apps/web/src/media/audio-mastering.ts` (limiter: −1 dB threshold,
   ratio 20, 1 ms attack, 120 ms release).
 - Deferred: EQ, pan, noise reduction (no per-frame equivalent in the render path; would need baked audio).

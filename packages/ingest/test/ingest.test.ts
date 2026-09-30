@@ -34,6 +34,24 @@ describe("ingest", () => {
     expect(run(dir, "insertItem", { assetId: "a_clip", at: 500 })).toMatchObject({ changes: { summary: expect.stringContaining("(60f)") } });
   }, 60_000);
 
+  it("loudness caches integrated LUFS like a direct ebur128 run, and skips silent assets", async () => {
+    const dir = project();
+    const r = await ingest(dir, { only: ["loudness"] });
+    expect(r.errors).toBeUndefined();
+    const direct = spawnSync("ffmpeg", ["-hide_banner", "-nostats", "-i", join(dir, "clip.mp4"), "-vn", "-af", "ebur128", "-f", "null", "-"], { encoding: "utf8" }).stderr;
+    const want = +/Integrated loudness:\s+I:\s+(\S+) LUFS/.exec(direct)![1];
+    const got = readAssets(dir).a_clip.loudness!;
+    expect(Math.abs(got - want)).toBeLessThanOrEqual(0.1);
+    expect((await ingest(dir, { only: ["loudness"] })).steps.loudness).toMatchObject({ ran: 0, cached: 1 });
+    // digital silence reads -70 (the gate floor): no value, but the step still counts as done
+    execFileSync("ffmpeg", ["-loglevel", "error", "-y", "-f", "lavfi", "-i", "anullsrc=d=1", join(dir, "silent.wav")]);
+    run(dir, "importAsset", { path: "silent.wav" });
+    const s = await ingest(dir, { only: ["loudness"] });
+    expect(s.errors).toBeUndefined();
+    expect(readAssets(dir).a_silent.loudness).toBeUndefined();
+    expect((readAssets(dir).a_silent as { done?: Record<string, string> }).done?.loudness).toBeDefined();
+  }, 60_000);
+
   it("keeps entries another process wrote to assets.json while this run was probing", async () => {
     const dir = project();
     const other = { path: "raw/other.mp4", fingerprint: "abc", kind: "video", duration: 3 };

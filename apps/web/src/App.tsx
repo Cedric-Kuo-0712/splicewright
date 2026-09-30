@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
-import { anchorOf, animate, ASPECTS, BLENDS, FPS_CHOICES, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, withKey, type Animatable, type AudioItem, type Item, type OverlayItem, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
+import { anchorOf, animate, ASPECTS, BLENDS, FPS_CHOICES, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, valueAt, withKey, type Animatable, type AudioItem, type Item, type OverlayItem, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
 import { mediaBox, SplicewrightProject, type Props } from "@splicewright/render";
 import { addMarker, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
 import { app, dnd, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
@@ -516,7 +516,7 @@ function Inspector({ p }: { p: Project }) {
           <Field label="note" value={item.note} onCommit={(v) => set({ note: v })} />
         </>
       )}
-      {"sourceIn" in item && t.kind !== "video" && <Field label="volume" type="number" value={item.volume} onCommit={(v) => set({ volume: v })} />}
+      {t.kind === "audio" && "assetId" in item && <AudioVolume p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as AudioItem} />}
       {"sourceIn" in item && (
         <>
           <Field label="fade in (f)" type="number" value={item.fadeIn} onCommit={(v) => set({ fadeIn: v })} />
@@ -571,6 +571,25 @@ function BeatFields({ p, item }: { p: Project; item: AudioItem }) {
         </button>
       </div>
     </div>
+  );
+}
+
+/** Volume slider with a ◇ key button; once keyed, dragging edits the key on the playhead. */
+function AudioVolume({ p, item }: { p: Project; item: AudioItem }) {
+  const frame = playhead.use((s) => s.frame);
+  const now = valueAt(p, item, "volume", frame) ?? item.volume ?? 1;
+  return (
+    <Slider
+      itemId={item.id}
+      label="volume"
+      min={0}
+      max={2}
+      step={0.01}
+      zero={1}
+      value={now}
+      mark={<KeyButton p={p} item={item} prop="volume" frame={frame} value={now} />}
+      patch={(v) => (item.keyframes?.volume ? { keyframes: withKey(p, item, "volume", frame, v) ?? null } : { volume: v === 1 ? null : v })}
+    />
   );
 }
 
@@ -720,7 +739,7 @@ function MaskFields({ p, item, set }: { p: Project; item: VideoItem | OverlayIte
 }
 
 /** ◆ when a key sits on the playhead (click removes it), ◇ otherwise (click keys `value` there); lit once the prop has keys. */
-function KeyButton({ p, item, prop, frame, value }: { p: Project; item: VideoItem; prop: Animatable; frame: number; value: number }) {
+function KeyButton({ p, item, prop, frame, value }: { p: Project; item: VideoItem | AudioItem; prop: Animatable; frame: number; value: number }) {
   const on = !!keyAt(p, item, prop, frame);
   const inside = frame >= item.start && frame < item.start + item.duration;
   return (

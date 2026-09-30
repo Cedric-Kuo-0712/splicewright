@@ -31,7 +31,8 @@ Op names below are the `splicewright_<op>` tools.
    picture-in-picture (ellipse mask), `blend` (screen, multiply…) for light leaks and overlays; `detachAudio` for
    J/L-cuts (detach, then trim the audio separately).
 6. **Sound.** Music on an audio track with `volume` and fades; `detectBeats` then `fitToBeats` to cut a montage on
-   the beat.
+   the beat. `normalizeLoudness` (after `ingest --only loudness`) before mixing dialogue and music; `setKeyframe` on an
+   audio item's `volume` for manual ducking.
 7. **Captions.** `addCaptionsFromTranscript`, then `editCaption` for names and mishearings.
 8. **Review.** `storyboard` over what changed, `still` on a few key frames, `render` preset `draft` for a full pass.
    Report changes with timecodes so the human can jump to them; `render` master when they approve.

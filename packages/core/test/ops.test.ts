@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { animate, apply, createProject, itemSpan, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
+import { animate, apply, badFont, builtinTheme, createProject, itemSpan, textCss, THEME_IDS, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
 
 const ctx: Ctx = {
   assetDurations: { a_clip: 10, a_song: 60 },
@@ -486,5 +486,49 @@ describe("ops", () => {
     let img = ok(apply(p, "importAsset", { path: "raw/photo.jpg" }, ctx));
     img = ok(apply(img, "insertItem", { assetId: "a_photo", at: 150, duration: 30 }, ctx));
     expect(err(apply(img, "detachAudio", { itemId: "i_3" }, ctx))).toBe("invalid");
+  });
+});
+
+describe("text themes", () => {
+  const withText = () => {
+    let p = ok(apply(fixture(), "insertItem", { component: "Text", at: 0, duration: 30, props: { text: "Hi" } }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_3", patch: { textStyle: { size: 40 }, highlight: "word" } }, ctx));
+    return p;
+  };
+
+  it("setMeta theme is one op (one revision) and validates the id", () => {
+    const p = withText();
+    const t = ok(apply(p, "setMeta", { theme: "luxury" }, ctx));
+    expect(t.meta.theme).toBe("luxury");
+    expect(t.revision).toBe(p.revision + 1);
+    expect(err(apply(p, "setMeta", { theme: "nope" }, ctx))).toBe("invalid");
+    expect(ok(apply(t, "setMeta", { theme: null }, ctx)).meta.theme).toBeUndefined();
+  });
+
+  it("resolves role -> theme, textStyle over it, CJK fallback, weight clamp", () => {
+    const p = ok(apply(withText(), "setMeta", { theme: "travel-cinematic" }, ctx));
+    const title = textCss(p, "title", undefined, "Hello");
+    expect(title.fontFamily).toBe('"Bebas Neue", sans-serif');
+    expect(title.fontSize).toBe(Math.round(0.09 * 1080));
+    expect(textCss(p, "title", { size: 10, weight: 900 }, "Hello")).toMatchObject({ fontSize: 10, fontWeight: 400 }); // Bebas has only 400
+    expect(textCss(p, "title", undefined, "你好").fontFamily).toBe('"Bebas Neue", "Noto Sans TC Variable", sans-serif');
+    expect(textCss(ok(apply(p, "setMeta", { theme: null }, ctx)), "title", undefined, "Hi")).toEqual({}); // no theme: today's look
+  });
+
+  it("builds every built-in theme with all four roles and known fonts", () => {
+    for (const id of THEME_IDS) {
+      const t = builtinTheme(id, 1080)!;
+      for (const r of ["title", "subtitle", "emphasis", "handwritten"] as const) expect(badFont(t.roles[r]), `${id}/${r}`).toBeUndefined();
+    }
+  });
+
+  it("rejects an unknown font, bad role, and a project theme removed while in use", () => {
+    const p = withText();
+    expect(err(apply(p, "setProps", { itemId: "i_3", patch: { props: { text: "x", textStyle: { font: "Comic Sans" } } } }, ctx))).toBe("invalid");
+    expect(err(apply(p, "setProps", { itemId: "i_3", patch: { props: { text: "x", role: "huge" } } }, ctx))).toBe("invalid");
+    expect(err(apply(p, "setTrack", { trackId: "t_3", patch: { textStyle: { font: "Comic Sans" } } }, ctx))).toBe("invalid");
+    const mine = { mine: { name: "mine", roles: { title: { font: "Anton" } } } };
+    const q = ok(apply(ok(apply(p, "setMeta", { themes: mine }, ctx)), "setMeta", { theme: "mine" }, ctx));
+    expect(err(apply(q, "setMeta", { themes: null }, ctx))).toBe("invalid");
   });
 });

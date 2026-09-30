@@ -1,7 +1,7 @@
 // Built-in fonts (SPEC-LOOK.md §2). The render package loads each from its Fontsource package, so they work
 // offline in preview and render. `family` is the exact CSS font-family value to put in a style.
 
-export type FontRole = "title" | "subtitle" | "emphasis" | "handwritten";
+import type { FontRole } from "./schema.ts";
 
 export interface Font {
   name: string;

@@ -3,6 +3,7 @@ import { copyFileSync, cpSync, existsSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
+import { THEME_IDS } from "@splicewright/core";
 import { still } from "../src/node.ts";
 
 // Spec §10: still-frame snapshot of examples/basic (video + config-registered component + caption).
@@ -117,4 +118,28 @@ it("built-in fonts render, Latin and CJK", { timeout: 300_000 }, async () => {
     const [font, mono] = [await render(text, `"${family}", monospace`), await render(text, "monospace")];
     expect(changed(font, mono), family).toBeGreaterThan(300);
   }
+});
+
+// L1: every built-in theme draws all four roles in its fonts. Four Text overlays (one per role) against the
+// same four forced to monospace through the raw `style` escape hatch; a role whose font failed to load matches.
+it("every built-in theme renders each role in its fonts", { timeout: 600_000 }, async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "swr-theme-"));
+  cpSync(dir, tmp, { recursive: true, filter: (s) => !/\/(out|\.splicewright)(\/|$)/.test(s) });
+  const project = JSON.parse(readFileSync(join(tmp, "project.json"), "utf8"));
+  const roles = ["title", "subtitle", "emphasis", "handwritten"];
+  const render = async (theme: string, mono: boolean, only: string) => {
+    const items = roles.map((role, k) => ({
+      id: `i_${90 + k}`, start: 0, duration: 60, component: "Text",
+      props: { text: role === only ? "HAMBURG 台北" : "", role, style: { transform: `translateY(${(k - 1.5) * 34}px)`, ...(mono && { fontFamily: "monospace" }) } },
+    }));
+    project.meta.theme = theme;
+    project.tracks = [...project.tracks.filter((t: { id: string }) => t.id !== "t_9"), { id: "t_9", name: "T", kind: "overlay", items }];
+    writeFileSync(join(tmp, "project.json"), JSON.stringify(project));
+    const png = join(tmp, "f.png");
+    await still(tmp, 30, png);
+    return execFileSync("ffmpeg", ["-loglevel", "error", "-i", png, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]);
+  };
+  const changed = (a: Buffer, b: Buffer) => a.reduce((n, v, i) => n + (Math.abs(v - b[i]) > 60 ? 1 : 0), 0);
+  for (const theme of THEME_IDS)
+    for (const role of roles) expect(changed(await render(theme, false, role), await render(theme, true, role)), `${theme}/${role}`).toBeGreaterThan(40);
 });

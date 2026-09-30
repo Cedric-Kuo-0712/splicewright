@@ -1,7 +1,7 @@
 import React, { useMemo } from "react";
 import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame } from "remotion";
 import "./fonts.ts";
-import { animate, itemSpan, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem } from "@splicewright/core";
+import { animate, itemSpan, sourceAt, textCss, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem, type Word, type FontRole, type TextStyle } from "@splicewright/core";
 import type { Config } from "./config.ts";
 import { duckGain, type Ranges } from "./duck.ts";
 
@@ -13,6 +13,8 @@ export interface Props extends Record<string, unknown> {
   duck?: Record<string, Ranges>;
   /** Coded [width, height] per asset, from sizesOf(); crop needs them to find the picture inside its box. */
   sizes?: Record<string, [number, number]>;
+  /** From captionWords(); transcript words per anchored caption on a highlight: "word" track. */
+  words?: Record<string, Word[]>;
   /** Carried through so the Node side can read config presets via selectComposition(). */
   presets?: Config["presets"];
 }
@@ -35,7 +37,16 @@ export const Image: React.FC<{ src: string; fit?: "contain" | "cover"; style?: R
 );
 
 /** Default caption look, ported from video-cut's CaptionOverlay. Captions sharing a frame stack. */
-export const CaptionLayer: React.FC<{ texts: string[] }> = ({ texts }) => (
+export interface CaptionProps {
+  texts: string[];
+  /** Theme subtitle + track textStyle, over the default look. */
+  css?: React.CSSProperties;
+  /** Per text: its words with the spoken one marked, drawn in `hiCss`. */
+  words?: ({ text: string; on: boolean }[] | undefined)[];
+  hiCss?: React.CSSProperties;
+}
+
+export const CaptionLayer: React.FC<CaptionProps> = ({ texts, css, words, hiCss }) => (
   <div style={{ position: "absolute", bottom: 60, left: 0, right: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, zIndex: 40 }}>
     {texts.map((text, i) => (
       <div
@@ -53,20 +64,40 @@ export const CaptionLayer: React.FC<{ texts: string[] }> = ({ texts }) => (
           maxWidth: "85%",
           textAlign: "center",
           lineHeight: 1.3,
+          ...css,
         }}
       >
-        {text}
+        {words?.[i]?.map((w, k) => (
+          <span key={k} style={w.on ? hiCss : undefined}>{w.text}</span>
+        )) ?? text}
       </div>
     ))}
   </div>
 );
 
 /** A caption track's captions visible at the current frame, drawn by one layer component. */
-const Captions: React.FC<{ p: Project; t: Track; Layer: React.ComponentType<{ texts: string[] }> }> = ({ p, t, Layer }) => {
+const Captions: React.FC<{ p: Project; t: Track; Layer: React.ComponentType<CaptionProps>; words: Record<string, Word[]> }> = ({ p, t, Layer, words }) => {
   const frame = useCurrentFrame();
-  const spans = useMemo(() => t.items.flatMap((i) => ("mode" in i && i.text ? [{ text: i.text, span: itemSpan(p, i) }] : [])), [p, t]);
-  const texts = spans.filter(({ span }) => span && frame >= span.start && frame < span.start + span.duration).map((c) => c.text);
-  return texts.length ? <Layer texts={texts} /> : null;
+  const spans = useMemo(() => t.items.flatMap((i) => ("mode" in i && i.text ? [{ item: i, text: i.text, span: itemSpan(p, i) }] : [])), [p, t]);
+  const shown = spans.filter(({ span }) => span && frame >= span.start && frame < span.start + span.duration);
+  if (!shown.length) return null;
+  const textStyle = t.kind === "caption" ? t.textStyle : undefined;
+  const all = shown.map((c) => c.text).join("");
+  const css = textCss(p, "subtitle", textStyle, all);
+  // The emphasis look for the spoken word: font, weight, color, stroke and shadow only, so the line doesn't reflow.
+  const { fontFamily, fontWeight, color, textTransform, WebkitTextStroke, paintOrder, textShadow } = textCss(p, "emphasis", undefined, all);
+  const hiCss = { fontFamily, fontWeight, color: color ?? "#ffd60a", textTransform, WebkitTextStroke, paintOrder, textShadow } as React.CSSProperties;
+  const marked = shown.map(({ item, text }) => {
+    const ws = words[item.id];
+    const vi = "itemId" in item ? p.tracks.flatMap((x) => (x.kind === "video" ? x.items : [])).find((v) => v.id === item.itemId) : undefined;
+    // Words are spliced from the transcript; if the caption was edited they no longer match, so draw it plain.
+    if (!ws || !vi || ws.map((w) => w.text).join("").replace(/\s/g, "") !== text.replace(/\s/g, "")) return undefined;
+    const now = sourceAt(p, vi, frame);
+    const lit = ws.findLastIndex((w) => w.start <= now);
+    // A space between words unless the transcript already has one or the word is CJK.
+    return ws.map((w, k) => ({ text: (k && !/^\s/.test(w.text) && !/[\u3400-\u9fff]/.test(w.text) ? " " : "") + w.text.trimEnd(), on: k === lit }));
+  });
+  return <Layer texts={shown.map((c) => c.text)} css={css} words={marked} hiCss={hiCss} />;
 };
 
 type Transition = NonNullable<ReturnType<typeof transitionOf>>;
@@ -304,7 +335,7 @@ const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges }
   return <Audio src={staticFile(p.assets[item.assetId].path)} trimBefore={Math.round(item.sourceIn * p.meta.fps)} volume={volume} muted={t.muted} />;
 };
 
-export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, components }) => {
+export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, words = {}, components }) => {
   const registry: Record<string, React.ComponentType<any>> = { Text, Image, CaptionLayer, ...components };
   const component = (name: string, where: string) => {
     const C = registry[name];
@@ -315,7 +346,11 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
     if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} muted={t.muted} from={from} inc={inc} out={out} />;
     const C = component((item as { component: string }).component, item.id);
     const { mask } = item as OverlayItem;
-    const layer = <C {...(item as { props: object }).props} />;
+    let props = (item as { props: Record<string, unknown> }).props;
+    // A Text overlay's look: theme role, then textStyle, then the raw `style` escape hatch.
+    if ((item as OverlayItem).component === "Text")
+      props = { ...props, style: { ...textCss(p, (props.role as FontRole) ?? "title", props.textStyle as TextStyle | undefined, String(props.text ?? "")), ...(props.style as object) } };
+    const layer = <C {...props} />;
     const mixBlendMode = blendOf(item as OverlayItem);
     return mask || mixBlendMode ? <AbsoluteFill style={{ mixBlendMode, ...(mask && maskStyle(mask, [p.meta.width, p.meta.height], [p.meta.width, p.meta.height])) }}>{layer}</AbsoluteFill> : layer;
   };
@@ -325,7 +360,7 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
       {p.tracks.map((t) =>
         // ponytail: `hidden` drops the whole track, audio included; split visual/audio if a use appears.
         t.hidden ? null : t.kind === "caption" ? (
-          <Captions key={t.id} p={p} t={t} Layer={component(t.style ?? "CaptionLayer", t.id)} />
+          <Captions key={t.id} p={p} t={t} Layer={component(t.style ?? "CaptionLayer", t.id)} words={words} />
         ) : (
           <React.Fragment key={t.id}>
             {/* Video items in time order, so an incoming item draws over the outgoing one. */}

@@ -7,7 +7,7 @@ import react from "@vitejs/plugin-react";
 import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { addRecent, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo } from "@splicewright/core/node";
-import { ASPECTS, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
+import { ASPECTS, captionWords, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
 import { displayable, ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
 import { duckRanges } from "@splicewright/render/node";
 
@@ -100,7 +100,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     const probes = readAssets(dir);
     const durations = Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.duration ? [[id, a.duration]] : [])));
     const ctx = loadCtx(dir);
-    return { project, duck: duckRanges(project, ctx), proxies, durations, sizes: sizesOf(probes), loudness: ctx.loudness ?? {} };
+    return { project, duck: duckRanges(project, ctx), words: captionWords(project, ctx), proxies, durations, sizes: sizesOf(probes), loudness: ctx.loudness ?? {} };
   };
   const result = (res: ServerResponse, r: ReturnType<typeof run>) =>
     "error" in r ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, { revision: r.project.revision, summary: r.changes.summary, ...snapshot() });

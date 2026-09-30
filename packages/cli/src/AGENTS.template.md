@@ -45,12 +45,17 @@ steps (pass your last write's revision as `baseRevision` to undo); ask before de
 
 ## Type
 
-These fonts are built in and work offline. Put the exact family in a Text overlay's `props.style.fontFamily` and
-end the stack with a generic, e.g. `"Montserrat Variable", sans-serif`. Captions can't take a font yet.
-Give each video fixed roles (title, subtitle, emphasis, handwritten) and at most 2–3 families; build hierarchy
-with weight, size and letter-spacing, not more fonts. Suggest the ★ set first. Only the two Noto TC fonts have
-Chinese glyphs: Chinese text needs one of them, after the Latin font for mixed text
-(`"Montserrat Variable", "Noto Sans TC Variable", sans-serif`). Record the chosen roles under Notes.
+Pick a theme, then set roles. `setMeta { theme }` (one undo step) restyles every role-bound text at once.
+Built-in themes: {{themes}}. They are the pairings below (same order); each fills the four roles (title,
+subtitle, emphasis, handwritten) with font, weight and size scaled to the frame. A Text overlay takes
+`props.role` (default title) and optional `props.textStyle`; a caption track takes `textStyle` (over the
+subtitle role) and `highlight: "word"` (spoken word in the emphasis style, anchored captions only) via `setTrack`.
+`textStyle` = `{font, weight, size, color, tracking, lineHeight, upper, align, stroke, shadow, box}` and overrides the
+role field by field; `props.style` (raw CSS) still wins over both. For your own look, define `themes` in `setMeta`.
+Fonts are built in and work offline; `font` is a name from the table. Use at most 2–3 families, and build
+hierarchy with weight, size and letter-spacing. Suggest the ★ set first. Only the two Noto TC fonts have Chinese
+glyphs; Chinese text in any other font falls back to the theme's subtitle font (Noto Sans TC). Record the chosen
+theme and any overrides under Notes.
 
 {{fonts}}
 

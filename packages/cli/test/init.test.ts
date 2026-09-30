@@ -20,6 +20,24 @@ it("init writes the agent files once and keeps other MCP servers", () => {
   expect(readFileSync(join(dir, "AGENTS.md"), "utf8")).toBe("mine");
 });
 
+it("init --refresh-agents rewrites AGENTS.md from meta and the template, keeping Brief and Notes", () => {
+  const dir = mkdtempSync(join(tmpdir(), "swr-refresh-"));
+  init(dir);
+  const fresh = readFileSync(join(dir, "AGENTS.md"), "utf8");
+  const brief = "## Brief\n\n- Goal and audience: friends\n\n";
+  const notes = "## Notes\n\n- Chose take 2 of the beach.\n";
+  writeFileSync(join(dir, "AGENTS.md"), `# Old\n\nstale intro\n\n${brief}## Workflow\n\nstale\n\n${notes}`);
+  execFileSync(process.execPath, [CLI, "op", "setMeta", JSON.stringify({ title: "Trip 2" })], { cwd: dir });
+  const refresh = () => JSON.parse(execFileSync(process.execPath, [CLI, "init", "--refresh-agents"], { cwd: dir, encoding: "utf8" }));
+  expect(refresh().created).toEqual(["AGENTS.md"]);
+  const text = readFileSync(join(dir, "AGENTS.md"), "utf8");
+  expect(text).toMatch(/^# Trip 2\n/);
+  expect(text).toContain(brief);
+  expect(text).toContain(fresh.slice(fresh.indexOf("## Workflow"), fresh.indexOf("## Notes")));
+  expect(text.endsWith(notes)).toBe(true);
+  expect(refresh().created).toEqual([]);
+});
+
 it("init --preset sets the aspect, and refuses --size with it", () => {
   const dir = mkdtempSync(join(tmpdir(), "swr-preset-"));
   const cli = (...args: string[]) => spawnSync(process.execPath, [CLI, "init", ...args], { cwd: dir, encoding: "utf8" });

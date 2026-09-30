@@ -446,6 +446,14 @@ describe("ops", () => {
     expect(valueAt(sl, item(sl, "i_3"), "volume", 30)).toBeCloseTo(0.6);
   });
 
+  it("setMeta toggles the limiter and refuses fps/size", () => {
+    const on = ok(apply(fixture(), "setMeta", { limiter: true }, ctx));
+    expect(on.meta.limiter).toBe(true);
+    expect("limiter" in ok(apply(on, "setMeta", { limiter: null }, ctx)).meta).toBe(false);
+    expect(apply(on, "setMeta", { fps: 25 }, ctx)).toHaveProperty("error");
+    expect(apply(on, "setMeta", { title: null }, ctx)).toHaveProperty("error");
+  });
+
   it("normalizeLoudness leaves silenced items alone, e.g. the video after detachAudio", () => {
     const d = ok(apply(fixture(), "detachAudio", { itemId: "i_1" }, ctx));
     const r = apply(d, "normalizeLoudness", { itemIds: ["i_1", "i_3"] }, { ...ctx, loudness: { a_clip: -20 } });

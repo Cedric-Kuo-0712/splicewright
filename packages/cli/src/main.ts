@@ -12,7 +12,7 @@ import { migrateVideoCut } from "./migrate.ts";
 // Spec §7.1. Every command prints one JSON object on stdout; errors exit 1.
 
 const USAGE = `usage: splicewright <command>
-  init [--title T] [--fps 30] [--size 1920x1080 | --preset 16:9|9:16|1:1|4:5]
+  init [--title T] [--fps 30] [--size 1920x1080 | --preset 16:9|9:16|1:1|4:5] [--refresh-agents]
   import <paths...> [--no-ingest]
   ingest [--only proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
   status
@@ -47,6 +47,7 @@ const { values: flags, positionals } = parseArgs({
     only: { type: "string" },
     jobs: { type: "string" },
     "no-ingest": { type: "boolean" },
+    "refresh-agents": { type: "boolean" },
   },
 });
 const [cmd, ...args] = positionals;
@@ -56,8 +57,9 @@ const fail = (e: Error): never => out({ error: { code: "render_failed", message:
 /**
  * AGENTS.md (the brief), CLAUDE.md (points Claude Code at it) and .mcp.json (starts `splicewright mcp` here).
  * Existing files are kept; .mcp.json only gains a splicewright entry if it has none. Returns what was written.
+ * `refresh` rewrites AGENTS.md from the current template and meta, keeping its Brief and Notes sections.
  */
-function agentFiles(dir: string, meta: { title: string; fps: number; width: number; height: number }): string[] {
+function agentFiles(dir: string, meta: { title: string; fps: number; width: number; height: number }, refresh = false): string[] {
   const written: string[] = [];
   const write = (name: string, text: string) => {
     if (existsSync(join(dir, name))) return;
@@ -65,7 +67,20 @@ function agentFiles(dir: string, meta: { title: string; fps: number; width: numb
     written.push(name);
   };
   const template = readFileSync(join(import.meta.dirname, "AGENTS.template.md"), "utf8");
-  write("AGENTS.md", template.replace(/\{\{(\w+)\}\}/g, (_, k: keyof typeof meta) => String(meta[k])));
+  const agents = template.replace(/\{\{(\w+)\}\}/g, (_, k: keyof typeof meta) => String(meta[k]));
+  const agentsPath = join(dir, "AGENTS.md");
+  if (refresh && existsSync(agentsPath)) {
+    const sections = (text: string) => text.split(/^(?=## )/m);
+    const heading = (s: string) => s.slice(0, s.indexOf("\n"));
+    const old = readFileSync(agentsPath, "utf8");
+    const kept = new Map(sections(old).map((s) => [heading(s), s]));
+    const next = sections(agents).map((s) => (["## Brief", "## Notes"].includes(heading(s)) && kept.get(heading(s))) || s).join("");
+    if (next !== old) {
+      writeFileSync(agentsPath, next);
+      written.push("AGENTS.md");
+    }
+  }
+  write("AGENTS.md", agents);
   write("CLAUDE.md", "@AGENTS.md\n");
   // The CLI by absolute path (it need not be on PATH); node by name, since process.execPath is a
   // versioned install path (e.g. Homebrew Cellar) that breaks on upgrade.
@@ -103,7 +118,7 @@ switch (cmd) {
     const r = init(dir, { title, fps, width, height });
     if ("error" in r && r.error.code !== "exists") out(r);
     const meta = load(dir).meta;
-    const created = [...("error" in r ? [] : ["project.json"]), ...agentFiles(dir, meta)];
+    const created = [...("error" in r ? [] : ["project.json"]), ...agentFiles(dir, meta, flags["refresh-agents"])];
     out({ created, revision: load(dir).revision });
   }
   case "import": {

@@ -131,10 +131,13 @@ interface VideoItem extends ItemBase {
   effects?: { brightness?: number; contrast?: number; saturation?: number; hue?: number /* deg */;
               blur?: number /* px */; grayscale?: number; sepia?: number; invert?: number };
   crop?: { top?: number; right?: number; bottom?: number; left?: number };  // fractions of the visible picture, upright
-  // Animation of transform, effects and volume props. Per prop, keys sorted by t in SOURCE seconds, so
+  mask?: Mask;                      // §13.2; drawn after crop
+  blend?: Blend;                    // §13.2; mix-blend-mode of the item's layer
+  // Animation of transform, effects, volume and mask geometry props. Per prop, keys sorted by t in SOURCE seconds, so
   // split/trim/slip/speed keep them on the same content. A keyed prop ignores its plain value; values
   // hold past the first and last key; ease shapes the segment leaving a key (smoothstep).
-  keyframes?: Partial<Record<"x"|"y"|"scale"|"rotation"|"opacity"|"volume"|keyof Effects,
+  keyframes?: Partial<Record<"x"|"y"|"scale"|"rotation"|"opacity"|"volume"|keyof Effects
+                             |"maskX"|"maskY"|"maskW"|"maskH"|"maskFeather",
                              { t: Seconds; v: number; ease?: "linear" | "ease" }[]>>;
   role?: string;                    // free tag: "talking_head", "broll", ...
   speed?: number;                   // 0.1..10, source seconds per timeline second; no reverse
@@ -163,6 +166,8 @@ type CaptionItem =
 interface OverlayItem extends ItemBase {
   component: string;                // built-in ("Text", "Image") or registered in splicewright.config.ts
   props: Record<string, unknown>;   // validated by the component's own zod schema if provided
+  mask?: Mask;                      // §13.2, over the whole frame
+  blend?: Blend;
 }
 
 interface Marker { id: string; label: string; start: Frames; duration?: Frames; color?: string }
@@ -212,7 +217,7 @@ The adapters (UI/CLI/MCP) only call ops and persist the result.
 | `move` | itemId, to, trackId?, ripple? | Rejects overlap unless `ripple`. |
 | `delete` | itemIds[], ripple? | Ripple closes the gap on magnetic tracks. |
 | `closeGap` | trackId, at | Closes the empty span containing `at`; later non-anchored items shift left. |
-| `setProps` | itemId, patch | Whitelisted fields only (volume, fit, transform, effects, crop, keyframes, fades, transition, speed, props, label, note). `speed` here keeps the duration. |
+| `setProps` | itemId, patch | Whitelisted fields only (volume, fit, transform, effects, crop, mask, blend, keyframes, fades, transition, speed, props, label, note; mask and blend also on overlays). `speed` here keeps the duration. |
 | `setKeyframe` | itemId, prop, at, value \| null, ease? | Video only: key `prop` at timeline frame `at` (inside the item), replacing a key within half a frame; null removes it. |
 | `setSpeed` | itemId, speed, ripple? | Video only: keeps the source range, scales the duration; ripple (default on magnetic) moves later items. |
 | `slip` | itemId, deltaSec | Changes `sourceIn` only; timeline position unchanged. |
@@ -447,7 +452,7 @@ explained, not hidden.
 | M5 | `ingest` generic port | fresh project from raw files → first render with no manual steps | ✅ done (no `scenes` step) |
 | M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow | ✅ done (real-music F-measure: tool `ingest/beat_eval.py` ready; number pending a hand-tapped reference) |
 | M7 | New-project flow + aspect presets (§13.1) | `open` in an empty folder → form → project renders; recent list only opens listed paths | ✅ done (browser pass by hand; switch fallback path untested) |
-| M8 | Masks + blend modes (§13.2) | still-frame snapshots per shape, feather, invert; mask keyframes survive split/trim | planned |
+| M8 | Masks + blend modes (§13.2) | still-frame snapshots per shape, feather, invert; mask keyframes survive split/trim | ✅ done (pixel probes on an ellipse, an inverted feathered rect and blend; other shapes by `maskStyle` string tests; no player drag box; 90°/270° assets unrendered) |
 | M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | planned |
 | M10 | More transitions + PIP presets (§13.4) | still-frame snapshot mid-transition per kind; handles invariant (§4.4 #4) holds | planned |
 | M11 | Transcript cuts: fillers and silences (§13.5) | on `examples/`, one `batch` removes the listed words; anchored captions stay in sync | planned |
@@ -489,19 +494,27 @@ Today a project needs `splicewright init` then `splicewright open`, and the serv
 ### 13.2 M8 — Masks and blend modes
 ```ts
 // on VideoItem and OverlayItem
-mask?: { shape: "rect" | "ellipse" | "diamond" | "star" | "heart" | "polygon";
-         x: number; y: number; w: number; h: number;   // fractions of the visible picture, like crop
-         rotation?: number; radius?: number;            // rect corner radius, fraction of min(w, h)
-         points?: [number, number][];                   // polygon only, fractions of the box
-         feather?: number;                              // px at output resolution
-         invert?: boolean };
-blend?: "normal" | "multiply" | "screen" | "overlay" | "darken" | "lighten" | "difference";
+type Mask = { shape: "rect" | "ellipse" | "diamond" | "star" | "polygon";
+              x: number; y: number; w: number; h: number;   // fractions of the fitted picture box (the one crop is
+                                                            // measured in, before crop); x,y top-left; w,h > 0; may leave 0..1
+              radius?: number;                              // rect only: corner radius, 0..0.5 of min(w, h)
+              points?: [number, number][];                  // polygon only (and required for it): >= 3, fractions of the mask box
+              feather?: number;                             // px at output resolution, 0..200
+              invert?: boolean };
+type Blend = "normal" | "multiply" | "screen" | "overlay" | "darken" | "lighten" | "difference";
 ```
-- Render: shape → `clip-path` (`inset(... round r)`, `ellipse()`, `polygon()`); feather or invert →
-  `mask-image` (radial/linear gradient or an inline SVG with a blur) with `mask-composite: exclude`
-  for invert. `blend` → `mix-blend-mode` on the item's layer. Composes with `crop` (crop first).
-- Keyframes: `maskX`, `maskY`, `maskW`, `maskH`, `maskFeather` join the keyable props (source time, as §4).
-- UI: inspector Mask ▾ picker; a mask box on the player like the crop mode (Shift+K), drag body/corners.
+As built: no heart (needs an SVG path, not a CSS basic shape) and no mask rotation. Overlays measure the box
+against the whole frame (they have no picture).
+- Render: `maskStyle(mask, frame, pic)` in `Composition.tsx` returns the CSS for a wrapper that fills the frame
+  and centres the media, so it clips after the media's own crop. Plain shapes → `clip-path` (`inset(... round r)`,
+  `ellipse()`, `polygon()`; star and diamond are fixed polygons). Feather or invert → one `mask-image`: an inline
+  SVG of the shape (`feGaussianBlur` with σ = feather / 2; invert cuts it from a full rect with an SVG `<mask>`).
+  The wrapper sits inside the item's transform layer, so the mask moves and scales with the item; it stays upright
+  when the item is rotated. `blend` → `mix-blend-mode` on that layer (for overlays, on a wrapper around the component).
+- Keyframes (video only): `maskX`, `maskY`, `maskW`, `maskH`, `maskFeather` join the keyable props (source time, as §4);
+  a keyed prop overrides the matching `mask` field. Keying one on an item without a mask is an error.
+- UI: inspector Mask section (shape, x/y/w/h/feather/radius sliders with live preview, ◇ keying and double-click
+  reset as for effects; invert; blend). A shape pick starts centred, w = h = 0.6. No drag box on the player yet.
 - Circle picture-in-picture is `mask: { shape: "ellipse" }` plus `transform`; no separate feature.
 - Reference: OpenCut classic `apps/web/src/masks/` (builtin shapes, `feather.ts`, freeform path,
   `toggle-mask-inverted.ts`) and `rust/crates/compositor/src/blend_mode.rs`.

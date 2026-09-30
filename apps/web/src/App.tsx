@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
-import { anchorOf, animate, ASPECTS, FPS_CHOICES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, withKey, type Animatable, type AudioItem, type Item, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
+import { anchorOf, animate, ASPECTS, BLENDS, FPS_CHOICES, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, withKey, type Animatable, type AudioItem, type Item, type OverlayItem, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
 import { mediaBox, SplicewrightProject, type Props } from "@splicewright/render";
 import { addMarker, copy, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, tapBeat, upload, videoUnder } from "./edit.ts";
 import { app, dnd, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
@@ -525,6 +525,7 @@ function Inspector({ p }: { p: Project }) {
       )}
       {t.kind === "audio" && <BeatFields p={p} item={item as AudioItem} />}
       {t.kind === "video" && "assetId" in item && <VideoFields p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as VideoItem} fps={fps} still={p.assets[item.assetId]?.kind === "image"} set={set} />}
+      {"component" in item && <MaskFields p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as OverlayItem} set={set} />}
       {"component" in item && <PropsField value={item.props} onCommit={(props) => set({ props })} />}
     </div>
   );
@@ -648,6 +649,72 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
       {(["top", "right", "bottom", "left"] as const).map((k) => (
         <Slider key={k} itemId={item.id} label={k} min={0} max={0.9} step={0.005} zero={0} value={item.crop?.[k] ?? 0} patch={(v) => ({ crop: prune({ ...item.crop, [k]: v }, {}) })} />
       ))}
+      <MaskFields p={p} item={item} set={set} />
+    </>
+  );
+}
+
+type MaskT = NonNullable<VideoItem["mask"]>;
+const TRIANGLE: [number, number][] = [[0.5, 0], [1, 1], [0, 1]];
+/** field, key prop (video only), min, max, step, default (double-click resets) */
+const MASK_SLIDERS = [
+  ["x", "maskX", -0.5, 1.5, 0.005, 0.2],
+  ["y", "maskY", -0.5, 1.5, 0.005, 0.2],
+  ["w", "maskW", 0.05, 2, 0.005, 0.6],
+  ["h", "maskH", 0.05, 2, 0.005, 0.6],
+  ["feather", "maskFeather", 0, 200, 1, 0],
+] as const;
+
+/** Mask and blend for a video or overlay item; only video items key the geometry. Same live-preview/commit/◇ pattern as effects. */
+function MaskFields({ p, item, set }: { p: Project; item: VideoItem | OverlayItem; set: (patch: Record<string, unknown>) => void }) {
+  const frame = playhead.use((s) => s.frame);
+  const video = "assetId" in item ? item : undefined;
+  const mask = item.mask;
+  const now = (video ? animate(p, video, frame) : item).mask;
+  const pick = (shape: string) => {
+    if (!shape) return set({ mask: null });
+    const { radius, points, ...rest }: MaskT = mask ?? { shape: "rect", x: 0.2, y: 0.2, w: 0.6, h: 0.6 };
+    set({ mask: { ...rest, shape, ...(shape === "rect" && radius && { radius }), ...(shape === "polygon" && { points: points ?? TRIANGLE }) } });
+  };
+  return (
+    <>
+      <h4>mask</h4>
+      <label className="field">
+        <span>shape</span>
+        <select value={mask?.shape ?? ""} onChange={(e) => pick(e.target.value)}>
+          <option value="">none</option>
+          {MASK_SHAPES.map((s) => <option key={s}>{s}</option>)}
+        </select>
+      </label>
+      {mask && now && (
+        <>
+          {MASK_SLIDERS.map(([k, prop, min, max, step, dflt]) => (
+            <Slider
+              key={k}
+              itemId={item.id}
+              label={k}
+              min={min}
+              max={max}
+              step={step}
+              zero={dflt}
+              value={now[k] ?? dflt}
+              mark={video && <KeyButton p={p} item={video} prop={prop} frame={frame} value={now[k] ?? dflt} />}
+              patch={(v) => (video?.keyframes?.[prop] ? { keyframes: withKey(p, video, prop, frame, v) ?? null } : { mask: { ...mask, [k]: k === "feather" && !v ? undefined : v } })}
+            />
+          ))}
+          {mask.shape === "rect" && <Slider itemId={item.id} label="radius" min={0} max={0.5} step={0.005} zero={0} value={mask.radius ?? 0} patch={(v) => ({ mask: { ...mask, radius: v || undefined } })} />}
+          <label className="field">
+            <span>invert</span>
+            <input type="checkbox" checked={!!mask.invert} onChange={(e) => set({ mask: { ...mask, invert: e.target.checked || undefined } })} />
+          </label>
+        </>
+      )}
+      <label className="field">
+        <span>blend</span>
+        <select value={item.blend ?? "normal"} onChange={(e) => set({ blend: e.target.value === "normal" ? null : e.target.value })}>
+          {BLENDS.map((b) => <option key={b}>{b}</option>)}
+        </select>
+      </label>
     </>
   );
 }

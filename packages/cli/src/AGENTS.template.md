@@ -43,6 +43,17 @@ Op names below are the `splicewright_<op>` tools.
 Rules: one intent per `batch` (one undo step each); re-read on a conflict, never force; don't undo the human's
 steps (pass your last write's revision as `baseRevision` to undo); ask before deleting footage-heavy sections or changing the format.
 
+## Type
+
+These fonts are built in and work offline. Put the exact family in a Text overlay's `props.style.fontFamily` and
+end the stack with a generic, e.g. `"Montserrat Variable", sans-serif`. Captions can't take a font yet.
+Give each video fixed roles (title, subtitle, emphasis, handwritten) and at most 2–3 families; build hierarchy
+with weight, size and letter-spacing, not more fonts. Suggest the ★ set first. Only the two Noto TC fonts have
+Chinese glyphs: Chinese text needs one of them, after the Latin font for mixed text
+(`"Montserrat Variable", "Noto Sans TC Variable", sans-serif`). Record the chosen roles under Notes.
+
+{{fonts}}
+
 ## Folder
 
 - `raw/` source media: never modify or move.

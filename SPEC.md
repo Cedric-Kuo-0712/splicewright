@@ -626,10 +626,39 @@ Already built: item volume, fades, ducking, volume keyframes on video items.
   also has 那个; 呃 is not reliably transcribed.
 
 ### 13.6 Later (not scheduled)
-Caption styles and templates (font, stroke, box, per-word highlight; see video-autopilot-kit), keyframes
-on overlay props, Bezier keyframe curves, a pre-export check op (`lint`: gaps on the main track, captions
-off-screen, clipped audio), stickers/GIF overlays, reverse playback (needs a reversed proxy from ingest),
-nested sequences, chroma/luma key, LUT and curves (WebGL), EQ/pan, and a desktop wrapper (Tauri or Electron).
+Fonts, caption styles, themes, color grading, LUTs, curves, chroma/luma key and beauty moved to
+**SPEC-LOOK.md** (built-in fonts are done there). The rest is specced in §13.7. Still unspecced: keyframes on
+overlay props, nested sequences.
+
+### 13.7 Next candidates (non-look)
+Same rules as §13 and SPEC-LOOK.md §1: preview and render run one program, so a process either renders in the
+composition or bakes a file that both sides play.
+
+- **A1 Audio processing (EQ, pan, noise reduction).** `audioFx?: { eq?: { hz: number; gain: number; q?: number }[];
+  pan?: number /* -1..1 */; denoise?: { kind: "rnnoise" | "fft"; mix?: number } }` on audio and video items.
+  Remotion's `<Audio>` has no EQ or pan, so this is **baked**: ffmpeg `equalizer`, `pan`, `arnndn` (RNNoise;
+  ship one model file from `richardpl/arnndn-models`) / `afftdn` (all present in ffmpeg 9.0.1 here) render the whole
+  source to `.splicewright/audio/<assetId>-<hash of audioFx>.m4a`, and the item plays that file in both preview
+  and render. The item shows "processing…" until the file exists; the render refuses items whose file is
+  missing. Loudness (M9) is measured on the baked file. Later: DeepFilterNet (MIT/Apache) as a better `denoise`
+  kind through its `deep-filter` CLI (48 kHz WAV only). Acceptance: a 1 kHz tone + pink noise: `eq` −12 dB at 1 kHz
+  lowers the tone by 12 ± 1 dB; `pan: -1` leaves the right channel silent; `denoise` lowers noise-only RMS.
+- **E1 Bezier ease.** Keys gain `ease: [x1, y1, x2, y2]` besides `"linear" | "ease"`. Core evaluates it with its own
+  cubic-bezier solver (Newton + bisection, ~20 lines), since core does not depend on Remotion. UI: presets
+  (ease-in, ease-out, ease-in-out, overshoot) on a key's context menu. Acceptance: the solver matches CSS
+  `cubic-bezier()` reference values within 1e-3.
+- **S1 Stickers and GIF.** Built-in overlay component `Sticker { src, fit }` over Remotion's `<AnimatedImage>`
+  (public in `remotion` 4.0.520; GIF, animated WebP/PNG), looping over the item. `.gif`/`.webp` import as image
+  assets marked animated at probe time. Acceptance: two stills a few frames apart differ on an animated GIF.
+- **R1 Reverse.** `reverse?: boolean` on video items. `@remotion/media` `<Video>` can't play backwards and
+  `OffthreadVideo` would seek frame by frame, so ingest bakes a reversed proxy (ffmpeg `reverse` + `areverse`, in
+  ~10 s chunks and concatenated, since `reverse` buffers the whole input). `sourceIn` keeps meaning source time
+  on the forward file. Acceptance: frame k of a reversed item equals frame (n−1−k) of the forward one.
+- **Lint.** Read-only op `lint` → `{ level, what, at, itemId? }[]`: gaps on the magnetic track, captions or text
+  outside the title-safe area, CJK text in a font without CJK glyphs, peaks above −1 dBFS without the limiter,
+  items on the canvas path that can't decode. MCP instructions tell agents to run it before `render` master.
+- **Desktop wrapper.** Electron: rendering needs Node + Chromium, which Electron has; Tauri would need a bundled
+  Node as a sidecar. Not before the web UI stabilises.
 
 ---
 

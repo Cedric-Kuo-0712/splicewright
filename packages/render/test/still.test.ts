@@ -97,3 +97,24 @@ it("transitions mid-frame: each kind puts the two pictures where it says", { tim
   const dip = await render("dip");
   (near(dip(L), [0, 0, 0]), near(dip(R), [0, 0, 0]));
 });
+
+// Built-in fonts (core FONTS) reach the render: a Text overlay in the font against the same text in plain
+// monospace. If the font file never loads, the stack falls back to monospace and the two frames match.
+it("built-in fonts render, Latin and CJK", { timeout: 300_000 }, async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "swr-font-"));
+  cpSync(dir, tmp, { recursive: true, filter: (s) => !/\/(out|\.splicewright)(\/|$)/.test(s) });
+  const project = JSON.parse(readFileSync(join(tmp, "project.json"), "utf8"));
+  const render = async (text: string, fontFamily: string) => {
+    const item = { id: "i_9", start: 0, duration: 60, component: "Text", props: { text, style: { fontFamily, fontSize: 48, fontWeight: 900 } } };
+    project.tracks = [...project.tracks.filter((t: { id: string }) => t.id !== "t_9"), { id: "t_9", name: "T", kind: "overlay", items: [item] }];
+    writeFileSync(join(tmp, "project.json"), JSON.stringify(project));
+    const png = join(tmp, "f.png");
+    await still(tmp, 30, png);
+    return execFileSync("ffmpeg", ["-loglevel", "error", "-i", png, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]);
+  };
+  const changed = (a: Buffer, b: Buffer) => a.reduce((n, v, i) => n + (Math.abs(v - b[i]) > 60 ? 1 : 0), 0);
+  for (const [text, family] of [["TOKYO", "Anton"], ["九月的台北", "Noto Sans TC Variable"]]) {
+    const [font, mono] = [await render(text, `"${family}", monospace`), await render(text, "monospace")];
+    expect(changed(font, mono), family).toBeGreaterThan(300);
+  }
+});

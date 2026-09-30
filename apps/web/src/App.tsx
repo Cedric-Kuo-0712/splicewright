@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
-import { anchorOf, animate, ASPECTS, BLENDS, FPS_CHOICES, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, valueAt, withKey, type Animatable, type AudioItem, type Item, type OverlayItem, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
+import { anchorOf, animate, ASPECTS, BLENDS, FPS_CHOICES, MASK_PROPS, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, valueAt, withKey, type Animatable, type AudioItem, type Item, type OverlayItem, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
 import { mediaBox, SplicewrightProject, type Props } from "@splicewright/render";
 import { addMarker, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, pipEntries, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
 import { app, dnd, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
@@ -255,12 +255,14 @@ const cleanCrop = (c: Crop): Crop | null => {
  * Move, scale and rotate the selected video item on the preview: drag the box, a corner, or the top knob.
  * Snaps to the frame centre (Alt bypasses), Shift snaps rotation to 15°, double-click resets.
  * In crop mode (Shift+C) the box's edges crop the picture instead; double-click uncrops.
+ * In mask mode (Shift+K) the mask's box moves (drag inside) and resizes (corners).
  */
 function TransformBox({ p }: { p: Project }) {
   const selection = app.use((s) => s.selection);
   const live = app.use((s) => s.live);
   const sizes = app.use((s) => s.sizes);
   const cropping = app.use((s) => s.cropping);
+  const masking = app.use((s) => s.masking);
   const frame = playhead.use((s) => s.frame);
   const box = React.useRef<HTMLDivElement>(null);
   const [size, setSize] = React.useState<[number, number] | null>(null);
@@ -277,7 +279,9 @@ function TransformBox({ p }: { p: Project }) {
   const { width: cw, height: ch } = p.meta;
   const k = size ? Math.min(size[0] / cw, size[1] / ch) : 1;
   const shown = item && live?.itemId === item.id ? { ...item, ...live.patch } : item;
-  const tf: Tf = (shown && animate(p, shown, frame).transform) || {};
+  const now = shown ? animate(p, shown, frame) : null;
+  const tf: Tf = now?.transform || {};
+  const mask = now?.mask;
   const crop: Crop = shown?.crop ?? {};
   const { x = 0, y = 0, scale = 1, rotation = 0 } = tf;
   // The picture as displayed, at scale 1, in composition px.
@@ -323,6 +327,49 @@ function TransformBox({ p }: { p: Project }) {
     return { transform: cleanTf(plain), keyframes: kf ?? null };
   };
 
+  // Same split for the mask box: keyed maskX/Y/W/H take a key at the playhead, the rest change the plain mask.
+  const maskPatch = (next: MaskT) => {
+    let kf = item!.keyframes;
+    const plain: MaskT = { ...item!.mask! };
+    for (const [prop, f] of Object.entries(MASK_PROPS) as [Animatable, "x" | "y" | "w" | "h" | "feather"][])
+      if (f !== "feather" && next[f] !== mask![f]) kf?.[prop] ? (kf = withKey(p, { ...item!, keyframes: kf }, prop, frame, next[f])) : (plain[f] = next[f]);
+    return { mask: plain, keyframes: kf ?? null };
+  };
+
+  const grabMask = (e: React.PointerEvent<HTMLElement>, handle: "move" | "nw" | "ne" | "sw" | "se") => {
+    if (e.button !== 0 || !item || !mask) return;
+    e.stopPropagation();
+    const el = e.currentTarget;
+    const start = { ...mask };
+    const [a, b] = [Math.cos((rotation * Math.PI) / 180), Math.sin((rotation * Math.PI) / 180)];
+    const r3 = (n: number) => +n.toFixed(3);
+    let next: MaskT | undefined;
+    el.setPointerCapture(e.pointerId);
+    el.onpointermove = (ev) => {
+      if (!ev.buttons) return;
+      // Pointer travel along the box's own axes, as a fraction of the picture (the box the mask is measured in).
+      const [dx, dy] = [ev.clientX - e.clientX, ev.clientY - e.clientY];
+      const u = (dx * a + dy * b) / (dw * scale * k);
+      const v = (-dx * b + dy * a) / (dh * scale * k);
+      if (handle === "move") next = { ...start, x: r3(start.x + u), y: r3(start.y + v) };
+      else {
+        // The opposite corner stays put; the box never gets thinner than 2%.
+        let [x0, y0, x1, y1] = [start.x, start.y, start.x + start.w, start.y + start.h];
+        if (handle.includes("w")) x0 = Math.min(x1 - 0.02, x0 + u);
+        else x1 = Math.max(x0 + 0.02, x1 + u);
+        if (handle.includes("n")) y0 = Math.min(y1 - 0.02, y0 + v);
+        else y1 = Math.max(y0 + 0.02, y1 + v);
+        next = { ...start, x: r3(x0), y: r3(y0), w: r3(x1 - x0), h: r3(y1 - y0) };
+      }
+      app.set({ live: { itemId: item.id, patch: maskPatch(next) as Partial<VideoItem> } });
+    };
+    el.onpointerup = () => {
+      el.onpointermove = el.onpointerup = null;
+      if (!next) return app.set({ live: null });
+      op("setProps", { itemId: item.id, patch: maskPatch(next) }).finally(() => app.set({ live: null }));
+    };
+  };
+
   const grab = (e: React.PointerEvent<HTMLElement>, mode: "move" | "scale" | "rotate") => {
     if (e.button !== 0 || !item) return;
     e.stopPropagation();
@@ -364,20 +411,33 @@ function TransformBox({ p }: { p: Project }) {
     <div ref={box} className="stage">
       {visible && (
         <div
-          className={`tf-box ${cropping ? "cropping" : ""}`}
+          className={`tf-box ${cropping ? "cropping" : ""} ${masking ? "masking" : ""}`}
           style={{ left: cx, top: cy, width: dw * scale * k, height: dh * scale * k, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
           onPointerDown={(e) => grab(e, "move")}
-          onDoubleClick={() => op("setProps", { itemId: item!.id, patch: cropping ? { crop: null } : { transform: cleanTf({ opacity: tf.opacity }) } })}
+          onDoubleClick={() => !masking && op("setProps", { itemId: item!.id, patch: cropping ? { crop: null } : { transform: cleanTf({ opacity: tf.opacity }) } })}
           title={
             cropping
               ? `${item!.id}: drag an edge to crop, double-click uncrops, Shift+C leaves crop mode`
-              : `${item!.id}: drag to move, corners scale, top knob rotates (Shift: 15°), double-click resets, Shift+C crops`
+              : masking
+                ? `${item!.id}: drag inside the mask to move it, corners resize, Shift+K leaves mask mode`
+                : `${item!.id}: drag to move, corners scale, top knob rotates (Shift: 15°), double-click resets, Shift+C crops, Shift+K edits the mask`
           }
         >
           {cropping ? (
             <div className="crop-rect" style={{ inset: SIDES.map((s) => `${(crop[s] ?? 0) * 100}%`).join(" ") }}>
               {SIDES.map((s) => <div key={s} className={`crop-h ${s}`} onPointerDown={(e) => grabEdge(e, s)} />)}
             </div>
+          ) : masking ? (
+            mask && (
+              // Only the mask's box: rect and ellipse draw their outline, other shapes show the box they fill.
+              <div
+                className={`mask-rect ${mask.shape === "ellipse" ? "ellipse" : ""}`}
+                style={{ left: `${mask.x * 100}%`, top: `${mask.y * 100}%`, width: `${mask.w * 100}%`, height: `${mask.h * 100}%` }}
+                onPointerDown={(e) => grabMask(e, "move")}
+              >
+                {(["nw", "ne", "sw", "se"] as const).map((c) => <div key={c} className={`tf-h ${c}`} onPointerDown={(e) => grabMask(e, c)} />)}
+              </div>
+            )
           ) : (
             <>
               {["nw", "ne", "sw", "se"].map((c) => <div key={c} className={`tf-h ${c}`} onPointerDown={(e) => grab(e, "scale")} />)}
@@ -387,7 +447,11 @@ function TransformBox({ p }: { p: Project }) {
           <span className="tf-label">
             {cropping
               ? SIDES.map((s) => `${Math.round((crop[s] ?? 0) * 100)}`).join(" / ") + " % crop"
-              : `${Math.round(x)}, ${Math.round(y)} · ${Math.round(scale * 100)}%${rotation ? ` · ${rotation}°` : ""}`}
+              : masking
+                ? mask
+                  ? `mask ${[mask.x, mask.y, mask.w, mask.h].map((n) => Math.round(n * 100)).join(" / ")} %`
+                  : "no mask: pick a shape in the inspector"
+                : `${Math.round(x)}, ${Math.round(y)} · ${Math.round(scale * 100)}%${rotation ? ` · ${rotation}°` : ""}`}
           </span>
         </div>
       )}
@@ -643,9 +707,10 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
       <Slider itemId={item.id} label="volume" min={0} max={2} step={0.01} zero={1} value={now.volume ?? 1} mark={mark("volume", now.volume ?? 1)} patch={(v) => (keyed("volume") ? keyPatch("volume", v) : { volume: v === 1 ? null : v })} />
       <h4>
         transform
+        <KeyGroupButton p={p} item={item} frame={frame} props={TF_KEYS.map((k) => [k, (now.transform as Record<string, number> | undefined)?.[k] ?? (k === "scale" || k === "opacity" ? 1 : 0)])} />
         <button onClick={(e) => openMenu(e, pipEntries(p, item))}>PIP ▾</button>
       </h4>
-      {(["x", "y", "scale", "rotation", "opacity"] as const).map((k) => {
+      {TF_KEYS.map((k) => {
         const v = (now.transform as Record<string, number> | undefined)?.[k];
         const dflt = k === "scale" || k === "opacity" ? 1 : 0;
         return (
@@ -678,6 +743,7 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
       )}
       <h4>
         effects
+        <KeyGroupButton p={p} item={item} frame={frame} props={EFFECTS.map(([k, , , , zero]) => [k, now.effects?.[k] ?? zero])} />
         <button onClick={(e) => openMenu(e, lookEntries(item))}>Look ▾</button>
       </h4>
       {EFFECTS.map(([k, min, max, step, zero]) => (
@@ -696,7 +762,7 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
       ))}
       <h4>
         crop
-        <button className={cropping ? "on" : ""} onClick={() => app.set({ cropping: !cropping })} title="crop handles on the preview (Shift+C)">
+        <button className={cropping ? "on" : ""} onClick={() => app.set({ cropping: !cropping, masking: false })} title="crop handles on the preview (Shift+C)">
           on preview
         </button>
       </h4>
@@ -708,6 +774,7 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
   );
 }
 
+const TF_KEYS = ["x", "y", "scale", "rotation", "opacity"] as const;
 type MaskT = NonNullable<VideoItem["mask"]>;
 const TRIANGLE: [number, number][] = [[0.5, 0], [1, 1], [0, 1]];
 /** field, key prop (video only), min, max, step, default (double-click resets) */
@@ -722,6 +789,7 @@ const MASK_SLIDERS = [
 /** Mask and blend for a video or overlay item; only video items key the geometry. Same live-preview/commit/◇ pattern as effects. */
 function MaskFields({ p, item, set }: { p: Project; item: VideoItem | OverlayItem; set: (patch: Record<string, unknown>) => void }) {
   const frame = playhead.use((s) => s.frame);
+  const masking = app.use((s) => s.masking);
   const video = "assetId" in item ? item : undefined;
   const mask = item.mask;
   const now = (video ? animate(p, video, frame) : item).mask;
@@ -732,7 +800,16 @@ function MaskFields({ p, item, set }: { p: Project; item: VideoItem | OverlayIte
   };
   return (
     <>
-      <h4>mask</h4>
+      <h4>
+        mask
+        {video && mask && now && <KeyGroupButton p={p} item={video} frame={frame} props={MASK_SLIDERS.map(([k, prop, , , , dflt]) => [prop, now[k] ?? dflt])} />}
+        {/* The preview box only follows video items; overlays have no picture box on the player. */}
+        {video && mask && (
+          <button className={masking ? "on" : ""} onClick={() => app.set({ masking: !masking, cropping: false })} title="mask box on the preview (Shift+K)">
+            on preview
+          </button>
+        )}
+      </h4>
       <label className="field">
         <span>shape</span>
         <select value={mask?.shape ?? ""} onChange={(e) => pick(e.target.value)}>
@@ -785,6 +862,27 @@ function KeyButton({ p, item, prop, frame, value }: { p: Project; item: VideoIte
       onClick={() => op("setKeyframe", { itemId: item.id, prop, at: frame, value: on ? null : +value.toFixed(4) })}
     >
       {on ? "◆" : "◇"}
+    </button>
+  );
+}
+
+/** ◇ for a whole section: keys every prop at the playhead (keeping keys already there), or, when all are keyed here, removes them all. One undo step. */
+function KeyGroupButton({ p, item, frame, props }: { p: Project; item: VideoItem; frame: number; props: [Animatable, number][] }) {
+  const here = props.filter(([k]) => keyAt(p, item, k, frame));
+  const all = here.length === props.length;
+  const inside = frame >= item.start && frame < item.start + item.duration;
+  const ops = (all ? props.map(([prop]) => [prop, null] as const) : props.filter((kv) => !here.includes(kv)).map(([prop, v]) => [prop, +v.toFixed(4)] as const)).map(([prop, value]) => ({
+    op: "setKeyframe",
+    args: { itemId: item.id, prop, at: frame, value },
+  }));
+  return (
+    <button
+      className={`kf-btn ${props.some(([k]) => item.keyframes?.[k]) ? "keyed" : ""}`}
+      disabled={!inside}
+      title={inside ? (all ? "remove every key here in this section" : "key every field in this section here") : "move the playhead into the item to key it"}
+      onClick={() => op("batch", { ops })}
+    >
+      {all ? "◆" : here.length ? "◈" : "◇"}
     </button>
   );
 }
@@ -884,6 +982,7 @@ function onKey(e: KeyboardEvent) {
     const to = key === "arrowup" ? edges.filter((f) => f < frame).at(-1) : edges.find((f) => f > frame);
     return to !== undefined && seek(to);
   }
+  if (!mod && e.shiftKey && key === "k") return app.set({ masking: !s.masking, cropping: false });
   if (!mod && (key === "j" || key === "k" || key === "l")) {
     handled();
     if (key === "k") return player.ref?.pause(), app.set({ rate: 1 });
@@ -906,7 +1005,7 @@ function onKey(e: KeyboardEvent) {
   if (mod && key === "a") return handled(), selectItems(itemsAfter(p, p.tracks));
   if (!mod && e.shiftKey && key === "m") return markerAroundSelection();
   if (!mod && e.shiftKey && key === "f") return freezeFrame(frame);
-  if (!mod && e.shiftKey && key === "c") return app.set({ cropping: !s.cropping });
+  if (!mod && e.shiftKey && key === "c") return app.set({ cropping: !s.cropping, masking: false });
   if (mod && key === "z") return handled(), history(e.shiftKey ? "redo" : "undo");
   if (mod && key === "c") return s.selection.length ? (handled(), copy()) : undefined;
   if (mod && key === "x") return s.selection.length ? (handled(), cut()) : undefined;
@@ -919,7 +1018,7 @@ function onKey(e: KeyboardEvent) {
     handled();
     return rippleDelete(e.shiftKey);
   }
-  if (key === "escape") return app.set({ selection: [], gap: null, cropping: false });
+  if (key === "escape") return app.set({ selection: [], gap: null, cropping: false, masking: false });
   // Alt letters: match the physical key, since macOS turns Alt+X into "≈".
   if (e.altKey && e.code === "KeyX") return handled(), app.set({ io: { in: null, out: null } });
   if (e.altKey && e.code === "KeyS") return handled(), detachAudio();

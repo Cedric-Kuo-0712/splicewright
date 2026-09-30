@@ -340,8 +340,12 @@ Evolves from `video-cut/apps/editor`. Every mutation goes through core ops.
   - With one video item selected under the playhead, a box on the player drags its transform: body moves (snaps to center, Alt bypasses),
     corners scale, the top knob rotates (Shift: 15°), double-click resets. The box fits the visible picture (probed size).
     Shift+C (or the inspector's crop button) swaps in crop edges; double-click uncrops, Esc leaves crop mode.
+    Shift+K (or the mask section's button) swaps in the mask's box: drag inside moves it, corners resize; keyed
+    maskX/Y/W/H take a key at the playhead. Video items only; Esc leaves mask mode.
   - Inspector effect and crop sliders preview live while dragged and commit one `setProps` on release (one undo step);
     double-click a slider resets it. ◇ beside a field keys its value at the playhead (◆: a key is here, click removes it);
+    ◇ in the transform, effects and mask headers does the whole section in one `batch`: keys every field (◈: some are
+    keyed here), or removes them all when all are;
     once a prop has keys, editing it (field, slider, or the preview box) keys it at the playhead. Items show a diamond per
     keyed frame; clicking one seeks there. Look ▾ applies a preset (B&W, Noir, Warm, Cool, Vintage, Vivid, Faded) as `effects`.
   - Freeze frame (Shift+F, item menu): `POST /api/freeze {itemId, frame}` grabs the source frame into `raw/` as a PNG and imports it
@@ -464,7 +468,7 @@ explained, not hidden.
 | M5 | `ingest` generic port | fresh project from raw files → first render with no manual steps | ✅ done (no `scenes` step) |
 | M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow | ✅ done (real-music F-measure: tool `ingest/beat_eval.py` ready; number pending a hand-tapped reference) |
 | M7 | New-project flow + aspect presets (§13.1) | `open` in an empty folder → form → project renders; recent list only opens listed paths | ✅ done (browser pass by hand; switch fallback path untested) |
-| M8 | Masks + blend modes (§13.2) | still-frame snapshots per shape, feather, invert; mask keyframes survive split/trim | ✅ done (pixel probes on an ellipse, an inverted feathered rect and blend; other shapes by `maskStyle` string tests; no player drag box; 90°/270° assets unrendered) |
+| M8 | Masks + blend modes (§13.2) | still-frame snapshots per shape, feather, invert; mask keyframes survive split/trim | ✅ done (pixel probes on an ellipse, an inverted feathered rect and blend; other shapes by `maskStyle` string tests; player mask box (Shift+K) for video items, not overlays; 90°/270° assets unrendered) |
 | M8.5 | Shortcuts from the CapCut comparison (§13.2a) | each new key has a menu or button showing it; `detachAudio` op tested (split/undo keep audio in sync) | ✅ done (keys verified by hand; detach is Alt+S, not CapCut's Cmd+Shift+S) |
 | M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | ✅ done (limiter render-only, -1 dBFS before AAC, ≤ ~1 dB overshoot after; toggled by `setMeta`) |
 | M10 | More transitions + PIP presets (§13.4) | still-frame snapshot mid-transition per kind; handles invariant (§4.4 #4) holds | ✅ done (mid-frame still per kind at t=0.5, up/down covered by `look()` string tests only; PIP `border` not built; UI verified by typecheck only) |
@@ -527,7 +531,8 @@ against the whole frame (they have no picture).
 - Keyframes (video only): `maskX`, `maskY`, `maskW`, `maskH`, `maskFeather` join the keyable props (source time, as §4);
   a keyed prop overrides the matching `mask` field. Keying one on an item without a mask is an error.
 - UI: inspector Mask section (shape, x/y/w/h/feather/radius sliders with live preview, ◇ keying and double-click
-  reset as for effects; invert; blend). A shape pick starts centred, w = h = 0.6. No drag box on the player yet.
+  reset as for effects; invert; blend). A shape pick starts centred, w = h = 0.6. Shift+K drags the
+  mask's box on the player (move, corner resize; any shape, since all fill x/y/w/h). Polygon points are not draggable.
 - Circle picture-in-picture is `mask: { shape: "ellipse" }` plus `transform`; no separate feature.
 - Reference: OpenCut classic `apps/web/src/masks/` (builtin shapes, `feather.ts`, freeform path,
   `toggle-mask-inverted.ts`) and `rust/crates/compositor/src/blend_mode.rs`.

@@ -8,7 +8,7 @@ is core op/schema → render → UI → MCP/CLI). This file covers how a video *
 
 | # | Milestone | Needs | Acceptance (short) | Status |
 |---|---|---|---|---|
-| F | Built-in fonts + agent font guide | — | font still test: Latin and CJK render in the font, not the fallback | ✅ done (branch `feat/fonts-look-spec`) |
+| F | Built-in fonts + agent font guide | — | font still test: Latin and CJK render in the font, not the fallback | ✅ done (merged 9a5a746) |
 | L1 | Text styles and themes | F | one `setMeta { theme }` restyles every role-bound text in one undo step | planned |
 | L0 | Canvas video path (spike) | — | a color-key still matches between Player and render; existing still tests unchanged | planned |
 | L2 | Color: grade, curves, LUT | L0 | our LUT within 2/255 of ffmpeg `lut3d` on a test image | planned |

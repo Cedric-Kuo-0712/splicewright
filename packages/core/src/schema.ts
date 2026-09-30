@@ -49,8 +49,43 @@ export const Crop = z
   .refine((c) => (c.left ?? 0) + (c.right ?? 0) < 1 && (c.top ?? 0) + (c.bottom ?? 0) < 1, { message: "crop leaves nothing visible" });
 
 const Volume = z.number().min(0).max(2);
-const ANIMATED = { ...Transform.shape, ...Effects.shape, volume: Volume.optional() };
-/** Video item fields that take keyframes: transform, effects, volume. */
+
+export const MASK_SHAPES = ["rect", "ellipse", "diamond", "star", "polygon"] as const;
+export const BLENDS = ["normal", "multiply", "screen", "overlay", "darken", "lighten", "difference"] as const;
+
+/** x, y, w, h are fractions of the fitted picture box (the one crop is measured in), x,y = top-left; may reach outside 0..1. */
+export const Mask = z
+  .object({
+    shape: z.enum(MASK_SHAPES),
+    x: z.number(),
+    y: z.number(),
+    w: z.number().gt(0),
+    h: z.number().gt(0),
+    /** rect only: corner radius, fraction of min(w, h) */
+    radius: z.number().min(0).max(0.5).optional(),
+    /** polygon only: fractions of the mask box */
+    points: z.array(z.tuple([z.number(), z.number()])).min(3).optional(),
+    /** px at output resolution */
+    feather: z.number().min(0).max(200).optional(),
+    invert: z.boolean().optional(),
+  })
+  .refine((m) => (m.shape === "polygon") === !!m.points, { message: "points are required for polygon masks and only for them" })
+  .refine((m) => m.shape === "rect" || m.radius === undefined, { message: "radius is for rect masks only" });
+
+/** Keyframe prop → the mask field it drives. */
+export const MASK_PROPS = { maskX: "x", maskY: "y", maskW: "w", maskH: "h", maskFeather: "feather" } as const;
+
+const ANIMATED = {
+  ...Transform.shape,
+  ...Effects.shape,
+  volume: Volume.optional(),
+  maskX: Mask.shape.x.optional(),
+  maskY: Mask.shape.y.optional(),
+  maskW: Mask.shape.w.optional(),
+  maskH: Mask.shape.h.optional(),
+  maskFeather: Mask.shape.feather,
+};
+/** Video item fields that take keyframes: transform, effects, volume, mask geometry. */
 export const ANIMATABLE = Object.keys(ANIMATED) as (keyof typeof ANIMATED)[];
 export type Animatable = (typeof ANIMATABLE)[number];
 
@@ -84,6 +119,8 @@ export const VideoItem = z.object({
   transform: Transform.optional(),
   effects: Effects.optional(),
   crop: Crop.optional(),
+  mask: Mask.optional(),
+  blend: z.enum(BLENDS).optional(),
   keyframes: Keyframes.optional(),
   role: z.string().optional(),
   /** Playback rate: source seconds per timeline second. Changes how much source `duration` covers. */
@@ -129,6 +166,8 @@ export const OverlayItem = z.object({
   ...itemBase,
   component: z.string().min(1),
   props: z.record(z.string(), z.unknown()),
+  mask: Mask.optional(),
+  blend: z.enum(BLENDS).optional(),
   anchor: Anchor.optional(),
 });
 

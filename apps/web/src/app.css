@@ -8,6 +8,9 @@ input, select, textarea { background: #0f1012; color: #ddd; border: 1px solid #3
 h3 { margin: 0 0 8px; font-size: 13px; }
 .dim { color: #888; }
 .loading { padding: 20px; }
+.new-project { max-width: 420px; margin: 10vh auto; display: flex; flex-direction: column; gap: 8px; }
+.new-project form { display: flex; gap: 8px; }
+.new-project form input { flex: 1; }
 
 .app { display: grid; height: 100%; grid-template: "bar bar bar" auto "bin preview inspector" minmax(0, 1fr) "tl tl tl" minmax(0, 42%) "status status status" auto / 220px minmax(0, 1fr) 260px; }
 .toolbar { grid-area: bar; display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid #2a2c31; }

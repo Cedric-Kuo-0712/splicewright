@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame } from "remotion";
-import { animate, itemSpan, transitionOf, valueAt, type AudioItem, type Item, type Project, type Track, type VideoItem } from "@splicewright/core";
+import { animate, itemSpan, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem } from "@splicewright/core";
 import type { Config } from "./config.ts";
 import { duckGain, type Ranges } from "./duck.ts";
 
@@ -127,6 +127,44 @@ function cropPath(box: ReturnType<typeof mediaBox>, crop: VideoItem["crop"]) {
   return `inset(${oy + c[0] * box.vh}px ${ox + c[1] * box.vw}px ${oy + c[2] * box.vh}px ${ox + c[3] * box.vw}px)`;
 }
 
+const DIAMOND: [number, number][] = [[0.5, 0], [1, 0.5], [0.5, 1], [0, 0.5]];
+const STAR: [number, number][] = Array.from({ length: 10 }, (_, i) => {
+  const [a, r] = [(i * Math.PI) / 5 - Math.PI / 2, i % 2 ? 0.2 : 0.5];
+  return [0.5 + r * Math.cos(a), 0.5 + r * Math.sin(a)];
+});
+const n2 = (v: number) => +v.toFixed(2);
+
+/**
+ * Mask as CSS on a wrapper that fills the `frame` (W×H px) and centres the media, so it clips after the
+ * media's own crop. Mask fractions are of the `pic` box, centred in the frame. Plain shapes are a
+ * clip-path; feather or invert switch to an SVG mask-image (the shape blurred, or cut from a full rect).
+ * ponytail: the mask stays upright when the item is rotated; rotate the wrapper too if that matters.
+ */
+export function maskStyle(mask: NonNullable<VideoItem["mask"]>, [W, H]: [number, number], pic: [number, number]): React.CSSProperties {
+  const [mw, mh] = [mask.w * pic[0], mask.h * pic[1]].map(n2);
+  const [mx, my] = [(W - pic[0]) / 2 + mask.x * pic[0], (H - pic[1]) / 2 + mask.y * pic[1]].map(n2);
+  const { shape, feather = 0, invert } = mask;
+  const pts = (shape === "polygon" ? mask.points : shape === "star" ? STAR : shape === "diamond" ? DIAMOND : undefined)?.map(([u, v]) => [n2(mx + u * mw), n2(my + v * mh)]);
+  const r = n2((mask.radius ?? 0) * Math.min(mw, mh));
+  if (!feather && !invert) {
+    if (pts) return { clipPath: `polygon(${pts.map(([a, b]) => `${a}px ${b}px`).join(", ")})` };
+    if (shape === "ellipse") return { clipPath: `ellipse(${mw / 2}px ${mh / 2}px at ${n2(mx + mw / 2)}px ${n2(my + mh / 2)}px)` };
+    return { clipPath: `inset(${my}px ${n2(W - mx - mw)}px ${n2(H - my - mh)}px ${mx}px${r ? ` round ${r}px` : ""})` };
+  }
+  const geom = pts ? `<polygon points="${pts.map((q) => q.join(",")).join(" ")}"/>` : shape === "ellipse" ? `<ellipse cx="${n2(mx + mw / 2)}" cy="${n2(my + mh / 2)}" rx="${mw / 2}" ry="${mh / 2}"/>` : `<rect x="${mx}" y="${my}" width="${mw}" height="${mh}" rx="${r}"/>`;
+  const g = `<g fill="#000"${feather ? ' filter="url(#b)"' : ""}>${geom}</g>`;
+  const full = `width="${W}" height="${H}"`;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" ${full}><defs>` +
+    (feather ? `<filter id="b" filterUnits="userSpaceOnUse" x="${-3 * feather}" y="${-3 * feather}" width="${W + 6 * feather}" height="${H + 6 * feather}"><feGaussianBlur stdDeviation="${feather / 2}"/></filter>` : "") +
+    (invert ? `<mask id="m"><rect ${full} fill="#fff"/>${g}</mask>` : "") +
+    `</defs>${invert ? `<rect ${full} mask="url(#m)"/>` : g}</svg>`;
+  const image = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+  return { maskImage: image, WebkitMaskImage: image, maskSize: `${W}px ${H}px`, WebkitMaskSize: `${W}px ${H}px`, maskRepeat: "no-repeat", WebkitMaskRepeat: "no-repeat" };
+}
+
+const blendOf = (item: { blend?: string }) => (item.blend && item.blend !== "normal" ? (item.blend as React.CSSProperties["mixBlendMode"]) : undefined);
+
 /** effects field → CSS filter function, unit, neutral value. */
 const FILTERS = [
   ["brightness", "brightness", "", 1],
@@ -161,30 +199,37 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; mu
     filter: filterOf(item.effects),
     clipPath: cropPath(box, item.crop),
   };
+  const media =
+    asset.kind === "image" ? (
+      <Img src={staticFile(asset.path)} style={style} />
+    ) : (
+      // ponytail: sourceIn is rounded to whole frames, as video-cut did; pass seconds if sub-frame seeks matter.
+      // trimBefore is in source frames (Remotion doesn't scale it by playbackRate); `from` may sit before
+      // item.start when a transition plays the incoming item early.
+      <OffthreadVideo
+        src={staticFile(asset.path)}
+        trimBefore={Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps)}
+        playbackRate={speed}
+        volume={(v) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain}
+        muted={muted}
+        style={style}
+      />
+    );
   return (
     <AbsoluteFill
       style={{
         ...center,
+        mixBlendMode: blendOf(item),
         opacity: (opacity ?? 1) * l.opacity,
         filter: l.bright < 1 ? `brightness(${l.bright})` : undefined,
         clipPath: l.clip,
         transform: x || y || scale !== 1 ? `translate(${x}px, ${y}px) scale(${scale})` : undefined,
       }}
     >
-      {asset.kind === "image" ? (
-        <Img src={staticFile(asset.path)} style={style} />
+      {item.mask ? (
+        <div style={{ ...center, display: "flex", width: p.meta.width, height: p.meta.height, flexShrink: 0, ...maskStyle(item.mask, [p.meta.width, p.meta.height], box.display) }}>{media}</div>
       ) : (
-        // ponytail: sourceIn is rounded to whole frames, as video-cut did; pass seconds if sub-frame seeks matter.
-        // trimBefore is in source frames (Remotion doesn't scale it by playbackRate); `from` may sit before
-        // item.start when a transition plays the incoming item early.
-        <OffthreadVideo
-          src={staticFile(asset.path)}
-          trimBefore={Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps)}
-          playbackRate={speed}
-          volume={(v) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain}
-          muted={muted}
-          style={style}
-        />
+        media
       )}
     </AbsoluteFill>
   );
@@ -213,7 +258,10 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
   const body = (t: Track, item: Item, from: number, inc?: Transition, out?: Transition) => {
     if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} muted={t.muted} from={from} inc={inc} out={out} />;
     const C = component((item as { component: string }).component, item.id);
-    return <C {...(item as { props: object }).props} />;
+    const { mask } = item as OverlayItem;
+    const layer = <C {...(item as { props: object }).props} />;
+    const mixBlendMode = blendOf(item as OverlayItem);
+    return mask || mixBlendMode ? <AbsoluteFill style={{ mixBlendMode, ...(mask && maskStyle(mask, [p.meta.width, p.meta.height], [p.meta.width, p.meta.height])) }}>{layer}</AbsoluteFill> : layer;
   };
   return (
     <AbsoluteFill className="swr" style={{ backgroundColor: p.meta.background ?? "#000", fontFamily: FONT, lineHeight: 1.5 }}>

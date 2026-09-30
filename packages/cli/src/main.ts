@@ -2,7 +2,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { getSummary } from "@splicewright/core";
+import { ASPECTS, getSummary } from "@splicewright/core";
 import { init, load, rawPath, redo, run, undo } from "@splicewright/core/node";
 import { ingest, STEPS, type Step } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
@@ -12,7 +12,7 @@ import { migrateVideoCut } from "./migrate.ts";
 // Spec §7.1. Every command prints one JSON object on stdout; errors exit 1.
 
 const USAGE = `usage: splicewright <command>
-  init [--title T] [--fps 30] [--size 1920x1080]
+  init [--title T] [--fps 30] [--size 1920x1080 | --preset 16:9|9:16|1:1|4:5]
   import <paths...> [--no-ingest]
   ingest [--only proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
   status
@@ -35,13 +35,13 @@ const { values: flags, positionals } = parseArgs({
   options: {
     title: { type: "string" },
     fps: { type: "string", default: "30" },
-    size: { type: "string", default: "1920x1080" },
+    size: { type: "string" },
     base: { type: "string" },
     out: { type: "string" },
     force: { type: "boolean" },
     at: { type: "string" },
     output: { type: "string", short: "o" },
-    preset: { type: "string", default: "master" },
+    preset: { type: "string" }, // render: draft|master; init: an aspect
     range: { type: "string" },
     port: { type: "string", default: "5190" },
     only: { type: "string" },
@@ -94,7 +94,10 @@ const opResult = (r: ReturnType<typeof run>) =>
 
 switch (cmd) {
   case "init": {
-    const [width, height] = flags.size!.split("x").map(Number);
+    const aspect = flags.preset && Object.hasOwn(ASPECTS, flags.preset) && ASPECTS[flags.preset];
+    if (flags.preset && flags.size) out({ error: { code: "usage", message: "init takes --preset or --size, not both" } });
+    if (flags.preset && !aspect) out({ error: { code: "usage", message: `unknown preset ${flags.preset}; one of ${Object.keys(ASPECTS).join(", ")}` } });
+    const [width, height] = aspect || (flags.size ?? "1920x1080").split("x").map(Number);
     const fps = Number(flags.fps);
     const title = flags.title ?? dir.split(/[/\\]/).pop()!;
     const r = init(dir, { title, fps, width, height });
@@ -157,13 +160,13 @@ switch (cmd) {
     const onProgress = (p: number) => {
       if (Math.floor(p * 10) > shown) console.error(`render ${Math.round(p * 100)}%`), (shown = Math.floor(p * 10));
     };
-    const r = await render(dir, { output: resolve(flags.output ?? "out/final.mp4"), preset: flags.preset, range, onProgress }).catch(fail);
+    const r = await render(dir, { output: resolve(flags.output ?? "out/final.mp4"), preset: flags.preset ?? "master", range, onProgress }).catch(fail);
     out({ ...r, output: relative(dir, r.output) });
   }
   case "open": {
     // Long-running: prints the URL once listening, then serves until killed.
     const { open } = await import("@splicewright/web/server");
-    console.log(JSON.stringify(await open(dir, { port: Number(flags.port) })));
+    console.log(JSON.stringify(await open(dir, { port: Number(flags.port), onInit: agentFiles })));
     break;
   }
   case "mcp":

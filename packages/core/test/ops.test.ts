@@ -280,6 +280,37 @@ describe("ops", () => {
     expect(v().keyframes).toBeUndefined();
   });
 
+  it("masks: setProps validates them, keys need a mask and ride split and trim, keyed values override", () => {
+    const set = (p: Project, mask: unknown) => apply(p, "setProps", { itemId: "i_1", patch: { mask } }, ctx);
+    const base = { shape: "ellipse", x: 0.2, y: 0.2, w: 0.6, h: 0.6 };
+    expect(err(apply(fixture(), "setKeyframe", { itemId: "i_1", prop: "maskW", at: 0, value: 0.5 }, ctx))).toBe("invalid"); // no mask yet
+    for (const bad of [{ ...base, w: 0 }, { ...base, shape: "polygon" }, { ...base, points: [[0, 0], [1, 0], [1, 1]] }, { ...base, shape: "heart" }, { ...base, feather: 201 }, { ...base, radius: 0.1 }])
+      expect(err(set(fixture(), bad))).toBe("invalid");
+    let p = ok(set(fixture(), base));
+    p = ok(apply(p, "setProps", { itemId: "i_1", patch: { blend: "screen" } }, ctx));
+    ok(set(p, { shape: "polygon", x: 0, y: 0, w: 1, h: 1, points: [[0, 0], [1, 0], [1, 1]] }));
+    ok(set(p, { shape: "rect", x: -0.5, y: 0, w: 2, h: 1, radius: 0.5, feather: 200, invert: true }));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "maskW", at: 0, value: 0.2 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "maskW", at: 60, value: 1 }, ctx));
+    expect(err(apply(p, "setKeyframe", { itemId: "i_1", prop: "maskW", at: 30, value: 0 }, ctx))).toBe("invalid"); // w must stay > 0
+    expect(animate(p, item(p, "i_1"), 30).mask!.w).toBeCloseTo(0.6);
+    expect(item(p, "i_1").mask.w).toBe(0.6); // plain value untouched
+    const cut = ok(apply(p, "split", { itemId: "i_1", at: 30 }, ctx));
+    expect(item(cut, "i_3").mask).toEqual(base);
+    expect(animate(cut, item(cut, "i_3"), 30).mask!.w).toBeCloseTo(0.6); // same content, same value
+    const trimmed = ok(apply(p, "trim", { itemId: "i_1", edge: "start", to: 30 }, ctx));
+    expect(animate(trimmed, item(trimmed, "i_1"), item(trimmed, "i_1").start).mask!.w).toBeCloseTo(0.6); // its first frame is source 1 s
+    expect(validate(trimmed, p, ctx)).toEqual([]);
+    // removing the mask drops its keys, so a new mask isn't overridden by stale ones
+    const opacity = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 0, value: 0.5 }, ctx));
+    const off = ok(apply(opacity, "setProps", { itemId: "i_1", patch: { mask: null } }, ctx));
+    expect(Object.keys(item(off, "i_1").keyframes)).toEqual(["opacity"]);
+    const gone = ok(apply(p, "setProps", { itemId: "i_1", patch: { mask: null } }, ctx));
+    expect(item(gone, "i_1").keyframes).toBeUndefined();
+    const again = ok(set(gone, { ...base, w: 0.4 }));
+    expect(animate(again, item(again, "i_1"), 30).mask!.w).toBe(0.4);
+  });
+
   it("dissolve needs source past both sides of the cut; dip doesn't; split keeps it on the second half", () => {
     const tr = (kind: string) => ({ itemId: "i_1", patch: { transition: { kind, duration: 30 } } });
     const p = ok(apply(fixture(), "setProps", tr("dissolve"), ctx));

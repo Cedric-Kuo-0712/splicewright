@@ -1,4 +1,4 @@
-import { Transform, type Animatable, type Project, type VideoItem } from "./schema.ts";
+import { MASK_PROPS, Transform, type Animatable, type Project, type VideoItem } from "./schema.ts";
 import { secPerFrame, sourceAt } from "./validate.ts";
 
 type Keys = NonNullable<VideoItem["keyframes"]>;
@@ -17,13 +17,16 @@ export function valueAt(p: Project, item: VideoItem, prop: Animatable, f: number
   return a.v + (b.v - a.v) * u;
 }
 
-/** The item as it stands at frame `f`: keyed props resolved into transform, effects and volume. */
+/** The item as it stands at frame `f`: keyed props resolved into transform, effects, volume and mask. */
 export function animate(p: Project, item: VideoItem, f: number): VideoItem {
   if (!item.keyframes) return item;
   const out = { ...item, transform: { ...item.transform }, effects: { ...item.effects } } as VideoItem & { transform: Record<string, number>; effects: Record<string, number> };
   for (const k of Object.keys(item.keyframes) as Animatable[]) {
     const v = valueAt(p, item, k, f)!;
     if (k === "volume") out.volume = v;
+    else if (k in MASK_PROPS) {
+      if (out.mask) out.mask = { ...out.mask, [MASK_PROPS[k as keyof typeof MASK_PROPS]]: v };
+    }
     else if (k in Transform.shape) out.transform[k] = v;
     else out.effects[k] = v;
   }

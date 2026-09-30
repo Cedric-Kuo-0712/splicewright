@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ANIMATABLE, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
+import { ANIMATABLE, MASK_PROPS, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
 import { keyAt, withKey } from "./keyframes.ts";
 import { beatFrames, snap, snapPoints, snapSpan } from "./timing.ts";
 import { anchorOf, itemSpan, secPerFrame, sourceAt, validate, videoItems } from "./validate.ts";
@@ -55,10 +55,10 @@ const EXT_KIND: Record<string, "video" | "audio" | "image"> = {
 };
 
 const ITEM_PROPS: Record<TrackKind, string[]> = {
-  video: ["volume", "fit", "transform", "effects", "crop", "keyframes", "fadeIn", "fadeOut", "transition", "speed", "label", "note"],
+  video: ["volume", "fit", "transform", "effects", "crop", "mask", "blend", "keyframes", "fadeIn", "fadeOut", "transition", "speed", "label", "note"],
   audio: ["volume", "fadeIn", "fadeOut", "label", "note"],
   caption: ["label", "note"],
-  overlay: ["props", "label", "note"],
+  overlay: ["props", "mask", "blend", "label", "note"],
 };
 
 const TRACK_PROPS: Record<TrackKind, string[]> = {
@@ -411,9 +411,15 @@ export const ops: Record<string, OpDef<any>> = {
   ),
 
   setProps: def(
-    'Patch item fields: volume, fit, transform, effects {brightness, contrast, saturation, hue, blur, grayscale, sepia, invert}, crop {top, right, bottom, left} (fractions), keyframes (whole map; use setKeyframe to key one value), fadeIn, fadeOut, transition {kind: dissolve|dip|wipe, duration}, speed (video; speed here keeps duration, so the source range scales; setSpeed keeps the source range); volume, fadeIn, fadeOut (audio); props (overlay); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
+    'Patch item fields: volume, fit, transform, effects {brightness, contrast, saturation, hue, blur, grayscale, sepia, invert}, crop {top, right, bottom, left} (fractions), mask {shape: rect|ellipse|diamond|star|polygon, x, y, w, h (fractions of the fitted picture box, x,y = top-left, w,h > 0), radius (rect only, 0..0.5 of min(w,h)), points [[x,y],...] (polygon only, >= 3, fractions of the mask box), feather (px, 0..200), invert} (video and overlay; drawn after crop), blend (video and overlay: normal|multiply|screen|overlay|darken|lighten|difference), keyframes (whole map; use setKeyframe to key one value), fadeIn, fadeOut, transition {kind: dissolve|dip|wipe, duration}, speed (video; speed here keeps duration, so the source range scales; setSpeed keeps the source range); volume, fadeIn, fadeOut (audio); props (overlay); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
     const { track: t, item } = locate(p, a.itemId);
     patch(item as Record<string, unknown>, a.patch, ITEM_PROPS[t.kind], `${t.kind} item ${item.id}`);
+    const v = item as VideoItem;
+    if (a.patch.mask === null && v.keyframes) {
+      // keys of a removed mask would override the geometry of the next one
+      for (const k of Object.keys(MASK_PROPS)) delete v.keyframes[k as keyof typeof MASK_PROPS];
+      if (!Object.keys(v.keyframes).length) delete v.keyframes;
+    }
     return `updated ${item.id}: ${Object.keys(a.patch).join(", ")}`;
   }),
 
@@ -440,6 +446,7 @@ export const ops: Record<string, OpDef<any>> = {
       const { track: t, item } = locate(p, a.itemId);
       const v = item as VideoItem;
       if (t.kind !== "video" || !("assetId" in v)) fail("invalid", `${item.id} is not a video item`);
+      if (a.prop in MASK_PROPS && !v.mask) fail("invalid", `${v.id} has no mask to key ${a.prop} on; set one with setProps first`);
       if (a.at < v.start || a.at >= end(v)) fail("invalid", `frame ${a.at} is outside ${v.id} [${v.start}, ${end(v)})`);
       if (a.value === null && !keyAt(p, v, a.prop, a.at)) fail("invalid", `${v.id} has no ${a.prop} key at frame ${a.at}`);
       const kf = withKey(p, v, a.prop, a.at, a.value, a.ease);

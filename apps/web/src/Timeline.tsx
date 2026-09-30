@@ -100,6 +100,7 @@ export function Timeline() {
   useEffect(() => {
     const el = scroller.current!;
     const wheel = (e: WheelEvent) => {
+      if (e.altKey) return e.preventDefault(), (el.scrollLeft += e.deltaY || e.deltaX);
       if (!(e.metaKey || e.ctrlKey)) return;
       e.preventDefault();
       const ppf = app.get().pxPerFrame;

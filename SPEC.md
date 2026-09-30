@@ -219,6 +219,7 @@ The adapters (UI/CLI/MCP) only call ops and persist the result.
 | `closeGap` | trackId, at | Closes the empty span containing `at`; later non-anchored items shift left. |
 | `setProps` | itemId, patch | Whitelisted fields only (volume, fit, transform, effects, crop, mask, blend, keyframes, fades, transition, speed, props, label, note; mask and blend also on overlays). `speed` here keeps the duration. |
 | `setKeyframe` | itemId, prop, at, value \| null, ease? | Video only: key `prop` at timeline frame `at` (inside the item), replacing a key within half a frame; null removes it. |
+| `detachAudio` | itemId | Video clip only: audio item (same asset, start, duration, sourceIn, volume, fades) on the first audio track that is unlocked, unmuted, visible, at volume 1 and has room, else a new one; the video's `volume` becomes 0. Not linked afterwards. Refused for images, speed ≠ 1, volume keyframes, volume already 0, a muted or hidden video track. |
 | `setSpeed` | itemId, speed, ripple? | Video only: keeps the source range, scales the duration; ripple (default on magnetic) moves later items. |
 | `slip` | itemId, deltaSec | Changes `sourceIn` only; timeline position unchanged. |
 | `addTrack` / `removeTrack` / `setTrack` | … | Empty tracks are allowed (unlike OpenCut). |
@@ -304,7 +305,8 @@ Evolves from `video-cut/apps/editor`. Every mutation goes through core ops.
 - Proxy toggle uses **edit proxies** (smooth), not the 0.5 fps analysis proxies.
 - Server binds to `127.0.0.1` by default.
 - Keyboard: Space, ←/→ (±1 frame), Shift+←/→ (±10), J/K/L shuttle, Up/Down (previous/next edit),
-  S or Cmd+B split (plain `C` is not used, so Cmd+C stays copy), Delete / Shift+Delete (ripple),
+  Alt+←/→ (previous/next keyframe), S or Cmd+B split (plain `C` is not used, so Cmd+C stays copy), Delete / Shift+Delete (ripple),
+  Cmd+X (cut), Cmd+I (Import…), Alt+S (detach audio), X (range from selection), F (fullscreen preview),
   Shift+Up/Down (also beats and captions), Home/End, `[` / `]` (selected clip's start/end), Cmd+A (select all),
   Cmd+Z / Cmd+Shift+Z. The History button lists both stacks (`GET /api/history`); picking an entry sends
   `POST /api/undo|redo {steps, baseRevision}`. Every non-GET API request with a foreign `Origin` is refused.
@@ -455,7 +457,7 @@ explained, not hidden.
 | M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow | ✅ done (real-music F-measure: tool `ingest/beat_eval.py` ready; number pending a hand-tapped reference) |
 | M7 | New-project flow + aspect presets (§13.1) | `open` in an empty folder → form → project renders; recent list only opens listed paths | ✅ done (browser pass by hand; switch fallback path untested) |
 | M8 | Masks + blend modes (§13.2) | still-frame snapshots per shape, feather, invert; mask keyframes survive split/trim | ✅ done (pixel probes on an ellipse, an inverted feathered rect and blend; other shapes by `maskStyle` string tests; no player drag box; 90°/270° assets unrendered) |
-| M8.5 | Shortcuts from the CapCut comparison (§13.2a) | each new key has a menu or button showing it; `detachAudio` op tested (split/undo keep audio in sync) | planned |
+| M8.5 | Shortcuts from the CapCut comparison (§13.2a) | each new key has a menu or button showing it; `detachAudio` op tested (split/undo keep audio in sync) | ✅ done (keys verified by hand; detach is Alt+S, not CapCut's Cmd+Shift+S) |
 | M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | planned |
 | M10 | More transitions + PIP presets (§13.4) | still-frame snapshot mid-transition per kind; handles invariant (§4.4 #4) holds | planned |
 | M11 | Transcript cuts: fillers and silences (§13.5) | on `examples/`, one `batch` removes the listed words; anchored captions stay in sync | planned |
@@ -535,7 +537,7 @@ Cmd+N/Cmd+O are the browser's (the M7 form and Recent… cover them). Added:
 | X | Range from selection | I/O set to the selection's outer span; Alt+X still clears |
 | Alt+← / Alt+→ | Previous / next keyframe | on the selected item (else the item under the playhead); Cmd+← is the browser's Back on macOS |
 | Alt+wheel | Scroll the timeline horizontally | plain wheel stays vertical; Cmd+wheel still zooms |
-| Cmd+Shift+S | Detach audio | new op `detachAudio {itemId}`: an audio item on an audio track (new track if none has room) with the same asset, `start`, `duration`, `sourceIn`, `volume`, fades and volume keys (once M9 lands); the video item gets `volume: 0`. One undo step. Needs `speed` = 1 (refused otherwise, until audio items have speed). |
+| Alt+S | Detach audio | CapCut's Cmd+Shift+S is taken by the macOS screenshot shortcut, which a page can't intercept. New op `detachAudio {itemId}` (see §5). Volume keys move over once M9 gives audio items keyframes; until then they, and `speed` ≠ 1, are refused. |
 | F | Fullscreen preview | Player's fullscreen; Esc leaves. Not Cmd+F (browser find) |
 
 **Discoverability:** every action that has a key shows it where the action lives: context-menu entries through the

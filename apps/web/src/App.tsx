@@ -3,7 +3,7 @@ import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
 import { anchorOf, animate, ASPECTS, BLENDS, FPS_CHOICES, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, withKey, type Animatable, type AudioItem, type Item, type OverlayItem, type Project, type SnapPoint, type VideoItem } from "@splicewright/core";
 import { mediaBox, SplicewrightProject, type Props } from "@splicewright/render";
-import { addMarker, copy, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, tapBeat, upload, videoUnder } from "./edit.ts";
+import { addMarker, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
 import { app, dnd, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 
@@ -417,7 +417,7 @@ function MediaBin({ p }: { p: Project }) {
     >
       <h3>
         Media{" "}
-        <button onClick={() => input.current!.click()} title="Import files into raw/ (or drop them here or on the timeline)">
+        <button onClick={() => input.current!.click()} title={`Import files into raw/ (or drop them here or on the timeline) (${KEYS.import})`}>
           Import…
         </button>
         <input ref={input} type="file" multiple hidden accept="video/*,audio/*,image/*" onChange={(e) => (upload([...e.currentTarget.files!]), (e.currentTarget.value = ""))} />
@@ -820,6 +820,7 @@ function onKey(e: KeyboardEvent) {
   const handled = () => e.preventDefault();
 
   if (key === " ") return handled(), app.set({ rate: 1 }), player.ref?.toggle();
+  if (e.altKey && !mod && (key === "arrowleft" || key === "arrowright")) return handled(), stepKey(key === "arrowleft" ? -1 : 1);
   if (key === "arrowleft" || key === "arrowright") return handled(), player.ref?.pause(), seek(frame + (key === "arrowleft" ? -1 : 1) * (e.shiftKey ? 10 : 1));
   if (key === "arrowup" || key === "arrowdown") {
     handled();
@@ -854,6 +855,8 @@ function onKey(e: KeyboardEvent) {
   if (!mod && e.shiftKey && key === "c") return app.set({ cropping: !s.cropping });
   if (mod && key === "z") return handled(), history(e.shiftKey ? "redo" : "undo");
   if (mod && key === "c") return s.selection.length ? (handled(), copy()) : undefined;
+  if (mod && key === "x") return s.selection.length ? (handled(), cut()) : undefined;
+  if (mod && key === "i") return handled(), document.querySelector<HTMLInputElement>("input[type=file]")?.click();
   if (mod && key === "v") return handled(), paste(frame, e.shiftKey);
   if (mod && key === "d") return handled(), s.selection.length ? duplicate() : say("select items to duplicate", true);
   if ((!mod && key === "s") || (mod && key === "b")) return handled(), split([frame]);
@@ -865,12 +868,15 @@ function onKey(e: KeyboardEvent) {
   if (key === "escape") return app.set({ selection: [], gap: null, cropping: false });
   // Alt letters: match the physical key, since macOS turns Alt+X into "≈".
   if (e.altKey && e.code === "KeyX") return handled(), app.set({ io: { in: null, out: null } });
+  if (e.altKey && e.code === "KeyS") return handled(), detachAudio();
   if (e.altKey && e.code === "KeyM") {
     handled();
     const m = markerNear(frame, Math.max(1, Math.round(8 / s.pxPerFrame)));
     return m ? op("removeMarker", { markerId: m.id }) : say("no marker at the playhead", true);
   }
   if (e.altKey && (e.code === "Comma" || e.code === "Period")) return handled(), slipBy((e.code === "Comma" ? -1 : 1) * (e.shiftKey ? 10 : 1));
+  if (!mod && !e.altKey && key === "x") return handled(), rangeFromSelection();
+  if (!mod && !e.altKey && !e.shiftKey && key === "f") return handled(), player.ref?.requestFullscreen();
   if (!mod && key === "i") return setIO("in", frame);
   if (!mod && key === "o") return setIO("out", frame);
   if (!mod && key === "/") return handled(), s.looping ? player.ref?.pause() : loopRange();

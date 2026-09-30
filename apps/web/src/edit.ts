@@ -1,4 +1,4 @@
-import { anchorOf, durationFrames, itemSpan, nextId, secPerFrame, type Item, type Project, type Track, type TrackKind, type VideoItem } from "@splicewright/core";
+import { anchorOf, durationFrames, frameOf, itemSpan, nextId, secPerFrame, type Item, type Project, type Track, type TrackKind, type VideoItem } from "@splicewright/core";
 import { app, history, ioRange, op, player, playhead, refresh, say, seek, type MenuEntry } from "./store.ts";
 
 // Editing commands shared by the keyboard, the toolbar, and the context menus. Multi-op edits go out
@@ -24,6 +24,10 @@ function idMaker(p: Project) {
 
 const prefixOf = (t: Track) => (t.kind === "caption" ? "c" : "i");
 const end = (s: { start: number; duration: number }) => s.start + s.duration;
+
+const MOD = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
+/** Labels of the M8.5 keys, shown in menus and tooltips; App.tsx's onKey handles the same keys. */
+export const KEYS = { cut: `${MOD}X`, import: `${MOD}I`, detach: "⌥S", prevKey: "⌥←", nextKey: "⌥→", range: "X", fullscreen: "F" };
 
 // ---- cut, lift, extract ----
 
@@ -79,6 +83,39 @@ export function rippleDelete(ripple: boolean) {
   if (r) return cutRange(r, ripple);
 }
 
+/** X: I/O becomes the outer span of the selection ([in, out), like the range everywhere else). */
+export function rangeFromSelection() {
+  const { project, selection } = app.get();
+  const spans = selection.flatMap((id) => {
+    const f = findItem(project!, id);
+    const s = f && itemSpan(project!, f.item);
+    return s ? [s] : [];
+  });
+  if (!spans.length) return say("select items to take the range from", true);
+  app.set({ io: { in: Math.min(...spans.map((s) => s.start)), out: Math.max(...spans.map(end)) } });
+}
+
+/** Alt+S: detachAudio on every selected video clip, one undo step. */
+export function detachAudio() {
+  const { project: p, selection } = app.get();
+  const ops = selection.filter((id) => findItem(p!, id)?.track.kind === "video").map((itemId) => ({ op: "detachAudio", args: { itemId } }));
+  return ops.length ? send(ops) : say("select a video clip to detach its audio", true);
+}
+
+/** Alt+←/→: the playhead goes to the previous/next key of the selected clip, else the clip under it. */
+export function stepKey(dir: -1 | 1) {
+  const p = app.get().project!;
+  const frame = playhead.get().frame;
+  const sel = app.get().selection[0];
+  const it = (sel ? findItem(p, sel)?.item : videoUnder(p, frame)) as VideoItem | undefined;
+  // Keys outside the trimmed span are invisible (no ◆), so they don't count.
+  const keyed = Object.values(it?.keyframes ?? {})
+    .flatMap((ks) => ks.map((k) => Math.round(frameOf(p, it!, k.t))))
+    .filter((f) => f >= it!.start && f < end(it!));
+  const to = dir < 0 ? keyed.filter((f) => f < frame).sort((a, b) => b - a)[0] : keyed.filter((f) => f > frame).sort((a, b) => a - b)[0];
+  return to !== undefined ? seek(to) : say(`no ${dir < 0 ? "previous" : "next"} keyframe`, true);
+}
+
 // ---- copy, paste, duplicate ----
 
 interface Clip {
@@ -104,6 +141,12 @@ export function copy() {
   const { project, selection } = app.get();
   clipboard = clips(project!, selection);
   say(`copied ${clipboard.length} item${clipboard.length === 1 ? "" : "s"}`);
+}
+
+/** Cmd+X: copy, then delete the selection (a single delete op, so one undo step). */
+export function cut() {
+  copy();
+  return rippleDelete(false);
 }
 
 export const paste = (at = playhead.get().frame, insert = false) => place(clipboard, at, insert);
@@ -446,19 +489,19 @@ export function openMenu(e: { clientX: number; clientY: number; preventDefault()
   app.set({ menu: { x: e.clientX, y: e.clientY, entries } });
 }
 
-const MOD = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
-
 export function itemMenu(p: Project, t: Track, item: Item, frame: number): MenuEntry[] {
   const span = itemSpan(p, item);
   const inside = !!span && frame > span.start && frame < end(span);
   const anchor = anchorOf(item);
   const out: MenuEntry[] = [
     { label: "Split here", hint: "S", run: () => split([frame]), disabled: !inside || !!anchor || t.locked },
+    { label: "Cut", hint: KEYS.cut, run: cut, disabled: t.locked },
     { label: "Copy", hint: `${MOD}C`, run: copy },
     { label: "Duplicate", hint: `${MOD}D`, run: duplicate },
     { label: "Delete", hint: "⌫", run: () => rippleDelete(false), disabled: t.locked },
     { label: "Ripple delete", hint: "⇧⌫", run: () => rippleDelete(true), disabled: t.locked },
     { label: "Add marker around selection", hint: "⇧M", run: markerAroundSelection },
+    { label: "Range from selection", hint: KEYS.range, run: rangeFromSelection },
   ];
   if (t.kind === "video" && "assetId" in item) {
     out.push("-", { label: "Captions from transcript", run: () => op("addCaptionsFromTranscript", { itemId: item.id }) });
@@ -466,7 +509,9 @@ export function itemMenu(p: Project, t: Track, item: Item, frame: number): MenuE
     if (p.assets[item.assetId]?.kind === "video") {
       out.push({ label: "Freeze frame here (2 s)", hint: "⇧F", run: () => freezeFrame(frame), disabled: !inside || t.locked });
       out.push({ label: `Speed… (${(item as VideoItem).speed ?? 1}×)`, run: () => setSpeed(item as VideoItem), disabled: t.locked });
+      out.push({ label: "Detach audio", hint: KEYS.detach, run: detachAudio, disabled: t.locked });
     }
+    if ("keyframes" in item && item.keyframes) out.push({ label: "Previous keyframe", hint: KEYS.prevKey, run: () => stepKey(-1) }, { label: "Next keyframe", hint: KEYS.nextKey, run: () => stepKey(1) });
     out.push("-", ...transitionEntries(p, t, item as VideoItem));
     if (p.assets[item.assetId]?.kind !== "image") out.push({ label: "Slip…", hint: "⌥drag, ⌥, ⌥.", run: () => say("hold Alt and drag the item, or press Alt+, / Alt+. to slip a frame") });
   }
@@ -494,6 +539,7 @@ export function itemMenu(p: Project, t: Track, item: Item, frame: number): MenuE
 
 export function laneMenu(t: Track, frame: number, gap: boolean): MenuEntry[] {
   return [
+    { label: "Fullscreen preview", hint: KEYS.fullscreen, run: () => player.ref?.requestFullscreen() },
     { label: "Paste here", hint: `${MOD}V`, run: () => paste(frame), disabled: !clipboard.length },
     { label: "Close gap", hint: "⌫", run: () => op("closeGap", { trackId: t.id, at: frame }), disabled: !gap },
     { label: "Remove all gaps on track", run: () => removeGaps(t), disabled: t.locked },

@@ -335,4 +335,53 @@ describe("ops", () => {
     const bad = apply(p, "batch", { ops: [{ op: "split", args: { itemId: "i_1", at: 10 } }, { op: "split", args: { itemId: "nope", at: 1 } }] }, ctx);
     expect(err(bad)).toBe("not_found");
   });
+
+  it("detachAudio copies the sound to a new or existing audio track and silences the video, in one revision", () => {
+    let p = ok(apply(fixture(), "setProps", { itemId: "i_1", patch: { volume: 0.8, fadeIn: 5, fadeOut: 10 } }, ctx));
+    const a = ok(apply(p, "detachAudio", { itemId: "i_1" }, ctx));
+    expect(a.revision).toBe(p.revision + 1);
+    const t = a.tracks.find((x) => x.kind === "audio")!;
+    expect(t.items).toEqual([{ id: "i_3", start: 0, duration: 90, assetId: "a_clip", sourceIn: 0, volume: 0.8, fadeIn: 5, fadeOut: 10 }]);
+    expect(item(a, "i_1").volume).toBe(0);
+    expect(validate(a, p, ctx)).toEqual([]);
+    // the second detach reuses the audio track: i_2 starts where i_1's audio ends
+    const b = ok(apply(a, "detachAudio", { itemId: "i_2" }, ctx));
+    expect(b.tracks.filter((x) => x.kind === "audio")).toHaveLength(1);
+    expect(item(b, "i_4")).toMatchObject({ start: 90, sourceIn: 5, duration: 60 });
+    // a split of the video leaves the audio alone
+    const s = ok(apply(a, "split", { itemId: "i_1", at: 30 }, ctx));
+    expect(item(s, "i_3")).toMatchObject({ start: 0, duration: 90 });
+    // occupied audio track: a new one is added
+    p = ok(apply(a, "insertItem", { assetId: "a_song", at: 0, duration: 200 }, ctx));
+    const c = ok(apply(p, "detachAudio", { itemId: "i_2" }, ctx));
+    expect(c.tracks.filter((x) => x.kind === "audio")).toHaveLength(2);
+  });
+
+  it("detachAudio skips audio tracks that would change the sound and refuses a muted or hidden video track", () => {
+    const base = ok(apply(fixture(), "addTrack", { kind: "audio" }));
+    const a1 = base.tracks.find((t) => t.kind === "audio")!.id;
+    for (const patch of [{ volume: 0.3 }, { muted: true }, { hidden: true }]) {
+      const p = ok(apply(base, "setTrack", { trackId: a1, patch }, ctx));
+      const d = ok(apply(p, "detachAudio", { itemId: "i_1" }, ctx));
+      expect(items(d, a1)).toHaveLength(0);
+      expect(d.tracks.filter((t) => t.kind === "audio")).toHaveLength(2);
+    }
+    for (const patch of [{ muted: true }, { hidden: true }]) {
+      const p = ok(apply(base, "setTrack", { trackId: "t_1", patch }, ctx));
+      expect(err(apply(p, "detachAudio", { itemId: "i_1" }, ctx))).toBe("invalid");
+    }
+  });
+
+  it("detachAudio refuses images, speed ≠ 1, volume keys and silent items", () => {
+    const p = fixture();
+    const silent = ok(apply(p, "setProps", { itemId: "i_1", patch: { volume: 0 } }, ctx));
+    expect(err(apply(silent, "detachAudio", { itemId: "i_1" }, ctx))).toBe("invalid");
+    const fast = ok(apply(p, "setSpeed", { itemId: "i_1", speed: 2 }, ctx));
+    expect(err(apply(fast, "detachAudio", { itemId: "i_1" }, ctx))).toBe("invalid");
+    const keyed = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "volume", at: 0, value: 0.5 }, ctx));
+    expect(err(apply(keyed, "detachAudio", { itemId: "i_1" }, ctx))).toBe("invalid");
+    let img = ok(apply(p, "importAsset", { path: "raw/photo.jpg" }, ctx));
+    img = ok(apply(img, "insertItem", { assetId: "a_photo", at: 150, duration: 30 }, ctx));
+    expect(err(apply(img, "detachAudio", { itemId: "i_3" }, ctx))).toBe("invalid");
+  });
 });

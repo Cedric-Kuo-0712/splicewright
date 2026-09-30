@@ -27,7 +27,9 @@ Op names below are the `splicewright_<op>` tools.
    tracks above. Cut talking heads from transcript times; remove dead air and retakes.
 5. **Refine** only where it earns it: `trim`/`slip` for timing, `setProps` transition on cuts that need one, `setSpeed`,
    `effects`/`crop`/`transform` to match shots or reframe, `setKeyframe` for moves and fades over time (e.g. a slow
-   push-in: scale keys at the start and end of a clip).
+   push-in: scale keys at the start and end of a clip); `setProps` `mask` + `transform` scale for a circle
+   picture-in-picture (ellipse mask), `blend` (screen, multiply…) for light leaks and overlays; `detachAudio` for
+   J/L-cuts (detach, then trim the audio separately).
 6. **Sound.** Music on an audio track with `volume` and fades; `detectBeats` then `fitToBeats` to cut a montage on
    the beat.
 7. **Captions.** `addCaptionsFromTranscript`, then `editCaption` for names and mishearings.

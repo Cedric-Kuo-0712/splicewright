@@ -443,7 +443,7 @@ export const ops: Record<string, OpDef<any>> = {
   ),
 
   setKeyframe: def(
-    `Key a video item's ${ANIMATABLE.join(", ")} to \`value\` at timeline frame \`at\` (inside the item), replacing a key on that frame; value null removes it. Once a prop has keys they override its plain value; removing the last key restores it. Keys ride with the source, so split, trim, slip and speed keep them on the same content.`,
+    `Key a video item's ${ANIMATABLE.join(", ")} to \`value\` at timeline frame \`at\` (inside the item), replacing a key on that frame; value null removes it. Once a prop has keys they override its plain value; removing the last key restores it. Mask props (maskX, maskY, maskW, maskH, maskFeather) need a mask set first. Keys ride with the source, so split, trim, slip and speed keep them on the same content.`,
     z.object({ itemId: Id, prop: z.enum(ANIMATABLE), at: z.number().int(), value: z.number().nullable(), ease: z.enum(["linear", "ease"]).optional() }),
     (p, a) => {
       const { track: t, item } = locate(p, a.itemId);
@@ -456,6 +456,35 @@ export const ops: Record<string, OpDef<any>> = {
       if (kf) v.keyframes = kf;
       else delete v.keyframes;
       return a.value === null ? `removed ${a.prop} key on ${v.id} at ${a.at}` : `keyed ${v.id} ${a.prop} = ${a.value} at ${a.at}`;
+    },
+  ),
+
+  detachAudio: def(
+    "Split a video item's sound off onto an audio track: an audio item with the same asset, start, duration, sourceIn, volume, fadeIn and fadeOut goes on the first unlocked audio track with room (else a new one), and the video item's volume becomes 0. One undo step. The two items are not linked afterwards, so trimming, moving or splitting one leaves the other alone; that is what makes J/L-cuts: detach, then trim the audio separately. Transitions and fades on the video item keep affecting its picture only (a dissolve's audio crossfade is lost), so fade the audio item instead. Only unlocked, unmuted, visible audio tracks at volume 1 are reused. Refused when the video track is muted or hidden, and for images, for speed ≠ 1 (audio items have no speed) and for items with volume keyframes (audio items cannot be keyed yet).",
+    z.object({ itemId: Id }),
+    (p, a) => {
+      const { track: t, item } = locate(p, a.itemId);
+      const v = item as VideoItem;
+      if (t.kind !== "video" || !("assetId" in v) || p.assets[v.assetId]?.kind !== "video") fail("invalid", `${item.id} is not a video clip with sound`);
+      if ((v.speed ?? 1) !== 1) fail("invalid", `${v.id} plays at ${v.speed}×; audio items have no speed yet, set it back to 1 first`);
+      if (v.keyframes?.volume) fail("invalid", `${v.id} has volume keyframes; audio items can only be keyed from M9, remove them first`);
+      if (v.volume === 0) fail("invalid", `${v.id} is already silent; nothing to detach`);
+      const audio: AudioItem = {
+        id: newId(p, "i"),
+        start: v.start,
+        duration: v.duration,
+        assetId: v.assetId,
+        sourceIn: v.sourceIn,
+        ...(v.volume !== undefined && { volume: v.volume }),
+        ...(v.fadeIn && { fadeIn: v.fadeIn }),
+        ...(v.fadeOut && { fadeOut: v.fadeOut }),
+      };
+      if (t.muted || t.hidden) fail("invalid", `track ${t.id} is ${t.muted ? "muted" : "hidden"}; unmute/show it first or delete the audio instead`);
+      // Only plain tracks: a track volume, mute or hide would change how the dialogue sounds.
+      const to = p.tracks.find((x) => x.kind === "audio" && !x.locked && !x.muted && !x.hidden && (x.volume ?? 1) === 1 && fits(x, v.start, v.duration)) ?? addTrack(p, "audio");
+      (to.items as Item[]).push(audio);
+      v.volume = 0;
+      return `detached ${v.id} audio to ${audio.id} on ${to.id}`;
     },
   ),
 

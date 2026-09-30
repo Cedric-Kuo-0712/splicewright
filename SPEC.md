@@ -318,6 +318,8 @@ Evolves from `video-cut/apps/editor`. Every mutation goes through core ops.
   - Right-click menus on items, lanes, ruler, markers and track headers.
   - Import… button, or drop files on the bin or timeline: `POST /api/import?name=` streams into `raw/`
     (same-origin only, empty bodies refused, duplicate content resolves to the existing asset), probes, then ingests in the background.
+    HEIC/HEIF photos (which Chrome can't decode) are converted to a JPEG beside the original in `raw/` by ffmpeg, here and in
+    `splicewright import`; `importAsset` alone refuses them, so an agent is told to import them through the CLI.
   - Tracks: double-click to rename, magnet toggle, drag the header to reorder, +V/+A/+C/+O row; dropping media below the tracks makes a new one.
   - Markers: M adds, Alt+M removes the one at the playhead, click jumps, double-click renames; Up/Down also stop at markers.
   - Alt-drag a video item's body slips it (the player shows the new first frame; stops at the source edges); Alt+, / Alt+. slip one frame.
@@ -453,6 +455,7 @@ explained, not hidden.
 | M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow | ✅ done (real-music F-measure: tool `ingest/beat_eval.py` ready; number pending a hand-tapped reference) |
 | M7 | New-project flow + aspect presets (§13.1) | `open` in an empty folder → form → project renders; recent list only opens listed paths | ✅ done (browser pass by hand; switch fallback path untested) |
 | M8 | Masks + blend modes (§13.2) | still-frame snapshots per shape, feather, invert; mask keyframes survive split/trim | ✅ done (pixel probes on an ellipse, an inverted feathered rect and blend; other shapes by `maskStyle` string tests; no player drag box; 90°/270° assets unrendered) |
+| M8.5 | Shortcuts from the CapCut comparison (§13.2a) | each new key has a menu or button showing it; `detachAudio` op tested (split/undo keep audio in sync) | planned |
 | M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | planned |
 | M10 | More transitions + PIP presets (§13.4) | still-frame snapshot mid-transition per kind; handles invariant (§4.4 #4) holds | planned |
 | M11 | Transcript cuts: fillers and silences (§13.5) | on `examples/`, one `batch` removes the listed words; anchored captions stay in sync | planned |
@@ -519,6 +522,28 @@ against the whole frame (they have no picture).
 - Reference: OpenCut classic `apps/web/src/masks/` (builtin shapes, `feather.ts`, freeform path,
   `toggle-mask-inverted.ts`) and `rust/crates/compositor/src/blend_mode.rs`.
 - Not included: chroma key and luma key (need per-pixel canvas/WebGL; see Later).
+
+### 13.2a M8.5 — Shortcuts (from a CapCut/剪映 comparison)
+Most of CapCut's editing keys already exist (§7.3). Deliberate differences stay: Cmd+D duplicates (Esc deselects),
+S splits, no tool modes (A/B/V/C/H/Z), `+`/`-` zoom (Cmd+= zooms the browser page), no Cmd+S (every op is saved),
+Cmd+N/Cmd+O are the browser's (the M7 form and Recent… cover them). Added:
+
+| Key | Action | Notes |
+|---|---|---|
+| Cmd+X | Cut | copy, then delete, as ONE undo step (a `batch`) |
+| Cmd+I | Import… | opens the existing file picker |
+| X | Range from selection | I/O set to the selection's outer span; Alt+X still clears |
+| Alt+← / Alt+→ | Previous / next keyframe | on the selected item (else the item under the playhead); Cmd+← is the browser's Back on macOS |
+| Alt+wheel | Scroll the timeline horizontally | plain wheel stays vertical; Cmd+wheel still zooms |
+| Cmd+Shift+S | Detach audio | new op `detachAudio {itemId}`: an audio item on an audio track (new track if none has room) with the same asset, `start`, `duration`, `sourceIn`, `volume`, fades and volume keys (once M9 lands); the video item gets `volume: 0`. One undo step. Needs `speed` = 1 (refused otherwise, until audio items have speed). |
+| F | Fullscreen preview | Player's fullscreen; Esc leaves. Not Cmd+F (browser find) |
+
+**Discoverability:** every action that has a key shows it where the action lives: context-menu entries through the
+existing `hint` field (`edit.ts`, rendered as `<kbd>`), toolbar and inspector buttons in their `title` tooltip
+(e.g. `Import… (⌘I)`). New menu entries: Cut, Detach audio, Previous/Next keyframe (item menu); Range from selection (lane menu).
+The key and its label come from one place per action so they can't drift apart.
+Not added: export (Cmd+E, needs a render-from-server job), group/ungroup (Cmd+G, §13.6), hide one clip (V, schema),
+batch split and linkage toggle (behaviour not pinned down).
 
 ### 13.3 M9 — Audio: item keyframes, loudness, master limiter
 Already built: item volume, fades, ducking, volume keyframes on video items.

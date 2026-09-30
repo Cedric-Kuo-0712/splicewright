@@ -443,12 +443,13 @@ export const ops: Record<string, OpDef<any>> = {
   ),
 
   setKeyframe: def(
-    `Key a video item's ${ANIMATABLE.join(", ")} to \`value\` at timeline frame \`at\` (inside the item), replacing a key on that frame; value null removes it. Once a prop has keys they override its plain value; removing the last key restores it. Mask props (maskX, maskY, maskW, maskH, maskFeather) need a mask set first. Keys ride with the source, so split, trim, slip and speed keep them on the same content.`,
+    `Key a video item's ${ANIMATABLE.join(", ")} (an audio item's volume only, for manual ducking) to \`value\` at timeline frame \`at\` (inside the item), replacing a key on that frame; value null removes it. Once a prop has keys they override its plain value; removing the last key restores it. Mask props (maskX, maskY, maskW, maskH, maskFeather) need a mask set first. Keys ride with the source, so split, trim, slip and speed keep them on the same content.`,
     z.object({ itemId: Id, prop: z.enum(ANIMATABLE), at: z.number().int(), value: z.number().nullable(), ease: z.enum(["linear", "ease"]).optional() }),
     (p, a) => {
       const { track: t, item } = locate(p, a.itemId);
       const v = item as VideoItem;
-      if (t.kind !== "video" || !("assetId" in v)) fail("invalid", `${item.id} is not a video item`);
+      if (!["video", "audio"].includes(t.kind) || !("assetId" in v)) fail("invalid", `${item.id} is not a video or audio item`);
+      if (t.kind === "audio" && a.prop !== "volume") fail("invalid", `${v.id} is an audio item; only volume can be keyed, not ${a.prop}`);
       if (a.prop in MASK_PROPS && !v.mask) fail("invalid", `${v.id} has no mask to key ${a.prop} on; set one with setProps first`);
       if (a.at < v.start || a.at >= end(v)) fail("invalid", `frame ${a.at} is outside ${v.id} [${v.start}, ${end(v)})`);
       if (a.value === null && !keyAt(p, v, a.prop, a.at)) fail("invalid", `${v.id} has no ${a.prop} key at frame ${a.at}`);
@@ -460,14 +461,13 @@ export const ops: Record<string, OpDef<any>> = {
   ),
 
   detachAudio: def(
-    "Split a video item's sound off onto an audio track: an audio item with the same asset, start, duration, sourceIn, volume, fadeIn and fadeOut goes on the first unlocked audio track with room (else a new one), and the video item's volume becomes 0. One undo step. The two items are not linked afterwards, so trimming, moving or splitting one leaves the other alone; that is what makes J/L-cuts: detach, then trim the audio separately. Transitions and fades on the video item keep affecting its picture only (a dissolve's audio crossfade is lost), so fade the audio item instead. Only unlocked, unmuted, visible audio tracks at volume 1 are reused. Refused when the video track is muted or hidden, and for images, for speed ≠ 1 (audio items have no speed) and for items with volume keyframes (audio items cannot be keyed yet).",
+    "Split a video item's sound off onto an audio track: an audio item with the same asset, start, duration, sourceIn, volume, fadeIn and fadeOut goes on the first unlocked audio track with room (else a new one), and the video item's volume becomes 0. One undo step. The two items are not linked afterwards, so trimming, moving or splitting one leaves the other alone; that is what makes J/L-cuts: detach, then trim the audio separately. Transitions and fades on the video item keep affecting its picture only (a dissolve's audio crossfade is lost), so fade the audio item instead. Only unlocked, unmuted, visible audio tracks at volume 1 are reused. Refused when the video track is muted or hidden, and for images, for speed ≠ 1 (audio items have no speed). Volume keyframes move to the audio item as they are (they are in source time).",
     z.object({ itemId: Id }),
     (p, a) => {
       const { track: t, item } = locate(p, a.itemId);
       const v = item as VideoItem;
       if (t.kind !== "video" || !("assetId" in v) || p.assets[v.assetId]?.kind !== "video") fail("invalid", `${item.id} is not a video clip with sound`);
       if ((v.speed ?? 1) !== 1) fail("invalid", `${v.id} plays at ${v.speed}×; audio items have no speed yet, set it back to 1 first`);
-      if (v.keyframes?.volume) fail("invalid", `${v.id} has volume keyframes; audio items can only be keyed from M9, remove them first`);
       if (v.volume === 0) fail("invalid", `${v.id} is already silent; nothing to detach`);
       const audio: AudioItem = {
         id: newId(p, "i"),
@@ -476,6 +476,7 @@ export const ops: Record<string, OpDef<any>> = {
         assetId: v.assetId,
         sourceIn: v.sourceIn,
         ...(v.volume !== undefined && { volume: v.volume }),
+        ...(v.keyframes?.volume && { keyframes: { volume: v.keyframes.volume } }),
         ...(v.fadeIn && { fadeIn: v.fadeIn }),
         ...(v.fadeOut && { fadeOut: v.fadeOut }),
       };
@@ -484,7 +485,32 @@ export const ops: Record<string, OpDef<any>> = {
       const to = p.tracks.find((x) => x.kind === "audio" && !x.locked && !x.muted && !x.hidden && (x.volume ?? 1) === 1 && fits(x, v.start, v.duration)) ?? addTrack(p, "audio");
       (to.items as Item[]).push(audio);
       v.volume = 0;
+      if (v.keyframes?.volume) {
+        delete v.keyframes.volume;
+        if (!Object.keys(v.keyframes).length) delete v.keyframes;
+      }
       return `detached ${v.id} audio to ${audio.id} on ${to.id}`;
+    },
+  ),
+
+  normalizeLoudness: def(
+    "Set each audio or video item's `volume` so its asset plays at `target` LUFS (default -14): volume = 10^((target - L) / 20), where L is the asset's integrated loudness from the `loudness` ingest step, clamped to 0..2 (so a very quiet asset may stay below target). It measures whole assets, not the trimmed range, and ignores track volume, fades and ducking. Run it before mixing dialogue and music so their levels start comparable. Items at volume 0 (e.g. the video after detachAudio) are skipped and reported in the summary, so passing every item is safe. All or nothing, one undo step. Refused for items whose asset has no loudness yet (run `splicewright ingest --only loudness`; silent assets have none) and for items with volume keyframes (remove them first).",
+    z.object({ itemIds: z.array(Id).min(1), target: z.number().min(-70).max(0).default(-14) }),
+    (p, a, ctx) => {
+      let silent = 0;
+      for (const id of a.itemIds) {
+        const { track: t, item } = locate(p, id);
+        if (!["video", "audio"].includes(t.kind) || !("assetId" in item)) fail("invalid", `${id} is not an audio or video item`);
+        if (item.volume === 0) {
+          silent++; // deliberately silenced, e.g. the video after detachAudio; raising it would double the sound
+          continue;
+        }
+        const l = ctx.loudness?.[item.assetId];
+        if (l === undefined) fail("not_found", `no loudness for ${item.assetId}; run splicewright ingest --only loudness`);
+        if (item.keyframes?.volume) fail("invalid", `${id} has volume keyframes; remove them before normalizing`);
+        item.volume = Math.min(2, Math.max(0, 10 ** ((a.target - l) / 20)));
+      }
+      return `normalized ${a.itemIds.length - silent} items to ${a.target} LUFS` + (silent ? `; skipped ${silent} silent (volume 0)` : "");
     },
   ),
 

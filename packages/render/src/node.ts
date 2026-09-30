@@ -1,12 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
 import { renderMedia, renderStill, selectComposition } from "@remotion/renderer";
 import { load, loadCtx, readAssets, sizesOf } from "@splicewright/core/node";
-import { grid, scratch, spread } from "@splicewright/ingest";
+import type { Project } from "@splicewright/core";
+import { ffmpeg, grid, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
 import { duckRanges } from "./duck.ts";
 
@@ -113,6 +114,22 @@ export interface RenderOptions {
   onProgress?: (progress: number) => void;
 }
 
+/**
+ * Master limiter: re-muxes `file` in place with ffmpeg's alimiter at −1 dBFS, video untouched.
+ * `level=disabled`: alimiter's default auto-level would scale the peak back up to 0 dBFS.
+ * ponytail: the preview has no limiter (Remotion's <Audio> exposes a volume curve, not a node graph), so
+ * it can differ from the render on peaks above −1 dBFS; add a Web Audio DynamicsCompressor there if that matters.
+ */
+export async function limit(file: string) {
+  const tmp = `${file}.limited${extname(file)}`;
+  try {
+    await ffmpeg(["-i", file, "-c:v", "copy", "-c:a", "aac", "-b:a", "320k", "-af", "alimiter=limit=0.891:attack=1:release=120:level=disabled", tmp]);
+    renameSync(tmp, file);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
 export async function render(dir: string, { output, preset = "master", range, onProgress }: RenderOptions) {
   const { composition, ...opts } = await prepare(dir);
   const presets = { ...BUILTIN, ...(composition.props.presets as Record<string, Preset> | undefined) };
@@ -127,6 +144,7 @@ export async function render(dir: string, { output, preset = "master", range, on
     onProgress: ({ progress }) => onProgress?.(progress),
     ...presets[preset],
   });
+  if ((composition.props.project as Project).meta.limiter) await limit(output);
   return { output, frames: range ? range[1] - range[0] : composition.durationInFrames, preset };
 }
 

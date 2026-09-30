@@ -138,6 +138,8 @@ export const AudioItem = z.object({
   assetId: Id,
   sourceIn: Seconds.min(0),
   volume: z.number().min(0).optional(),
+  /** `volume` only; source seconds like video keys. */
+  keyframes: Keyframes.refine((k) => Object.keys(k).every((p) => p === "volume"), { message: "audio items can only key volume" }).optional(),
   fadeIn: Frames.min(0).optional(),
   fadeOut: Frames.min(0).optional(),
   duck: z.object({ under: z.array(Id), level: z.number().min(0).max(1) }).optional(),
@@ -195,6 +197,8 @@ export const Project = z.object({
     width: z.number().int().positive(),
     height: z.number().int().positive(),
     background: z.string().optional(),
+    /** Render-only master limiter at −1 dBFS; the preview is unlimited. */
+    limiter: z.boolean().optional(),
   }),
   assets: z.record(Id, Asset),
   tracks: z.array(Track),
@@ -227,6 +231,8 @@ export interface Ctx {
   fingerprints?: Record<string, string>;
   /** Live fingerprint of a project-relative file; undefined if it doesn't exist. */
   fingerprint?: (path: string) => string | undefined;
+  /** Integrated loudness in LUFS from the `loudness` ingest step, by asset id. */
+  loudness?: Record<string, number>;
 }
 
 export interface BeatAnalysis {

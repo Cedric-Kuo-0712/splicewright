@@ -372,14 +372,74 @@ describe("ops", () => {
     }
   });
 
-  it("detachAudio refuses images, speed ≠ 1, volume keys and silent items", () => {
+  it("detachAudio moves volume keys to the audio item", () => {
+    let p = ok(apply(fixture(), "setKeyframe", { itemId: "i_1", prop: "volume", at: 30, value: 0.5 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "brightness", at: 30, value: 1.2 }, ctx));
+    const d = ok(apply(p, "detachAudio", { itemId: "i_1" }, ctx));
+    expect(item(d, "i_3").keyframes).toEqual({ volume: [{ t: 1, v: 0.5 }] });
+    expect(item(d, "i_1").keyframes).toEqual({ brightness: [{ t: 1, v: 1.2 }] });
+    expect(validate(d, p, ctx)).toEqual([]);
+  });
+
+  /** i_3: a_song on the audio track, frames [0, 200), keyed 1 → 0.2 between frames 30 and 90. */
+  function keyed() {
+    let p = ok(apply(fixture(), "insertItem", { assetId: "a_song", at: 0, duration: 200 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_3", prop: "volume", at: 30, value: 1 }, ctx));
+    return ok(apply(p, "setKeyframe", { itemId: "i_3", prop: "volume", at: 90, value: 0.2 }, ctx));
+  }
+
+  it("keys an audio item's volume only, and interpolates in source time", () => {
+    const p = keyed();
+    expect(item(p, "i_3").keyframes.volume).toEqual([{ t: 1, v: 1 }, { t: 3, v: 0.2 }]);
+    expect(valueAt(p, item(p, "i_3"), "volume", 60)).toBeCloseTo(0.6);
+    expect(err(apply(p, "setKeyframe", { itemId: "i_3", prop: "brightness", at: 30, value: 1 }, ctx))).toBe("invalid");
+    expect(err(apply(p, "setProps", { itemId: "i_3", patch: { keyframes: { blur: [{ t: 0, v: 1 }] } } }, ctx))).toBe("invalid");
+    const off = ok(apply(p, "setKeyframe", { itemId: "i_3", prop: "volume", at: 30, value: null }, ctx));
+    expect(item(off, "i_3").keyframes.volume).toHaveLength(1);
+  });
+
+  it("split, trim and slip keep audio keys on the same source content", () => {
+    const p = keyed();
+    const s = ok(apply(p, "split", { itemId: "i_3", at: 100 }, ctx));
+    expect(item(s, "i_3").keyframes).toEqual(item(p, "i_3").keyframes);
+    expect(item(s, "i_4").keyframes).toEqual(item(p, "i_3").keyframes);
+    expect(valueAt(s, item(s, "i_4"), "volume", 100)).toBe(0.2); // held past the last key
+    const t = ok(apply(p, "trim", { itemId: "i_3", edge: "start", to: 60 }, ctx));
+    expect(item(t, "i_3")).toMatchObject({ sourceIn: 2, keyframes: item(p, "i_3").keyframes });
+    expect(valueAt(t, item(t, "i_3"), "volume", 60)).toBeCloseTo(0.6);
+    const sl = ok(apply(p, "slip", { itemId: "i_3", deltaSec: 1 }, ctx));
+    expect(valueAt(sl, item(sl, "i_3"), "volume", 30)).toBeCloseTo(0.6);
+  });
+
+  it("normalizeLoudness leaves silenced items alone, e.g. the video after detachAudio", () => {
+    const d = ok(apply(fixture(), "detachAudio", { itemId: "i_1" }, ctx));
+    const r = apply(d, "normalizeLoudness", { itemIds: ["i_1", "i_3"] }, { ...ctx, loudness: { a_clip: -20 } });
+    const n = ok(r);
+    expect(item(n, "i_1").volume).toBe(0);
+    expect(item(n, "i_3").volume).toBeCloseTo(10 ** (6 / 20));
+    expect((r as { changes: { summary: string } }).changes.summary).toBe("normalized 1 items to -14 LUFS; skipped 1 silent (volume 0)");
+    expect(ok(apply(d, "normalizeLoudness", { itemIds: ["i_1"] }, ctx)).revision).toBe(d.revision + 1);
+  });
+
+  it("normalizeLoudness sets volume from LUFS, clamped to 0..2, in one revision", () => {
+    let p = ok(apply(fixture(), "insertItem", { assetId: "a_song", at: 0, duration: 200 }, ctx));
+    const lctx: Ctx = { ...ctx, loudness: { a_clip: -20, a_song: -40 } };
+    const n = ok(apply(p, "normalizeLoudness", { itemIds: ["i_1", "i_3"] }, lctx));
+    expect(n.revision).toBe(p.revision + 1);
+    expect(item(n, "i_1").volume).toBeCloseTo(10 ** (6 / 20)); // -20 → -14 LUFS: +6 dB
+    expect(item(n, "i_3").volume).toBe(2); // +26 dB wanted, capped
+    expect(item(ok(apply(p, "normalizeLoudness", { itemIds: ["i_1"], target: -23 }, lctx)), "i_1").volume).toBeCloseTo(10 ** (-3 / 20));
+    expect(err(apply(p, "normalizeLoudness", { itemIds: ["i_1"] }, ctx))).toBe("not_found");
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "volume", at: 0, value: 1 }, ctx));
+    expect(err(apply(p, "normalizeLoudness", { itemIds: ["i_1"] }, lctx))).toBe("invalid");
+  });
+
+  it("detachAudio refuses images, speed ≠ 1 and silent items", () => {
     const p = fixture();
     const silent = ok(apply(p, "setProps", { itemId: "i_1", patch: { volume: 0 } }, ctx));
     expect(err(apply(silent, "detachAudio", { itemId: "i_1" }, ctx))).toBe("invalid");
     const fast = ok(apply(p, "setSpeed", { itemId: "i_1", speed: 2 }, ctx));
     expect(err(apply(fast, "detachAudio", { itemId: "i_1" }, ctx))).toBe("invalid");
-    const keyed = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "volume", at: 0, value: 0.5 }, ctx));
-    expect(err(apply(keyed, "detachAudio", { itemId: "i_1" }, ctx))).toBe("invalid");
     let img = ok(apply(p, "importAsset", { path: "raw/photo.jpg" }, ctx));
     img = ok(apply(img, "insertItem", { assetId: "a_photo", at: 150, duration: 30 }, ctx));
     expect(err(apply(img, "detachAudio", { itemId: "i_3" }, ctx))).toBe("invalid");

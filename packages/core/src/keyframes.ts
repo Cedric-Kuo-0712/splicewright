@@ -1,10 +1,11 @@
-import { MASK_PROPS, Transform, type Animatable, type Project, type VideoItem } from "./schema.ts";
+import { MASK_PROPS, Transform, type Animatable, type AudioItem, type Project, type VideoItem } from "./schema.ts";
 import { secPerFrame, sourceAt } from "./validate.ts";
 
+type Keyed = VideoItem | AudioItem;
 type Keys = NonNullable<VideoItem["keyframes"]>;
 
 /** Keyed value of `prop` at timeline frame `f`; undefined when the prop has no keys. */
-export function valueAt(p: Project, item: VideoItem, prop: Animatable, f: number): number | undefined {
+export function valueAt(p: Project, item: Keyed, prop: Animatable, f: number): number | undefined {
   const ks = item.keyframes?.[prop];
   if (!ks) return undefined;
   const t = sourceAt(p, item, f);
@@ -33,13 +34,13 @@ export function animate(p: Project, item: VideoItem, f: number): VideoItem {
   return out;
 }
 
-const near = (p: Project, item: VideoItem, t: number, at: number) => Math.abs(t - sourceAt(p, item, at)) < secPerFrame(p, item) / 2;
+const near = (p: Project, item: Keyed, t: number, at: number) => Math.abs(t - sourceAt(p, item, at)) < secPerFrame(p, item) / 2;
 
 /** The key of `prop` on frame `at`, if any. */
-export const keyAt = (p: Project, item: VideoItem, prop: Animatable, at: number) => item.keyframes?.[prop]?.find((k) => near(p, item, k.t, at));
+export const keyAt = (p: Project, item: Keyed, prop: Animatable, at: number) => item.keyframes?.[prop]?.find((k) => near(p, item, k.t, at));
 
 /** `item.keyframes` with `prop` keyed to `value` on frame `at`, replacing a key on that frame; null removes it. */
-export function withKey(p: Project, item: VideoItem, prop: Animatable, at: number, value: number | null, ease?: "linear" | "ease"): Keys | undefined {
+export function withKey(p: Project, item: Keyed, prop: Animatable, at: number, value: number | null, ease?: "linear" | "ease"): Keys | undefined {
   const ks = (item.keyframes?.[prop] ?? []).filter((k) => !near(p, item, k.t, at));
   if (value !== null) ks.push({ t: Math.max(0, +sourceAt(p, item, at).toFixed(4)), v: value, ...(ease && { ease }) });
   const out: Keys = { ...item.keyframes, [prop]: ks.sort((a, b) => a.t - b.t) };

@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { addRecent, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo } from "@splicewright/core/node";
 import { ASPECTS, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
-import { ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
+import { displayable, ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
 import { duckRanges } from "@splicewright/render/node";
 
 // Spec §7.3. `splicewright open` runs this: a Vite dev server for the UI (open question 5, the simple
@@ -157,7 +157,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             const tmp = join(dir, "raw", `.upload-${process.pid}-${Date.now()}`);
             await pipeline(req, createWriteStream(tmp));
             if (!statSync(tmp).size) return unlinkSync(tmp), send(res, 400, { error: "empty upload" });
-            const path = rawPath(dir, url.searchParams.get("name") ?? "upload", tmp);
+            const path = await displayable(dir, rawPath(dir, url.searchParams.get("name") ?? "upload", tmp));
             const r = run(dir, "importAsset", { path });
             if ("error" in r) {
               if (!Object.values(load(dir).assets).some((a) => a.path === path)) unlinkSync(join(dir, path));

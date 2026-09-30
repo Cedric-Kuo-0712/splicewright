@@ -51,8 +51,10 @@ const KINDS = ["video", "audio", "caption", "overlay"] as const;
 const EXT_KIND: Record<string, "video" | "audio" | "image"> = {
   mp4: "video", mov: "video", m4v: "video", mkv: "video", webm: "video", avi: "video",
   mp3: "audio", wav: "audio", m4a: "audio", aac: "audio", flac: "audio", ogg: "audio",
-  jpg: "image", jpeg: "image", png: "image", webp: "image", gif: "image", heic: "image",
+  jpg: "image", jpeg: "image", png: "image", webp: "image", gif: "image",
 };
+/** Phone photos Chrome can't decode, so neither the editor nor the render can show them. */
+export const HEIF = /\.hei[cf]$/i;
 
 const ITEM_PROPS: Record<TrackKind, string[]> = {
   video: ["volume", "fit", "transform", "effects", "crop", "mask", "blend", "keyframes", "fadeIn", "fadeOut", "transition", "speed", "label", "note"],
@@ -209,6 +211,7 @@ export const ops: Record<string, OpDef<any>> = {
       }
       const file = a.path.split(/[/\\]/).pop()!;
       const ext = file.includes(".") ? file.split(".").pop()!.toLowerCase() : "";
+      if (HEIF.test(file)) fail("invalid", `browsers can't show .${ext}; import it with \`splicewright import\` or the editor, which convert it to JPEG`);
       const kind = a.kind ?? EXT_KIND[ext] ?? fail("invalid", `unknown media type ".${ext}"; pass kind`);
       const base = "a_" + (file.replace(/\.[^.]*$/, "").toLowerCase().replace(/[^a-z0-9]/g, "") || "asset");
       let id = base;

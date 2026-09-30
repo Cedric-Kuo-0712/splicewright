@@ -99,7 +99,8 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     const proxies = Object.keys(project.assets).filter((id) => existsSync(join(dir, ".splicewright", "proxies", "edit", `${id}.mp4`)));
     const probes = readAssets(dir);
     const durations = Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.duration ? [[id, a.duration]] : [])));
-    return { project, duck: duckRanges(project, loadCtx(dir)), proxies, durations, sizes: sizesOf(probes) };
+    const ctx = loadCtx(dir);
+    return { project, duck: duckRanges(project, ctx), proxies, durations, sizes: sizesOf(probes), loudness: ctx.loudness ?? {} };
   };
   const result = (res: ServerResponse, r: ReturnType<typeof run>) =>
     "error" in r ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, { revision: r.project.revision, summary: r.changes.summary, ...snapshot() });

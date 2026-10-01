@@ -35,6 +35,8 @@ it("an agent can read and edit a project over stdio MCP", async () => {
     expect(await call("get_range", { from: 0, to: 1000 })).toHaveLength(2);
     expect(await call("splicewright_undo")).toMatchObject({ revision: 5 });
     expect((await call("get_summary")).durationFrames).toBe(90);
+    expect(await call("lint")).toEqual([]);
+    expect(load(dir).revision).toBe(5);
     const trim = (await client.listTools()).tools.find((t) => t.name === "splicewright_trim")!;
     expect(JSON.stringify(trim.inputSchema.properties!.to)).toContain("near");
     await call("splicewright_addMarker", { label: "m", start: 45 });

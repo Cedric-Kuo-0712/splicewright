@@ -2,7 +2,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { ASPECTS, FONT_PAIRS, FONTS, getSummary, LUT_PRESETS, THEME_IDS } from "@splicewright/core";
+import { ASPECTS, FONT_PAIRS, FONTS, getSummary, lint, LUT_PRESETS, THEME_IDS } from "@splicewright/core";
 import { applyLutPreset, init, load, rawPath, redo, run, undo } from "@splicewright/core/node";
 import { displayable, ingest, STEPS, type Step } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
@@ -17,6 +17,7 @@ const USAGE = `usage: splicewright <command>
   import <paths...> [--no-ingest]
   ingest [--only proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
   status
+  lint
   op <opName> '<json args>' [--base <revision>]
   lut-presets
   apply-lut-preset <itemId> <presetId> [--base <revision>]
@@ -165,6 +166,8 @@ switch (cmd) {
   }
   case "status":
     out(getSummary(load(dir)));
+  case "lint":
+    out(lint(load(dir)));
   case "lut-presets":
     out({ presets: LUT_PRESETS });
   case "apply-lut-preset": {

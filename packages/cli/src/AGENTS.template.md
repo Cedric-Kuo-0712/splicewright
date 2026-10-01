@@ -39,7 +39,7 @@ Op names below are the `splicewright_<op>` tools.
    only after they confirm; then `still` a few cut points or `storyboard` the range to check.
 7. **Captions.** `addCaptionsFromTranscript`, then `editCaption` for names and mishearings.
 8. **Review.** `storyboard` over what changed, `still` on a few key frames, `render` preset `draft` for a full pass.
-   Report changes with timecodes so the human can jump to them; `render` master when they approve.
+   Report changes with timecodes so the human can jump to them; run `lint` and fix its errors, then `render` master when they approve.
 
 Rules: one intent per `batch` (one undo step each); re-read on a conflict, never force; don't undo the human's
 steps (pass your last write's revision as `baseRevision` to undo); ask before deleting footage-heavy sections or changing the format.

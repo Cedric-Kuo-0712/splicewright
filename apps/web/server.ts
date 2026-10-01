@@ -9,7 +9,7 @@ import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { addRecent, applyLutPreset, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
 import { ASPECTS, captionWords, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
 import { audioFxPath, displayable, ensureAudioFx, ffmpeg, ingest, limiter, loudness, thumb, waveform } from "@splicewright/ingest";
-import { duckRanges, lutsOf, lutVersion } from "@splicewright/render/node";
+import { duckRanges, fontVersionsOf, lutsOf, lutVersion } from "@splicewright/render/node";
 
 // Spec §7.3. `splicewright open` runs this: a Vite dev server for the UI (open question 5, the simple
 // option) plus a small API. Every mutation goes through core ops with the client's baseRevision.
@@ -143,7 +143,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     // A 65³ LUT is ~4 MB of JSON; the editor gets its version here and fetches the table from /api/lut when that changes.
     const lutVersions = Object.fromEntries(Object.entries(lutsOf(dir, project)).map(([id, lut]) => [id, lutVersion(lut)!]));
     const animated = Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : []));
-    return { project, duck: duckRanges(project, ctx), words: captionWords(project, ctx), proxies, durations, sizes: sizesOf(probes), animated, loudness: ctx.loudness ?? {}, audioFx: fx.sources, audioFxProcessing: fx.processing, audioFxErrors: fx.errors, audioFxLoudness: ctx.audioFxLoudness ?? {}, lutVersions };
+    return { project, duck: duckRanges(project, ctx), words: captionWords(project, ctx), proxies, durations, sizes: sizesOf(probes), animated, fontVersions: fontVersionsOf(dir, project), loudness: ctx.loudness ?? {}, audioFx: fx.sources, audioFxProcessing: fx.processing, audioFxErrors: fx.errors, audioFxLoudness: ctx.audioFxLoudness ?? {}, lutVersions };
   };
   const result = (res: ServerResponse, r: ReturnType<typeof run>) =>
     "error" in r ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, { revision: r.project.revision, summary: r.changes.summary, ...snapshot() });

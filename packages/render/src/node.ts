@@ -6,7 +6,7 @@ import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
 import { renderMedia, renderStill, selectComposition } from "@remotion/renderer";
-import { load, loadCtx, readAssets, sizesOf } from "@splicewright/core/node";
+import { fingerprint, load, loadCtx, readAssets, sizesOf } from "@splicewright/core/node";
 import { captionWords, parseCube, type Project } from "@splicewright/core";
 import { audioFxPath, ffmpeg, grid, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
@@ -15,6 +15,18 @@ import { duckRanges } from "./duck.ts";
 import { projectAliases } from "./aliases.ts";
 
 export { duckRanges };
+
+/** FontFace caches must change when switching projects or replacing a font at the same path. */
+export function fontVersionsOf(dir: string, project: Project): Record<string, string> {
+  const root = realpathSync(dir);
+  return Object.fromEntries(Object.values(project.assets).filter((asset) => asset.kind === "font").map((asset) => {
+    try {
+      const file = realpathSync(resolve(root, asset.path));
+      if (!file.startsWith(root + sep)) throw new Error("font path escapes project");
+      return [asset.id, fingerprint(file) ?? "missing"];
+    } catch { return [asset.id, "missing"]; }
+  }));
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const lutCache = new Map<string, { stamp: string; value: GradeLut }>();
@@ -111,7 +123,7 @@ async function prepare(dir: string) {
   const ctx = loadCtx(dir);
   const probes = readAssets(dir);
   const audioFx = audioFxSources(dir, project);
-  const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(probes), animated: Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : [])), words: captionWords(project, ctx), luts: lutsOf(dir, project), audioFx };
+  const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(probes), animated: Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : [])), words: captionWords(project, ctx), luts: lutsOf(dir, project), audioFx, fontVersions: fontVersionsOf(dir, project) };
   const serveUrl = await bundleProject(dir);
   // Canvas effects need a WebGL2 context in Remotion's headless Chromium. Keep the legacy render
   // defaults for projects that do not opt into the per-pixel path.

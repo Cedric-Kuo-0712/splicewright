@@ -29,6 +29,7 @@ export interface Props extends Record<string, unknown> {
   luts?: Record<string, GradeLut>;
   /** Baked item audio sources, relative project paths in renders and `/media/...` URLs in the editor. */
   audioFx?: Record<string, string>;
+  fontVersions?: Record<string, string>;
   sampleItemId?: string;
   /** Carried through so the Node side can read config presets via selectComposition(). */
   presets?: Config["presets"];
@@ -42,7 +43,7 @@ const BASE = ".swr *, .swr ::before, .swr ::after { box-sizing: border-box; marg
 const FONT = 'ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"';
 
 /** Load only font assets referenced by active text styles, and fail renders if a file cannot load. */
-const FontAssets: React.FC<{ project: Project }> = ({ project }) => {
+const FontAssets: React.FC<{ project: Project; versions?: Record<string, string> }> = ({ project, versions = {} }) => {
   const environment = useRemotionEnvironment();
   const ids = new Set<string>();
   const add = (font: unknown) => { if (typeof font === "string" && project.assets[font]?.kind === "font") ids.add(font); };
@@ -61,7 +62,7 @@ const FontAssets: React.FC<{ project: Project }> = ({ project }) => {
       } else add(props.textStyle?.font ?? activeTheme?.roles[props.role ?? "title"]?.font);
     }
   }
-  const fonts = [...ids].map((id) => ({ id, path: project.assets[id].path })).sort((a, b) => a.id.localeCompare(b.id));
+  const fonts = [...ids].map((id) => ({ id, path: project.assets[id].path, version: versions[id] ?? "unprobed" })).sort((a, b) => a.id.localeCompare(b.id));
   const signature = JSON.stringify(fonts);
   const [error, setError] = React.useState<string>();
   useEffect(() => {
@@ -75,8 +76,8 @@ const FontAssets: React.FC<{ project: Project }> = ({ project }) => {
     const url = (path: string) => environment.isRendering
       ? staticFile(path)
       : `/media/${path.split("/").map(encodeURIComponent).join("/")}`;
-    Promise.all(fonts.map(async ({ id, path }) => {
-      const face = new FontFace(fontAssetFamily(id), `url("${url(path)}")`);
+    Promise.all(fonts.map(async ({ id, path, version }) => {
+      const face = new FontFace(fontAssetFamily(id), `url("${url(path)}?v=${encodeURIComponent(version)}")`);
       try {
         await face.load();
         if (live) { faces.push(face); document.fonts.add(face); }
@@ -504,7 +505,7 @@ const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges; 
   return <Audio src={src.startsWith("/") ? src : staticFile(src)} trimBefore={Math.round(item.sourceIn * p.meta.fps)} volume={volume} muted={t.muted} />;
 };
 
-export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, animated = {}, words = {}, luts = {}, audioFx, sampleItemId, components }) => {
+export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, animated = {}, words = {}, luts = {}, audioFx, fontVersions, sampleItemId, components }) => {
   const registry: Record<string, React.ComponentType<any>> = { Text, Image, Sticker, CaptionLayer, ...components };
   const component = (name: string, where: string) => {
     const C = registry[name];
@@ -526,7 +527,7 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
   return (
     <AbsoluteFill className="swr" style={{ backgroundColor: p.meta.background ?? "#000", fontFamily: FONT, lineHeight: 1.5 }}>
       <style>{BASE}</style>
-      <FontAssets project={p} />
+      <FontAssets project={p} versions={fontVersions} />
       {p.tracks.map((t) =>
         // ponytail: `hidden` drops the whole track, audio included; split visual/audio if a use appears.
         t.hidden ? null : t.kind === "caption" ? (

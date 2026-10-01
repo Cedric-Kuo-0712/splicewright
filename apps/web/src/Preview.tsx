@@ -22,6 +22,7 @@ export function Preview({ p }: { p: Project }) {
   const live = app.use((s) => s.live);
   const sizes = app.use((s) => s.sizes);
   const animated = app.use((s) => s.animated);
+  const fontVersions = app.use((s) => s.fontVersions);
   const luts = app.use((s) => s.luts);
   const audioFx = app.use((s) => s.audioFx);
   const sampling = app.use((s) => s.sampling);
@@ -81,7 +82,7 @@ export function Preview({ p }: { p: Project }) {
       <Player
         ref={ref}
         component={Composition}
-        inputProps={{ project: shown, duck, sizes, animated, words, luts, audioFx, sampleItemId: sampling ?? undefined }}
+        inputProps={{ project: shown, duck, sizes, animated, fontVersions, words, luts, audioFx, sampleItemId: sampling ?? undefined }}
         durationInFrames={total}
         inFrame={range?.[0]}
         outFrame={range ? Math.min(total - 1, range[1] - 1) : undefined}

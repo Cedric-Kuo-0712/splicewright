@@ -49,6 +49,22 @@ it("serves media byte ranges and nothing outside the project", async () => {
     expect((await get(path)).status, path).toBe(404);
 });
 
+it("applies a built-in LUT preset through the route and rejects bad ids", async () => {
+  const projectDir = join(parent, "lut-project");
+  cpSync(join(import.meta.dirname, "../../../examples/basic"), projectDir, { recursive: true, filter: (f) => !f.includes(".splicewright") });
+  const lutServer = await open(projectDir, { port: 0 });
+  try {
+    const post = (body: unknown) => fetch(`${lutServer.url}api/lut-presets/apply`, { method: "POST", body: JSON.stringify(body) });
+    expect(existsSync(join(projectDir, "raw", "luts"))).toBe(false);
+    expect((await post({ itemId: "i_1", presetId: "stripedpurple-1920s" })).status).toBe(200);
+    expect(JSON.parse(readFileSync(join(projectDir, "raw", "luts", "licenses", "stripedpurple-1920s-attribution.json"), "utf8")).license).toBe("MIT");
+    expect((await post({ itemId: "i_1", presetId: "nope" })).status).toBe(400);
+    expect((await post({ itemId: "nope", presetId: "stripedpurple-1920s" })).status).toBe(400);
+  } finally {
+    await lutServer.close();
+  }
+});
+
 it("applies ops against the client's revision", async () => {
   const post = (body: unknown) =>
     fetch(`${server.url}api/op`, { method: "POST", body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, data: await r.json() }));

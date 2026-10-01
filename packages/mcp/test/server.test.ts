@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -43,6 +43,30 @@ it("an agent can read and edit a project over stdio MCP", async () => {
     await client.close();
   }
   expect(load(dir).revision).toBe(7);
+});
+
+it("lists built-in LUTs without copying them and applies one portable preset through MCP", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "swr-mcp-lut-"));
+  init(dir, { title: "t", fps: 30, width: 640, height: 360 });
+  run(dir, "importAsset", { path: "raw/clip.mp4" });
+  run(dir, "insertItem", { assetId: "a_clip", at: 0, duration: 90 });
+  const client = new Client({ name: "test-lut", version: "0" });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [CLI, "mcp"], cwd: dir, stderr: "ignore" }));
+  try {
+    const names = (await client.listTools()).tools.map((tool) => tool.name);
+    expect(names).toContain("list_lut_presets");
+    expect(names).toContain("apply_lut_preset");
+    const list = await client.callTool({ name: "list_lut_presets", arguments: {} }) as { content: { text: string }[] };
+    const presets = JSON.parse(list.content[0].text) as { presets: { id: string }[] };
+    expect(presets.presets).toHaveLength(14);
+    expect(existsSync(join(dir, "raw", "luts"))).toBe(false);
+    const result = await client.callTool({ name: "apply_lut_preset", arguments: { itemId: "i_1", presetId: "stripedpurple-1920s" } }) as { content: { text: string }[] };
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ revision: 3, summary: expect.stringContaining("1920s") });
+    expect(readdirSync(join(dir, "raw", "luts")).filter((name) => name.endsWith(".cube"))).toHaveLength(1);
+    expect(readFileSync(join(dir, "raw", "luts", "licenses", "stripedpurple-1920s-attribution.json"), "utf8")).toContain("sourceCommit");
+  } finally {
+    await client.close();
+  }
 });
 
 it("still returns an image and render runs as a polled job", { timeout: 300_000 }, async () => {

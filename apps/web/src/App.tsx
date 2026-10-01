@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useMemo } from "react";
 import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
-import { anchorOf, animate, ASPECTS, BLENDS, FONT_ROLES, FONTS, FPS_CHOICES, THEME_IDS, MASK_PROPS, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, valueAt, withKey, type Animatable, type AudioItem, type FontRole, type Item, type OverlayItem, type Project, type SnapPoint, type TextStyle, type Track, type VideoItem } from "@splicewright/core";
+import { anchorOf, animate, ASPECTS, BLENDS, FONT_ROLES, FONTS, FPS_CHOICES, LUT_PRESETS, THEME_IDS, MASK_PROPS, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, valueAt, withKey, type Animatable, type AudioItem, type FontRole, type Item, type OverlayItem, type Project, type SnapPoint, type TextStyle, type Track, type VideoItem } from "@splicewright/core";
 import { mediaBox, SplicewrightProject, type Props } from "@splicewright/render";
 import { addMarker, addText, copy, cut, detachAudio, duplicate, findItem, freezeFrame, gradeWith, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, pipEntries, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
-import { app, dnd, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
+import { app, applyLutPreset, dnd, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
 import { mapSamplePoint, multiplyMatrix, sampledRgb } from "./sample-coordinates.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 
@@ -845,6 +845,8 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
     if (v === null) delete next[k]; else next[k] = v;
     return set({ grade: Object.keys(next).length ? next : null });
   };
+  const presetCategories = [...new Set(LUT_PRESETS.map((preset) => preset.category))];
+  const lutLabel = (path: string) => LUT_PRESETS.find((preset) => path.startsWith(`raw/luts/${preset.id}-`))?.name ?? path;
   const lumaKey = item.key?.kind === "luma" ? item.key : null;
   return (
     <>
@@ -924,7 +926,8 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
         return <Slider key={k} itemId={item.id} label={`levels ${k}`} {...range} value={levels[k]} patch={(v) => ({ grade: { ...item.grade, levels: { ...levels, [k]: v } } })} />;
       })}
       <CurveEditor key={item.id} itemId={item.id} grade={item.grade} onCommit={(curves) => setGrade("curves", curves)} />
-      <label className="field"><span>LUT</span><select value={item.grade?.lut?.assetId ?? ""} onChange={(e) => setGrade("lut", e.target.value ? { assetId: e.target.value, strength: item.grade?.lut?.strength ?? 1 } : null)}><option value="">None</option>{Object.values(p.assets).filter((a) => a.kind === "lut").map((a) => <option key={a.id} value={a.id}>{a.path}</option>)}</select></label>
+      <label className="field"><span>LUT</span><select value={item.grade?.lut?.assetId ?? ""} onChange={(e) => { const value = e.target.value; if (value.startsWith("preset:")) void applyLutPreset(item.id, value.slice(7)); else setGrade("lut", value ? { assetId: value, strength: item.grade?.lut?.strength ?? 1 } : null); }}><option value="">None</option>{presetCategories.map((category) => <optgroup key={category} label={category}>{LUT_PRESETS.filter((preset) => preset.category === category).map((preset) => <option key={preset.id} value={`preset:${preset.id}`}>{preset.name}</option>)}</optgroup>)}<optgroup label="Project LUT assets">{Object.values(p.assets).filter((a) => a.kind === "lut").map((a) => <option key={a.id} value={a.id}>{lutLabel(a.path)}</option>)}</optgroup></select></label>
+      <small className="muted">Creative SDR look · input profile unspecified</small>
       {item.grade?.lut && <Slider itemId={item.id} label="LUT strength" min={0} max={1} step={0.01} zero={1} value={item.grade.lut.strength ?? 1} patch={(v) => ({ grade: { ...item.grade, lut: { ...item.grade!.lut!, strength: v } } })} />}
       <h4>key</h4>
       <label className="field"><span>type</span><select value={item.key?.kind ?? ""} onChange={(e) => set({ key: e.target.value === "chroma" ? { kind: "chroma", color: "#00ff00", similarity: 0.18, smoothness: 0.08 } : e.target.value === "luma" ? { kind: "luma", low: 0.1, high: 0.9 } : null })}><option value="">Off</option><option value="chroma">Chroma</option><option value="luma">Luma</option></select></label>

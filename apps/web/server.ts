@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
-import { addRecent, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo } from "@splicewright/core/node";
+import { addRecent, applyLutPreset, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo } from "@splicewright/core/node";
 import { ASPECTS, captionWords, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
 import { displayable, ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
 import { duckRanges, lutsOf, lutVersion } from "@splicewright/render/node";
@@ -153,6 +153,10 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
           if (route === "POST /api/op") {
             const b = await body(req);
             return result(res, run(dir, b.op, b.args, b.baseRevision));
+          }
+          if (route === "POST /api/lut-presets/apply") {
+            const b = await body(req);
+            return result(res, applyLutPreset(dir, b.itemId, b.presetId, b.baseRevision));
           }
           if (route === "POST /api/import") {
             mkdirSync(join(dir, "raw"), { recursive: true });

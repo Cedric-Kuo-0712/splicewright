@@ -2,8 +2,8 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { ASPECTS, FONT_PAIRS, FONTS, getSummary, THEME_IDS } from "@splicewright/core";
-import { init, load, rawPath, redo, run, undo } from "@splicewright/core/node";
+import { ASPECTS, FONT_PAIRS, FONTS, getSummary, LUT_PRESETS, THEME_IDS } from "@splicewright/core";
+import { applyLutPreset, init, load, rawPath, redo, run, undo } from "@splicewright/core/node";
 import { displayable, ingest, STEPS, type Step } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
 import { render, still } from "@splicewright/render/node";
@@ -18,6 +18,8 @@ const USAGE = `usage: splicewright <command>
   ingest [--only proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
   status
   op <opName> '<json args>' [--base <revision>]
+  lut-presets
+  apply-lut-preset <itemId> <presetId> [--base <revision>]
   undo | redo [--base <revision>]
   still --at <frame|[hh:]mm:ss[.s]> [-o out/still-<frame>.jpg]
   render [-o out/final.mp4] [--preset draft|master] [--range a-b]
@@ -163,6 +165,13 @@ switch (cmd) {
   }
   case "status":
     out(getSummary(load(dir)));
+  case "lut-presets":
+    out({ presets: LUT_PRESETS });
+  case "apply-lut-preset": {
+    const [itemId, presetId] = args;
+    if (!itemId || !presetId) out({ error: { code: "usage", message: "apply-lut-preset <itemId> <presetId> [--base <revision>]" } });
+    out(opResult(applyLutPreset(dir, itemId, presetId, flags.base === undefined ? undefined : Number(flags.base))));
+  }
   case "op": {
     const [name, raw = "{}"] = args;
     if (!name) out({ error: { code: "usage", message: "op <opName> '<json args>'" } });

@@ -1,0 +1,97 @@
+{
+  "converter": "build-film-luts.py v3",
+  "python": "stdlib",
+  "grid": 65,
+  "format": "RGB8 Hald -> 65^3 red-fast .cube; 6-decimal RGB; gzip level 9, mtime 0",
+  "source_image_profile": "embedded sRGB ICC; pixel bytes consumed unchanged",
+  "lut_input_profile": "unspecified",
+  "verified_at_utc": "2026-10-01T04:48:56.382748+00:00",
+  "results": [
+    {
+      "name": "Kodak Portra 400",
+      "size": 65,
+      "samples": 25000,
+      "seed": 4701,
+      "error_8bit_levels": {
+        "mean": 0.2586965312563421,
+        "p99": 1.2451434497905047,
+        "max": 9.59162513639736
+      },
+      "source_git_blob_sha1": "0d97477027d62366e6dc980befca40042cfe1962",
+      "source_sha256": "bdcbda2dfa510a88436c6ac1488b4b9eec73971ec8d8eefec3210b7e1179032b",
+      "cube_sha256": "3b3b975a1de3a148f79aa30073cb76a48bf2beb5d65d219277fa9f6d240be1ad",
+      "compressed_sha256": "ff87e01022dd1479ff7582d9d9cc795eb63fabee001cd8ab9ceeb150cb9f770a",
+      "cube_bytes": 7415404,
+      "compressed_bytes": 2040616
+    },
+    {
+      "name": "Kodak Gold 200",
+      "size": 65,
+      "samples": 25000,
+      "seed": 4701,
+      "error_8bit_levels": {
+        "mean": 0.24898483899581342,
+        "p99": 1.2315532328065981,
+        "max": 4.368269786274645
+      },
+      "source_git_blob_sha1": "9c928ec6cce36247c5a960d8d8b5f9681a570d98",
+      "source_sha256": "9c826805918965d7b2cb57e1035d63fd2e6dc154ba4de523b7e99c4cd640107c",
+      "cube_sha256": "e039c4f2c56055348d3b165edb11e6cc73d3818af4ecf086db16b691377e7a61",
+      "compressed_sha256": "0f4e437522170235f47897cddcd0e00c6d76a8aed50e71ea9d733e33d3b9872c",
+      "cube_bytes": 7415400,
+      "compressed_bytes": 2034000
+    },
+    {
+      "name": "Fuji Velvia 50",
+      "size": 65,
+      "samples": 25000,
+      "seed": 4701,
+      "error_8bit_levels": {
+        "mean": 0.25802541378960026,
+        "p99": 1.6652794580849322,
+        "max": 6.214225683196774
+      },
+      "source_git_blob_sha1": "a443d6890edf45123a4288230d64c2be2921e4be",
+      "source_sha256": "73dbff69fd948b0a268e660c4582f78d0b7da67f0c672d49f67acfc92cc38809",
+      "cube_sha256": "996100b68e1787ba6e32fbe93cfd1f0283cdff5c47916f52e8de61e39fbf0d7b",
+      "compressed_sha256": "f55f1b26355dd6a04c29fd06bacb667dca3151490d435d3edb188c6bfd2f9cd3",
+      "cube_bytes": 7415397,
+      "compressed_bytes": 1662683
+    },
+    {
+      "name": "Fuji Provia 100F",
+      "size": 65,
+      "samples": 25000,
+      "seed": 4701,
+      "error_8bit_levels": {
+        "mean": 0.24435150190773577,
+        "p99": 0.816190227767668,
+        "max": 3.803606904910931
+      },
+      "source_git_blob_sha1": "c66f73ed74c71db7e3a68882845d5a87e2b5d92d",
+      "source_sha256": "c21646e31f8e87f521c0e2a9c7d0f392ad02649c7b8f796ab5a49db8fd1a24cc",
+      "cube_sha256": "c9c186bc74159065a0d37ac442c5a7f5aa98be2e5500583cd0855e405218326f",
+      "compressed_sha256": "bb3dec8ae33b12190eb51bb35f0264df8ab38eb19f5bf8a66afbdd6fbf2d1c58",
+      "cube_bytes": 7415401,
+      "compressed_bytes": 1971809
+    },
+    {
+      "name": "Ilford HP5 Plus 400",
+      "size": 65,
+      "samples": 25000,
+      "seed": 4701,
+      "error_8bit_levels": {
+        "mean": 0.12186022292207105,
+        "p99": 0.4007235861338698,
+        "max": 0.5346694940078975
+      },
+      "source_git_blob_sha1": "f66aa59a5bf805f0fc60200791e0bbbd68ac79c4",
+      "source_sha256": "753f05a4e373d4cd196624daf472ad370894ca5659090c5c02606fd8805ec1d1",
+      "cube_sha256": "c94abc71a4e451a017e6d2532141c284baa34db4df1bc231545ee3a413ad8f50",
+      "compressed_sha256": "ff5c0fb949b3d17b30e1c80d3f7c2a4c307a875d6c8cbc773626054802760c7f",
+      "cube_bytes": 7415411,
+      "compressed_bytes": 1381465
+    }
+  ],
+  "resolution_trials": []
+}

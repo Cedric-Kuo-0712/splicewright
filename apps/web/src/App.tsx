@@ -1,8 +1,10 @@
-import { useEffect } from "react";
+import React, { useEffect } from "react";
 import { ASPECTS, FPS_CHOICES, durationFrames, formatFrame, itemSpan, snapPoints, type Project, type SnapPoint } from "@splicewright/core";
 import { addMarker, addText, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, loopRange, markerAroundSelection, markerNear, nudge, paste, rangeFromSelection, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, videoUnder } from "./edit.ts";
 import { app, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
+import { constrainLayout, DEFAULT_LAYOUT, type PanelLayout } from "./layout.ts";
+import { PanelSeparator } from "./PanelSeparator.tsx";
 import { Inspector } from "./inspector/Inspector.tsx";
 import { MediaBin } from "./MediaBin.tsx";
 import { Preview } from "./Preview.tsx";
@@ -14,6 +16,55 @@ export function App() {
   const empty = app.use((s) => s.empty);
   const message = app.use((s) => s.message);
   const io = app.use((s) => s.io);
+  const [layout, setLayout] = React.useState<PanelLayout>(() => {
+    try { return constrainLayout({ ...DEFAULT_LAYOUT, ...JSON.parse(localStorage.getItem("swr.ui.layout") ?? "{}") }, innerWidth, innerHeight); }
+    catch { return DEFAULT_LAYOUT; }
+  });
+  const resizeCleanup = React.useRef<(() => void) | null>(null);
+  useEffect(() => {
+    const resize = () => setLayout((current) => constrainLayout(current, innerWidth, innerHeight));
+    window.addEventListener("resize", resize);
+    return () => { window.removeEventListener("resize", resize); resizeCleanup.current?.(); };
+  }, []);
+  const saveLayout = (next: PanelLayout) => {
+    const bounded = constrainLayout(next, innerWidth, innerHeight);
+    setLayout(bounded);
+    try { localStorage.setItem("swr.ui.layout", JSON.stringify(bounded)); } catch { /* Layout remains usable for this session. */ }
+  };
+  const resizeByKeyboard = (panel: keyof PanelLayout, delta: number) => (e: React.KeyboardEvent) => {
+    const valid = panel === "timeline" ? e.key === "ArrowUp" || e.key === "ArrowDown" : e.key === "ArrowLeft" || e.key === "ArrowRight";
+    if (!valid) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const direction = e.key === "ArrowLeft" || e.key === "ArrowDown" ? -1 : 1;
+    const sign = panel === "inspector" ? -direction : direction;
+    saveLayout({ ...layout, [panel]: layout[panel] + sign * delta });
+  };
+  const beginResize = (panel: keyof PanelLayout, e: React.PointerEvent) => {
+    e.preventDefault();
+    resizeCleanup.current?.();
+    const start = panel === "bin" ? e.clientX : panel === "inspector" ? -e.clientX : innerHeight - e.clientY;
+    const initial = layout[panel];
+    let latest = layout;
+    const move = (event: PointerEvent) => {
+      const current = panel === "bin" ? event.clientX : panel === "inspector" ? -event.clientX : innerHeight - event.clientY;
+      latest = constrainLayout({ ...layout, [panel]: initial + current - start }, innerWidth, innerHeight);
+      setLayout(latest);
+    };
+    const done = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", done);
+      window.removeEventListener("pointercancel", done);
+      window.removeEventListener("blur", done);
+      try { localStorage.setItem("swr.ui.layout", JSON.stringify(latest)); } catch { /* Layout remains usable for this session. */ }
+      resizeCleanup.current = null;
+    };
+    resizeCleanup.current = done;
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", done);
+    window.addEventListener("pointercancel", done);
+    window.addEventListener("blur", done);
+  };
   useEffect(() => {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -26,11 +77,14 @@ export function App() {
   if (empty) return <NewProject />;
   if (!p) return <div className="loading">loading project…</div>;
   return (
-    <div className="app">
+    <div className="app" style={{ "--bin-size": `${layout.bin}px`, "--inspector-size": `${layout.inspector}px`, "--timeline-size": `${layout.timeline}px` } as React.CSSProperties}>
       <Toolbar p={p} />
       <MediaBin p={p} />
+      <PanelSeparator className="bin-split" label="Resize media bin" orientation="vertical" value={layout.bin} min={Math.min(150, Math.round(innerWidth * 0.28))} max={Math.round(innerWidth * 0.28)} onPointerDown={(e) => beginResize("bin", e)} onKeyDown={resizeByKeyboard("bin", 10)} />
       <Preview p={p} />
+      <PanelSeparator className="inspector-split" label="Resize inspector" orientation="vertical" value={layout.inspector} min={Math.min(200, Math.round(innerWidth * 0.34))} max={Math.round(innerWidth * 0.34)} onPointerDown={(e) => beginResize("inspector", e)} onKeyDown={resizeByKeyboard("inspector", 10)} />
       <Inspector p={p} />
+      <PanelSeparator className="" label="Resize timeline" orientation="horizontal" value={layout.timeline} min={Math.min(140, Math.round(innerHeight * 0.48))} max={Math.round(innerHeight * 0.48)} onPointerDown={(e) => beginResize("timeline", e)} onKeyDown={resizeByKeyboard("timeline", 10)} />
       <Timeline />
       <div className={`status ${message?.error ? "error" : ""}`}>{message?.text ?? ""}</div>
       <ContextMenu />

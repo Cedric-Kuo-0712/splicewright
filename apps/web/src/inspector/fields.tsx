@@ -7,7 +7,16 @@ import { app, op, playhead } from "../store.ts";
 
 export function Field({ label, value, onCommit, type = "text", mark }: { label: string; value: unknown; onCommit: (v: string | number | null) => void; type?: "text" | "number"; mark?: React.ReactNode }) {
   const initial = value === undefined || value === null ? "" : String(value);
-  const commit = (raw: string) => raw !== initial && onCommit(raw === "" ? null : type === "number" ? Number(raw) : raw);
+  const commit = (raw: string) => {
+    if (raw === initial) return;
+    if (raw === "") return onCommit(null);
+    if (type === "number") {
+      const n = Number(raw);
+      if (Number.isFinite(n)) onCommit(n);
+      return;
+    }
+    onCommit(raw);
+  };
   const id = React.useId();
   return (
     <label className="field" htmlFor={id}>
@@ -23,7 +32,10 @@ export function Field({ label, value, onCommit, type = "text", mark }: { label: 
         step="any"
         defaultValue={initial}
         onBlur={(e) => commit(e.currentTarget.value)}
-        onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") { e.currentTarget.value = initial; e.currentTarget.blur(); }
+        }}
       />
     </label>
   );

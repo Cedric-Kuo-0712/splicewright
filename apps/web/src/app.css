@@ -12,7 +12,13 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .new-project form { display: flex; gap: 8px; }
 .new-project form input { flex: 1; }
 
-.app { display: grid; height: 100%; grid-template: "bar bar bar" auto "bin preview inspector" minmax(0, 1fr) "tl tl tl" minmax(0, 42%) "status status status" auto / 220px minmax(0, 1fr) 260px; }
+.app { display: grid; height: 100%; grid-template: "bar bar bar bar bar" auto "bin bin-split preview inspector-split inspector" minmax(0, 1fr) "tl-split tl-split tl-split tl-split tl-split" 6px "tl tl tl tl tl" var(--timeline-size) "status status status status status" auto / var(--bin-size) 6px minmax(0, 1fr) 6px var(--inspector-size); }
+.separator { position: relative; z-index: 8; touch-action: none; background: #24262b; outline-offset: -2px; }
+.separator:hover, .separator:focus-visible { background: #4c6ef5; outline: 1px solid #8aa1ff; }
+.separator.vertical { grid-row: 2; cursor: col-resize; }
+.separator.bin-split { grid-area: bin-split; }
+.separator.inspector-split { grid-area: inspector-split; }
+.separator.horizontal { grid-area: tl-split; cursor: row-resize; }
 .toolbar { grid-area: bar; display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid #2a2c31; }
 .toolbar .spacer { flex: 1; }
 .timecode { font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; margin-left: 12px; }

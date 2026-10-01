@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { commit, historyList, init, load, rawPath, redo, run, undo } from "../src/persistence.ts";
+import { commit, historyList, init, load, loadCtx, rawPath, redo, run, undo } from "../src/persistence.ts";
 
 function project() {
   const dir = mkdtempSync(join(tmpdir(), "swr-"));
@@ -12,6 +12,18 @@ function project() {
   writeFileSync(join(dir, ".splicewright", "transcripts", "a_clip.json"), JSON.stringify({ segments: [{ start: 1, end: 2, text: "hi" }] }));
   return dir;
 }
+
+it("validates LUT files inside the project and refuses symlinks that escape it", () => {
+  const dir = project(), outside = mkdtempSync(join(tmpdir(), "swr-outside-"));
+  const table = `LUT_3D_SIZE 2\n${Array.from({ length: 8 }, (_, i) => `${i & 1} ${(i >> 1) & 1} ${(i >> 2) & 1}`).join("\n")}\n`;
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  writeFileSync(join(dir, "raw", "ok.cube"), table);
+  writeFileSync(join(outside, "outside.cube"), table);
+  symlinkSync(join(outside, "outside.cube"), join(dir, "raw", "escape.cube"));
+  expect(loadCtx(dir).validateLut).toBeDefined();
+  expect(() => loadCtx(dir).validateLut!("raw/ok.cube")).not.toThrow();
+  expect(() => loadCtx(dir).validateLut!("raw/escape.cube")).toThrow("escapes project directory");
+});
 
 it("run commits atomically and reads probe + transcript caches", () => {
   const dir = project();

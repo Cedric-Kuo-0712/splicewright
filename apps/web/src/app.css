@@ -147,3 +147,10 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .kf-btn:disabled { opacity: 0.3; cursor: default; }
 .xfade { position: absolute; top: 3px; bottom: 3px; z-index: 4; pointer-events: none; border: 1px solid #fff9; border-radius: 3px; background: linear-gradient(to top right, transparent 48%, #fffa 49% 51%, transparent 52%), linear-gradient(to bottom right, transparent 48%, #fffa 49% 51%, transparent 52%), #0006; }
 .xfade.dip { background: linear-gradient(to bottom right, transparent 48%, #fffa 49% 51%, transparent 52%) left / 50% 100% no-repeat, linear-gradient(to top right, transparent 48%, #fffa 49% 51%, transparent 52%) right / 50% 100% no-repeat, #000a; }
+.curve-editor { display: grid; gap: 6px; }
+.curve-tools { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: #adb5bd; font-size: 10px; }
+.curve-graph { width: 100%; max-width: 240px; aspect-ratio: 1; touch-action: none; background: #17191c; border: 1px solid #495057; }
+.curve-grid { fill: #17191c; stroke: #495057; stroke-width: 1; }
+.curve-reference { stroke: #495057; stroke-width: 1; stroke-dasharray: 3 3; }
+.curve-line { fill: none; stroke: #74c0fc; stroke-width: 2; pointer-events: none; }
+.curve-point { fill: #fff; stroke: #228be6; stroke-width: 2; cursor: grab; }

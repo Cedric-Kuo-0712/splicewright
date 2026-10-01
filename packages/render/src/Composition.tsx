@@ -1,7 +1,15 @@
 import React, { useMemo, useState } from "react";
-import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame } from "remotion";
+import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame, createEffect, type EffectsProp, type EffectDefinition } from "remotion";
 import { Video as CanvasVideo } from "@remotion/media";
 import { colorKey } from "@remotion/effects/color-key";
+import { exposure } from "@remotion/effects/exposure";
+import { whiteBalance } from "@remotion/effects/white-balance";
+import { vibrance } from "@remotion/effects/vibrance";
+import { levels } from "@remotion/effects/levels";
+import { shadowsHighlights } from "@remotion/effects/shadows-highlights";
+import type { Lut } from "cube-lut.js/dist/types.js";
+import { gradeEffect } from "./grade-effect.ts";
+import { lumaKey } from "./luma-key.ts";
 import "./fonts.ts";
 import { animate, itemSpan, sourceAt, textCss, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem, type Word, type FontRole, type TextStyle } from "@splicewright/core";
 import type { Config } from "./config.ts";
@@ -17,6 +25,8 @@ export interface Props extends Record<string, unknown> {
   sizes?: Record<string, [number, number]>;
   /** From captionWords(); transcript words per anchored caption on a highlight: "word" track. */
   words?: Record<string, Word[]>;
+  luts?: Record<string, Lut>;
+  sampleItemId?: string;
   /** Carried through so the Node side can read config presets via selectComposition(). */
   presets?: Config["presets"];
 }
@@ -277,6 +287,36 @@ export function canvasVideoErrorHandler(itemName: string, onFailure: (error: Err
   };
 }
 
+/** The same ordered pixel pipeline is used by stills and video: built-in grading, curves/LUT, then key. */
+const samplingCanvasEffect = createEffect<{}, null>({
+  type: "splicewright-sampling-canvas", label: "Sampling canvas", documentationLink: null, backend: "2d", schema: {},
+  calculateKey: () => "sampling-canvas", validateParams: () => {}, setup: () => null,
+  apply: ({ source, target, width, height }) => {
+    const ctx = target.getContext("2d");
+    if (!ctx) throw new Error("2D canvas required for color sampling");
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(source, 0, 0, width, height);
+  },
+  cleanup: () => {},
+} satisfies EffectDefinition<{}, null>);
+
+export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: VideoItem["key"], luts: Record<string, Lut>, sample: boolean): EffectsProp {
+  if (grade?.lut && !luts[grade.lut.assetId]) throw new Error(`Look item ${itemId} references unavailable LUT asset ${grade.lut.assetId}`);
+  const effects: EffectsProp = [
+    ...(grade?.exposure !== undefined ? [exposure({ stops: grade.exposure })] : []),
+    ...(grade?.temperature !== undefined || grade?.tint !== undefined ? [whiteBalance({ temperature: grade.temperature, tint: grade.tint })] : []),
+    ...(grade?.vibrance !== undefined ? [vibrance({ amount: grade.vibrance })] : []),
+    ...(grade?.shadows !== undefined || grade?.highlights !== undefined ? [shadowsHighlights({ shadows: grade.shadows, highlights: grade.highlights })] : []),
+    ...(grade?.levels ? [levels({ blackPoint: grade.levels.inBlack, whitePoint: grade.levels.inWhite, gamma: grade.levels.gamma })] : []),
+    ...(grade ? [gradeEffect({ curves: grade.curves ?? {}, lut: grade.lut ? luts[grade.lut.assetId] : undefined, strength: grade.lut?.strength ?? 1, outBlack: grade.levels?.outBlack, outWhite: grade.levels?.outWhite })] : []),
+    ...(!sample && keyLook?.kind === "chroma" ? [colorKey({ keyColor: keyLook.color, similarity: keyLook.similarity, smoothness: keyLook.smoothness, spillSuppression: keyLook.spill })] : []),
+    ...(!sample && keyLook?.kind === "luma" ? [lumaKey({ low: keyLook.low, high: keyLook.high, invert: keyLook.invert })] : []),
+  ];
+  // Remotion Img renders a native <img> for an empty effects list. Sampling still needs a canvas
+  // even when a key-only item bypasses its key and has no persistent grading fields.
+  return sample && effects.length === 0 ? [samplingCanvasEffect({})] : effects;
+}
+
 const CanvasVideoPath: React.FC<{
   itemName: string;
   src: string;
@@ -286,11 +326,15 @@ const CanvasVideoPath: React.FC<{
   muted?: boolean;
   fit: VideoItem["fit"];
   style: React.CSSProperties;
-  keyLook: NonNullable<VideoItem["key"]>;
-}> = ({ itemName, src, trimBefore, speed, volume, muted, fit, style, keyLook }) => {
+  keyLook?: NonNullable<VideoItem["key"]>;
+  grade?: VideoItem["grade"];
+  luts: Record<string, Lut>;
+  itemId: string;
+  sample: boolean;
+}> = ({ itemName, src, trimBefore, speed, volume, muted, fit, style, keyLook, grade, luts, itemId, sample }) => {
   const [decodeError, setDecodeError] = useState<Error | null>(null);
   return (
-    <>
+    <div data-look-item-id={itemId} style={{ display: "contents" }}>
       {decodeError ? (
         <div style={{ position: "absolute", top: 8, right: 8, zIndex: 10, padding: "4px 8px", color: "#fff", background: "#9b1c1c", borderRadius: 4, font: "12px sans-serif" }}>look off: can&apos;t decode ({itemName})</div>
       ) : (
@@ -304,23 +348,15 @@ const CanvasVideoPath: React.FC<{
           style={{ ...style, objectFit: undefined }}
           disallowFallbackToOffthreadVideo
           onError={canvasVideoErrorHandler(itemName, setDecodeError)}
-          effects={[
-            // L0 establishes the stable per-pixel order: beauty → grade → curves → LUT → key.
-            colorKey({
-              keyColor: keyLook.color,
-              similarity: keyLook.similarity,
-              smoothness: keyLook.smoothness,
-              spillSuppression: keyLook.spill,
-            }),
-          ]}
+          effects={lookEffects(itemId, grade, keyLook, luts, sample)}
         />
       )}
       {!decodeError && speed !== 1 && <Audio src={src} trimBefore={trimBefore} playbackRate={speed} volume={volume} muted={muted} />}
-    </>
+    </div>
   );
 };
 
-const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; muted?: boolean; from: number; inc?: Transition; out?: Transition }> = ({ p, item: raw, size, muted, from, inc, out }) => {
+const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; muted?: boolean; from: number; inc?: Transition; out?: Transition; luts: Record<string, Lut>; sampleItemId?: string }> = ({ p, item: raw, size, muted, from, inc, out, luts, sampleItemId }) => {
   const asset = p.assets[raw.assetId];
   const f = from + useCurrentFrame();
   const item = animate(p, raw, f);
@@ -341,10 +377,12 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; mu
   };
   const trimBefore = Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps);
   const volume = (v: number) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain;
-  const media = asset.kind === "image" ? (
+  const media = asset.kind === "image" && (raw.grade || raw.key) ? (
+    <div data-look-item-id={raw.id} style={{ display: "contents" }}><Img src={staticFile(asset.path)} style={style} effects={lookEffects(raw.id, raw.grade, raw.key, luts, sampleItemId === raw.id)} /></div>
+  ) : asset.kind === "image" ? (
     <Img src={staticFile(asset.path)} style={style} />
-  ) : raw.key ? (
-    <CanvasVideoPath key={asset.path} itemName={raw.label ?? raw.id} src={staticFile(asset.path)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted} fit={item.fit} style={style} keyLook={raw.key} />
+  ) : raw.key || raw.grade ? (
+    <CanvasVideoPath key={asset.path} itemName={raw.label ?? raw.id} itemId={raw.id} sample={sampleItemId === raw.id} src={staticFile(asset.path)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted} fit={item.fit} style={style} keyLook={raw.key} grade={raw.grade} luts={luts} />
   ) : (
     // Legacy items stay on OffthreadVideo; only pixel-look items opt into the canvas decoder.
     <OffthreadVideo
@@ -367,7 +405,7 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; mu
         transform: x || y || scale !== 1 || l.dx || l.dy || l.zoom !== 1 ? `translate(${x + l.dx * p.meta.width}px, ${y + l.dy * p.meta.height}px) scale(${scale * l.zoom})` : undefined,
       }}
     >
-      {item.mask ? (
+      {item.mask && sampleItemId !== raw.id ? (
         <div style={{ ...center, display: "flex", width: p.meta.width, height: p.meta.height, flexShrink: 0, ...maskStyle(item.mask, [p.meta.width, p.meta.height], box.display) }}>{media}</div>
       ) : (
         media
@@ -389,7 +427,7 @@ const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges }
   return <Audio src={staticFile(p.assets[item.assetId].path)} trimBefore={Math.round(item.sourceIn * p.meta.fps)} volume={volume} muted={t.muted} />;
 };
 
-export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, words = {}, components }) => {
+export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, words = {}, luts = {}, sampleItemId, components }) => {
   const registry: Record<string, React.ComponentType<any>> = { Text, Image, CaptionLayer, ...components };
   const component = (name: string, where: string) => {
     const C = registry[name];
@@ -397,7 +435,7 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
     return C;
   };
   const body = (t: Track, item: Item, from: number, inc?: Transition, out?: Transition) => {
-    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} muted={t.muted} from={from} inc={inc} out={out} />;
+    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} muted={t.muted} from={from} inc={inc} out={out} luts={luts} sampleItemId={sampleItemId} />;
     const C = component((item as { component: string }).component, item.id);
     const { mask } = item as OverlayItem;
     let props = (item as { props: Record<string, unknown> }).props;

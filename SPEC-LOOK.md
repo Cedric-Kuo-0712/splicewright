@@ -11,8 +11,8 @@ is core op/schema → render → UI → MCP/CLI). This file covers how a video *
 | F | Built-in fonts + agent font guide | — | font still test: Latin and CJK render in the font, not the fallback | ✅ done (merged 9a5a746) |
 | L1 | Text styles and themes | F | one `setMeta { theme }` restyles every role-bound text in one undo step | ✅ done (merged 65092a6; user fonts from `raw/` not built) |
 | L0 | Canvas video path (spike) | — | a color-key still matches between Player and render; existing still tests unchanged | ✅ done (UI verified by user) |
-| L2 | Color: grade, curves, LUT | L0 | our LUT within 2/255 of ffmpeg `lut3d` on a test image | planned |
-| L3 | Keying: chroma, luma | L0 | keyed green shows the track below; the red subject survives | planned |
+| L2 | Color: grade, curves, LUT | L0 | our LUT within 2/255 of ffmpeg `lut3d` on a test image | 🟡 implemented; UI manual check pending |
+| L3 | Keying: chroma, luma | L2 | keyed green shows the track below; the red subject survives | 🟡 implemented; UI manual check pending |
 | L4 | Beauty: smooth, whiten | L0 (+ `faces` ingest for face-only) | detail drops inside the face box, not outside | planned |
 
 Build order: F → L1 (DOM only, no L0 needed) → L0 → L2 → L3 → L4.
@@ -35,7 +35,7 @@ needs the canvas path in L0.
 | Pixel effects host | `@remotion/media` `<Video>` + `@remotion/effects` (both at 4.0.520; `effects` prop from 4.0.464) | use directly |
 | Grade | `@remotion/effects`: `exposure`, `white-balance`, `vibrance`, `levels`, `shadows-highlights`, `color-correction` | use directly |
 | Chroma key | `@remotion/effects/color-key` | use directly |
-| LUT parse | `cube-lut.js` (npm) | use directly |
+| LUT parse | `cube-lut.js` (npm) | local strict `.cube` parser; verified package ESM entry has extensionless internal imports that fail under Node |
 | LUT apply, curves, luma key | `createEffect()` (core `remotion`; 2D canvas, WebGL2 or WebGPU) | write our own shader |
 | Skin smoothing / whitening | GPUPixel (C++/OpenGL, Apache-2.0) | port its shaders; keep its LICENSE/NOTICE in `packages/render/third_party/gpupixel/` |
 | Face landmarks | MediaPipe Face Landmarker (Python `mediapipe`, Apache-2.0; check the `.task` model's own terms) | use directly, in ingest |
@@ -147,17 +147,19 @@ grade?: {
 // Asset.kind gains "lut" (`.cube` files; imported like any asset, never placed on a track)
 ```
 
-- Grade fields map one-to-one onto `@remotion/effects` functions; copy their option ranges at implementation
-  time (the field names above are ours; the effect option names may differ).
-- Curves: monotone cubic through the points → a 256-entry table per channel; applied in the same WebGL2 pass as
-  the LUT (one 1D texture + one 3D texture), our own `createEffect`.
-- LUT: parse with `cube-lut.js`; 3D only (a 1D `.cube` is an import error), size ≤ 65, `DOMAIN_MIN/MAX` honoured.
-  Upload as a WebGL2 3D texture with linear filtering (trilinear sampling), mix with the input by `strength`.
-  Parsed tables are cached per asset in the bundle, not per frame.
-- Keyframes: `lutStrength`, `exposure`, `temperature` join the keyable props (as masks did in M8), in a later step.
+- Grade fields map to `@remotion/effects` functions and use their installed ranges: exposure ±5 stops; temperature,
+  tint, vibrance, shadows and highlights ±1; input/output levels 0..1 with input white above input black and
+  gamma 0.01..10.
+- Curves: x values strictly increase; y values may rise and fall. Use shape-preserving piecewise monotone
+  cubic interpolation with no local overshoot, clamp outside endpoint x values, and store the four 256-entry
+  tables in one 256×1 RGBA texture. Apply curves and the LUT in the same WebGL2 pass.
+- LUT: parse the `cube-lut.js` `.cube` shape; 3D only (a 1D `.cube` is an import error), size 2..65,
+  `DOMAIN_MIN/MAX` honoured. Upload as a WebGL2 3D float texture with linear filtering (trilinear sampling),
+  mix with the input by `strength`. Parsed tables are cached per asset in the bundle, not per frame.
+- Grade, curves and LUT strength are static in L2. Look keyframes and their ◇ controls are deferred.
 - Not included: adjustment layers (a grade on a track that applies to everything below). Apply a look to many
   items with one `batch` of `setProps`.
-- UI: inspector Color section (sliders with live preview and ◇ keying as for effects; curves editor; LUT dropdown
+- UI: inspector Color section (static sliders with live preview; editable curves; LUT dropdown
   of `lut` assets + strength). The item gets a small "look" badge on the timeline.
 - Acceptance: a generated test image (ffmpeg `testsrc2`) through a test `.cube` (e.g. a channel swap and a
   warm grade): our render vs `ffmpeg -vf lut3d=file=…:interp=trilinear`, mean absolute difference ≤ 2/255.
@@ -170,11 +172,13 @@ key?: { kind: "chroma"; color: string; similarity: number; smoothness: number; s
     | { kind: "luma"; low: number; high: number; invert?: boolean };      // all 0..1
 ```
 
-- Chroma: `@remotion/effects/color-key`. If it has no spill suppression, `spill` desaturates the key colour in
-  the kept pixels in our own effect after it.
+- Chroma and spill suppression use `@remotion/effects/color-key` directly.
 - Luma: our own `createEffect` (alpha from Rec.709 luma between `low` and `high`, with a soft edge).
+- Luma alpha is `smoothstep(low, high, Rec709 luma)`; below `low` is transparent, above `high` opaque,
+  and `invert` uses `1 - alpha`. Equal thresholds are invalid.
 - Keyed pixels are transparent, so the tracks below show; `blend` and masks still apply after the key.
-- UI: Key section in the inspector; an eyedropper on the player (click samples the canvas pixel under it).
+- UI: Key section in the inspector; an eyedropper pauses playback and samples selected media after grade, curves
+  and LUT but before keying, with canvas scaling, crop and transforms applied.
 - Acceptance: synthetic source (green frame with a red square, ffmpeg `lavfi`) keyed over a blue track: the
   green area reads blue, the square stays red (the §10 still-test tolerance of 40 per channel).
 

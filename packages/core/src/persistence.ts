@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { apply, createProject, type OpResult } from "./ops.ts";
 import type { Ctx, Project } from "./schema.ts";
 import { validate } from "./validate.ts";
+import { parseCube } from "./lut.ts";
 
 // Spec §6. The only Node-dependent part of core.
 
@@ -12,6 +13,12 @@ type Err = { error: { code: string; message: string } };
 interface HistoryEntry { op: string; args: unknown; project: Project; summary?: string }
 
 export const cacheDir = (dir: string, ...parts: string[]) => join(dir, ".splicewright", ...parts);
+
+function projectLutPath(dir: string, path: string) {
+  const root = realpathSync(dir), file = realpathSync(resolve(dir, path));
+  if (!file.startsWith(root + sep)) throw new Error(`LUT asset path escapes project directory: ${path}`);
+  return file;
+}
 
 export function writeAtomic(file: string, data: unknown) {
   const tmp = `${file}.tmp-${process.pid}`;
@@ -113,6 +120,7 @@ export function loadCtx(dir: string): Ctx {
     assetDurations,
     fingerprints,
     loudness,
+    validateLut: (path) => parseCube(readFileSync(projectLutPath(dir, path), "utf8")),
     fingerprint: (path) => fingerprint(join(dir, path)),
     transcript: (assetId) => readJson(cacheDir(dir, "transcripts", `${assetId}.json`))?.segments,
     beats: (assetId) => readJson(cacheDir(dir, "beats", `${assetId}.json`)),

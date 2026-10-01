@@ -152,7 +152,7 @@ switch (cmd) {
     });
     const paths = await Promise.all(copied.map((p) => displayable(dir, p).catch(fail)));
     const results = paths.map((path) => opResult(run(dir, "importAsset", { path })));
-    const ids = Object.values(load(dir).assets).filter((a) => paths.includes(a.path)).map((a) => a.id);
+    const ids = Object.values(load(dir).assets).filter((a) => paths.includes(a.path) && a.kind !== "lut").map((a) => a.id);
     out({ results, ...(!flags["no-ingest"] && ids.length && { ingest: await ingest(dir, { assets: ids, jobs, log }) }) });
   }
   case "ingest": {

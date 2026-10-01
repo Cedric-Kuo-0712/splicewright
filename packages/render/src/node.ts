@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, extname, join } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
 import { renderMedia, renderStill, selectComposition } from "@remotion/renderer";
 import { load, loadCtx, readAssets, sizesOf } from "@splicewright/core/node";
-import { captionWords, type Project } from "@splicewright/core";
+import { captionWords, parseCube, type Project } from "@splicewright/core";
 import { ffmpeg, grid, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
 import { duckRanges } from "./duck.ts";
@@ -15,6 +15,27 @@ import { projectAliases } from "./aliases.ts";
 export { duckRanges };
 
 const here = dirname(fileURLToPath(import.meta.url));
+const lutCache = new Map<string, { stamp: string; value: ReturnType<typeof parseCube> }>();
+/** Parsed tables of the LUTs some item's grade uses. A missing, escaping or invalid file is left out
+ * (lookEffects then names the unavailable asset where it is used) so one bad .cube can't take the
+ * editor or an unrelated render down. */
+export function lutsOf(dir: string, project: Project) {
+  const used = new Set(project.tracks.flatMap((t) => t.items.flatMap((i) => ("grade" in i && i.grade?.lut ? [i.grade.lut.assetId] : []))));
+  const luts: Record<string, ReturnType<typeof parseCube>> = {};
+  for (const a of Object.values(project.assets)) {
+    if (a.kind !== "lut" || !used.has(a.id)) continue;
+    try {
+      const root = realpathSync(dir), path = realpathSync(resolve(dir, a.path));
+      if (!path.startsWith(root + sep)) throw new Error(`LUT asset path escapes project directory: ${a.path}`);
+      const stat = statSync(path), stamp = `${stat.size}:${stat.mtimeMs}`;
+      const cacheKey = `${dir}:${a.id}:${a.path}`;
+      let cached = lutCache.get(cacheKey);
+      if (!cached || cached.stamp !== stamp) { cached = { stamp, value: parseCube(readFileSync(path, "utf8")) }; lutCache.set(cacheKey, cached); }
+      luts[a.id] = cached.value;
+    } catch { /* unavailable: see above */ }
+  }
+  return luts;
+}
 /** Folder holding the node_modules Remotion is installed in. Remotion keys its Chrome download and
  * webpack cache on cwd; pinning both here keeps ~100 MB of cache out of every project folder. */
 const root = join(dirname(createRequire(import.meta.url).resolve("@remotion/renderer/package.json")), "../../..");
@@ -65,11 +86,11 @@ export function bundleProject(dir: string): Promise<string> {
 async function prepare(dir: string) {
   const project = load(dir);
   const ctx = loadCtx(dir);
-  const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(readAssets(dir)), words: captionWords(project, ctx) };
+  const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(readAssets(dir)), words: captionWords(project, ctx), luts: lutsOf(dir, project) };
   const serveUrl = await bundleProject(dir);
   // Canvas effects need a WebGL2 context in Remotion's headless Chromium. Keep the legacy render
   // defaults for projects that do not opt into the per-pixel path.
-  const needsCanvasEffects = project.tracks.some((track) => track.kind === "video" && track.items.some((item) => item.key));
+  const needsCanvasEffects = project.tracks.some((track) => track.kind === "video" && track.items.some((item) => item.key || item.grade));
   const opts = { serveUrl, inputProps, browserExecutable: browserExecutable(), ...(needsCanvasEffects ? { chromiumOptions: { gl: "angle" as const } } : {}) };
   const composition = await selectComposition({ ...opts, id: ID });
   return { ...opts, composition };

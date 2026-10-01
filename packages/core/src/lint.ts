@@ -46,7 +46,7 @@ export function lint(p: Project): LintIssue[] {
         if (!CJK.test(text)) continue;
         const name = { ...themeOf(p)?.roles.subtitle, ...t.textStyle }.font;
         if (name && !FONTS.find((f) => f.name === name)?.cjk) {
-          out.push({ level: "warn", what: `${t.name} has Chinese text but font "${name}" has no CJK glyphs; set textStyle.font to Noto Sans TC`, at: c.start, itemId: c.id });
+          out.push({ level: "warn", what: `${t.name} has Chinese text but "${name}" has no CJK glyphs, so it falls back to another font; set textStyle.font to a CJK font (e.g. Noto Sans TC) for one look`, at: c.start, itemId: c.id });
           break;
         }
       }
@@ -60,7 +60,7 @@ export function lint(p: Project): LintIssue[] {
         const css = textCss(p, (props.role ?? "title") as Parameters<typeof textCss>[1], props.textStyle, text);
         const name = props.textStyle?.font ?? themeOf(p)?.roles[(props.role ?? "title") as "title"]?.font;
         if (CJK.test(text) && name && !FONTS.find((f) => f.name === name)?.cjk)
-          out.push({ level: "warn", what: `${o.id} has Chinese text but font "${name}" has no CJK glyphs; set textStyle.font to Noto Sans TC`, at: o.start, itemId: o.id });
+          out.push({ level: "warn", what: `${o.id} has Chinese text but "${name}" has no CJK glyphs, so it falls back to another font; set textStyle.font to a CJK font (e.g. Noto Sans TC) for one look`, at: o.start, itemId: o.id });
         // ponytail: Text is centred by default and its box needs layout to measure, so only explicit px insets
         // in props.style are checked; add text measurement when a use appears.
         const inset = { ...css, ...props.style } as Record<string, unknown>;

@@ -1,3 +1,4 @@
+import React, { useEffect } from "react";
 import { anchorOf, formatFrame, itemSpan, type AudioItem, type OverlayItem, type Project, type VideoItem } from "@splicewright/core";
 import { findItem } from "../edit.ts";
 import { app, op } from "../store.ts";
@@ -11,11 +12,30 @@ export function Inspector({ p }: { p: Project }) {
   const selection = app.use((s) => s.selection);
   const live = app.use((s) => s.live);
   const found = selection.length === 1 ? findItem(p, selection[0]) : null;
+  const [tab, setTab] = React.useState<"selection" | "project">(selection.length ? "selection" : "project");
+  const selectedIds = selection.join(",");
+  useEffect(() => { if (selectedIds) setTab("selection"); }, [selectedIds]);
+  const tabs = (
+    <div className="inspector-tabs">
+      <button className={tab === "project" ? "on" : ""} aria-pressed={tab === "project"} onClick={() => setTab("project")}>Project</button>
+      <button className={tab === "selection" ? "on" : ""} aria-pressed={tab === "selection"} onClick={() => setTab("selection")}>Selection</button>
+    </div>
+  );
+  if (tab === "project")
+    return (
+      <div className="inspector">
+        {tabs}
+        <h3>Project settings</h3>
+        <p className="dim">Project wide appearance and render settings.</p>
+        <ThemeField p={p} />
+      </div>
+    );
   if (!found)
     return (
       <div className="inspector">
+        {tabs}
+        <p className="scope-label">Editing: {selection.length ? "Multi selection" : "No selection"}</p>
         <p className="dim">{selection.length ? `${selection.length} items selected` : "Select an item"}</p>
-        <ThemeField p={p} />
       </div>
     );
   const { track: t, item } = found;
@@ -24,9 +44,13 @@ export function Inspector({ p }: { p: Project }) {
   const fps = p.meta.fps;
   return (
     <div className="inspector">
+      {tabs}
       <h3>
         {item.id} <span className="dim">{t.kind} on {t.name}</span>
       </h3>
+      <p className="scope-label">Editing: {t.kind === "caption" ? "Caption · whole track style, this caption's text" : "Single item"}</p>
+      {t.locked && <p className="dim">This track is locked; edits are disabled.</p>}
+      <fieldset className="inspector-fields" disabled={t.locked}>
       {span && (
         <p className="dim">
           {formatFrame(span.start, fps)} → {formatFrame(span.start + span.duration, fps)} ({span.duration}f)
@@ -62,8 +86,9 @@ export function Inspector({ p }: { p: Project }) {
       {t.kind === "audio" && <BeatFields p={p} item={item as AudioItem} />}
       {t.kind === "video" && "assetId" in item && <VideoFields p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as VideoItem} fps={fps} still={p.assets[item.assetId]?.kind === "image"} set={set} />}
       {"component" in item && <MaskFields p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as OverlayItem} set={set} />}
-      {"component" in item && item.component === "Text" && <TextFields item={item} set={set} />}
-      {"component" in item && <PropsField value={item.props} onCommit={(props) => set({ props })} />}
+      {"component" in item && item.component === "Text" && <TextFields p={p} item={item} set={set} />}
+      {"component" in item && <details className="advanced"><summary>Advanced · raw props</summary><PropsField value={item.props} onCommit={(props) => set({ props })} /></details>}
+      </fieldset>
     </div>
   );
 }

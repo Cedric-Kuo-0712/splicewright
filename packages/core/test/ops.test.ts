@@ -579,7 +579,7 @@ describe("bezier ease", () => {
     for (let i = 0; i < 60; i++) (c(x1, x2, (lo + hi) / 2) < x ? (lo = (lo + hi) / 2) : (hi = (lo + hi) / 2));
     return c(y1, y2, (lo + hi) / 2);
   };
-  const curves = [[0.42, 0, 1, 1], [0, 0, 0.58, 1], [0.42, 0, 0.58, 1], [0.34, 1.56, 0.64, 1], [0.25, 0.1, 0.25, 1], [1, 0, 0, 1]] as const;
+  const curves: [number, number, number, number][] = [[0.42, 0, 1, 1], [0, 0, 0.58, 1], [0.42, 0, 0.58, 1], [0.34, 1.56, 0.64, 1], [0.25, 0.1, 0.25, 1], [1, 0, 0, 1]];
 
   it("matches the parametric reference within 1e-3 and hits both endpoints", () => {
     for (const c of curves) {

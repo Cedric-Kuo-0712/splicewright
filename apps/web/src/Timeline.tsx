@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { anchorOf, beatFrames, durationFrames, formatFrame, frameOf, gapAt, itemSpan, rulerTicks, secPerFrame, snap, snapPoints, snapSpan, transitionOf, type AudioItem, type CaptionItem, type Item, type Project, type SnapPoint, type Track, type VideoItem } from "@splicewright/core";
 import { app, dnd, ioRange, op, playhead, say, seek } from "./store.ts";
-import { dropFiles, findItem, insertOnNewTrack, laneMenu, markerMenu, openMenu, itemMenu, rulerMenu, trackMenu, videoUnder } from "./edit.ts";
+import { dropFiles, findItem, insertOnNewTrack, laneMenu, markerMenu, openMenu, itemMenu, keyMenu, rulerMenu, trackMenu, videoUnder } from "./edit.ts";
 
 // Spec §7.3 timeline and §15.1–15.2 ruler and snapping.
 
@@ -436,7 +436,7 @@ export function Timeline() {
                         {t.kind === "audio" && !(live && live.mode !== "move") && <BeatTicks p={p} item={item as AudioItem} ppf={ppf} />}
                         {live?.mode === "slip" && <SlipEnds p={p} item={shown as Item & { assetId: string; sourceIn: number }} />}
                         {"sourceIn" in item && !t.locked && !live && <FadeHandles item={item} ppf={ppf} />}
-                        {"keyframes" in shown && shown.keyframes && <KeyMarks p={p} item={shown as VideoItem | AudioItem} ppf={ppf} />}
+                        {"keyframes" in shown && shown.keyframes && <KeyMarks p={p} item={shown as VideoItem | AudioItem} ppf={ppf} locked={t.locked} />}
                         {t.kind === "video" && "assetId" in shown && ((shown as VideoItem).grade || (shown as VideoItem).key) && <span className="badge" title="Color or key look applied">✦ look</span>}
                         <span className="name">
                           {"text" in item ? item.text : "component" in item ? item.component : (item.label ?? p.assets[item.assetId]?.path)}
@@ -603,7 +603,7 @@ function SlipEnds({ p, item }: { p: Project; item: Item & { assetId: string; sou
 
 /** The span a transition covers across the cut after `item`. */
 /** A diamond per keyed frame (all props merged); click one to put the playhead on it. */
-function KeyMarks({ p, item, ppf }: { p: Project; item: VideoItem | AudioItem; ppf: number }) {
+function KeyMarks({ p, item, ppf, locked }: { p: Project; item: VideoItem | AudioItem; ppf: number; locked?: boolean }) {
   const at = new Map<number, string[]>();
   for (const [prop, keys] of Object.entries(item.keyframes ?? {}))
     for (const k of keys) {
@@ -611,7 +611,7 @@ function KeyMarks({ p, item, ppf }: { p: Project; item: VideoItem | AudioItem; p
       if (f >= item.start && f < item.start + item.duration) at.set(f, [...(at.get(f) ?? []), prop]);
     }
   return [...at].map(([f, props]) => (
-    <div key={f} className="kf" style={{ left: (f - item.start) * ppf }} title={`${props.join(", ")} key at ${formatFrame(f, p.meta.fps)} — click to go there`} onPointerDown={(e) => (e.stopPropagation(), seek(f))} />
+    <div key={f} className="kf" style={{ left: (f - item.start) * ppf }} title={`${props.join(", ")} key at ${formatFrame(f, p.meta.fps)} — click to go there, right-click for ease`} onContextMenu={(e) => openMenu(e, keyMenu(item as VideoItem, f, locked))} onPointerDown={(e) => (e.stopPropagation(), seek(f))} />
   ));
 }
 

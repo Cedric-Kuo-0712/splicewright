@@ -1,4 +1,4 @@
-import { anchorOf, durationFrames, frameOf, itemSpan, nextId, secPerFrame, type Item, type Project, type Track, type TrackKind, type VideoItem } from "@splicewright/core";
+import { anchorOf, durationFrames, frameOf, itemSpan, keyAt, nextId, secPerFrame, type Ease, type Item, type Project, type Track, type TrackKind, type VideoItem } from "@splicewright/core";
 import { pip, type PipPreset } from "@splicewright/render";
 import { app, history, ioRange, op, player, playhead, refresh, say, seek, type MenuEntry } from "./store.ts";
 import { captureStyle, styleOperations, type StyleClipboard } from "./style.ts";
@@ -548,6 +548,29 @@ export function openMenu(e: { clientX: number; clientY: number; preventDefault()
   e.preventDefault();
   e.stopPropagation();
   app.set({ menu: { x: e.clientX, y: e.clientY, entries } });
+}
+
+export const EASE_PRESETS: [string, Ease][] = [
+  ["Linear", "linear"],
+  ["Ease", "ease"],
+  ["Ease in", [0.42, 0, 1, 1]],
+  ["Ease out", [0, 0, 0.58, 1]],
+  ["Ease in-out", [0.42, 0, 0.58, 1]],
+  ["Overshoot", [0.34, 1.56, 0.64, 1]],
+];
+
+/** Context menu of a key diamond: one setProps sets the ease of every key on that frame (the segment leaving it). */
+export function keyMenu(item: VideoItem, frame: number, locked?: boolean): MenuEntry[] {
+  const set = (ease: Ease) => {
+    const keyframes = Object.fromEntries(
+      Object.entries(item.keyframes ?? {}).map(([prop, ks]) => {
+        const hit = keyAt(app.get().project!, item, prop as never, frame);
+        return [prop, ks.map((k) => (k === hit ? { ...k, ease } : k))];
+      }),
+    );
+    return op("setProps", { itemId: item.id, patch: { keyframes } });
+  };
+  return EASE_PRESETS.map(([label, ease]) => ({ label, run: () => set(ease), disabled: locked }));
 }
 
 export function itemMenu(p: Project, t: Track, item: Item, frame: number): MenuEntry[] {

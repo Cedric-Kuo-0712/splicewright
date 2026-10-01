@@ -648,7 +648,7 @@ composition or bakes a file that both sides play.
 - **E1 Bezier ease.** Keys gain `ease: [x1, y1, x2, y2]` besides `"linear" | "ease"`. Core evaluates it with its own
   cubic-bezier solver (Newton + bisection, ~20 lines), since core does not depend on Remotion. UI: presets
   (ease-in, ease-out, ease-in-out, overshoot) on a key's context menu. Acceptance: the solver matches CSS
-  `cubic-bezier()` reference values within 1e-3.
+  `cubic-bezier()` reference values within 1e-3. ✅ done: `Ease` schema, `bezier()` in `keyframes.ts`, key diamond right-click presets in the timeline.
 - **S1 Stickers and GIF.** Built-in overlay component `Sticker { src, fit }` over Remotion's `<AnimatedImage>`
   (public in `remotion` 4.0.520; GIF, animated WebP/PNG), looping over the item. `.gif`/`.webp` import as image
   assets marked animated at probe time. Acceptance: two stills a few frames apart differ on an animated GIF.

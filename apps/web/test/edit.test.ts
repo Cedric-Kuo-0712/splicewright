@@ -64,3 +64,17 @@ it("gradeWith unsets a scalar reset to 0 and drops an emptied grade", async () =
   expect(gradeWith({ exposure: 1, lut }, "exposure", 0)).toEqual({ lut });
   vi.unstubAllGlobals();
 });
+
+it("key menu presets set the ease of every key on that frame in one setProps", async () => {
+  const { keyMenu, store, posted } = await setup({});
+  const item = { id: "i_1", assetId: "a_clip", start: 0, duration: 60, sourceIn: 0, keyframes: { opacity: [{ t: 0, v: 0 }, { t: 1, v: 1 }], scale: [{ t: 0, v: 1 }] } } as any;
+  store.app.set({ project: { ...createProject(meta), tracks: [{ id: "t_v1", kind: "video", items: [item] }] } as any });
+  const menu = keyMenu(item, 0) as any[];
+  expect(menu.map((m) => m.label)).toEqual(["Linear", "Ease", "Ease in", "Ease out", "Ease in-out", "Overshoot"]);
+  await menu[4].run();
+  const patch = posted.at(-1).args.patch.keyframes;
+  expect(posted.at(-1).op).toBe("setProps");
+  expect(patch.opacity).toEqual([{ t: 0, v: 0, ease: [0.42, 0, 0.58, 1] }, { t: 1, v: 1 }]);
+  expect(patch.scale[0].ease).toEqual([0.42, 0, 0.58, 1]);
+  vi.unstubAllGlobals();
+});

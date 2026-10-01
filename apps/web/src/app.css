@@ -37,6 +37,7 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .effective-style div { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 5px; align-items: baseline; }
 .effective-style code { overflow-wrap: anywhere; color: #ddd; }
 .effective-style small { color: #888; }
+.style-actions { flex-wrap: wrap; }
 .advanced { margin: 8px 0; }
 .advanced summary { color: #999; cursor: pointer; padding: 4px 0; }
 .field { display: grid; grid-template-columns: 80px 1fr; gap: 6px; align-items: center; margin-bottom: 6px; }

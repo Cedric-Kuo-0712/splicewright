@@ -1,12 +1,22 @@
 import React, { useEffect } from "react";
 import { anchorOf, formatFrame, itemSpan, type AudioItem, type OverlayItem, type Project, type VideoItem } from "@splicewright/core";
-import { findItem } from "../edit.ts";
+import { copyStyle, findItem, pasteStyle } from "../edit.ts";
 import { app, op } from "../store.ts";
 import { Field, PropsField } from "./fields.tsx";
 import { TextFields, CaptionStyleFields, ThemeField } from "./text.tsx";
 import { LoudnessFields, BeatFields, AudioVolume } from "./audio.tsx";
 import { VideoFields, MaskFields } from "./video.tsx";
 
+
+function StyleActions() {
+  const selection = app.use((s) => s.selection);
+  return (
+    <div className="buttons style-actions">
+      <button disabled={selection.length !== 1} onClick={copyStyle} title="Copy visual style only (video: effects, grade, key); content, timing, source and transform are excluded">Copy style</button>
+      <button onClick={pasteStyle} title="Apply to compatible unlocked selections in one undo step">Apply style</button>
+    </div>
+  );
+}
 
 export function Inspector({ p }: { p: Project }) {
   const selection = app.use((s) => s.selection);
@@ -36,6 +46,7 @@ export function Inspector({ p }: { p: Project }) {
         {tabs}
         <p className="scope-label">Editing: {selection.length ? "Multi selection" : "No selection"}</p>
         <p className="dim">{selection.length ? `${selection.length} items selected` : "Select an item"}</p>
+        {selection.length > 0 && <StyleActions />}
       </div>
     );
   const { track: t, item } = found;
@@ -50,6 +61,7 @@ export function Inspector({ p }: { p: Project }) {
       </h3>
       <p className="scope-label">Editing: {t.kind === "caption" ? "Caption · whole track style, this caption's text" : "Single item"}</p>
       {t.locked && <p className="dim">This track is locked; edits are disabled.</p>}
+      <StyleActions />
       <fieldset className="inspector-fields" disabled={t.locked}>
       {span && (
         <p className="dim">

@@ -1,1 +1,2 @@
 packages/core/assets/luts/** -text -diff
+packages/core/assets/luts/**/*.cube.gz binary -diff

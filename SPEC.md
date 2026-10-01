@@ -658,7 +658,7 @@ composition or bakes a file that both sides play.
   on the forward file. Acceptance: frame k of a reversed item equals frame (n−1−k) of the forward one.
 - **Lint.** Read-only op `lint` → `{ level, what, at, itemId? }[]`: gaps on the magnetic track, captions or text
   outside the title-safe area, CJK text in a font without CJK glyphs, peaks above −1 dBFS without the limiter,
-  items on the canvas path that can't decode. MCP instructions tell agents to run it before `render` master.
+  items on the canvas path that can't decode. MCP instructions tell agents to run it before `render` master. ✅ done: `lint(project)` in core, CLI `splicewright lint`, MCP `lint`. Implemented: magnetic-track gaps, default-caption/Text inset vs title-safe (px insets only), CJK font. Not yet: peaks (no peak measurement is stored, only LUFS) and decode failures (no recorded probe signal).
 - **Desktop wrapper.** Electron: rendering needs Node + Chromium, which Electron has; Tauri would need a bundled
   Node as a sidecar. Not before the web UI stabilises.
 

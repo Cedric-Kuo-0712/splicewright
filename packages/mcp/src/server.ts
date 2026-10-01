@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { find, findFillers, getItem, getRange, getSummary, LUT_PRESETS, ops, type OpResult } from "@splicewright/core";
+import { find, findFillers, getItem, getRange, getSummary, lint, LUT_PRESETS, ops, type OpResult } from "@splicewright/core";
 import { applyLutPreset, load, loadCtx, redo, run, undo } from "@splicewright/core/node";
 import { ingest, peek, STEPS } from "@splicewright/ingest";
 import { renderStatus, startRender, still, storyboard } from "@splicewright/render/node";
@@ -33,7 +33,7 @@ Assets must be ingested before insertItem can default a duration and before dete
 
 Edit only through splicewright_* tools, never by writing project.json or directly modifying raw/. Select built-in looks with list_lut_presets and apply_lut_preset; that tool copies only the selected LUT and its notices into the project. Put multi-step changes in splicewright_batch: atomic, one revision, one undo step. Pass the baseRevision you last read; on a conflict error the human changed something, so re-read instead of retrying. Undo is shared with the human: only undo your own last step, and pass the revision that step returned as baseRevision so a newer human edit is never the one undone. Frame args also take { near } to snap to edges, markers or beats.
 
-Check the result with storyboard over the changed range; render with preset draft for a quick full check. Record decisions worth keeping across sessions in AGENTS.md under Notes.`;
+Before a master render, run lint and fix its errors (gaps, text outside the title-safe area, CJK in a font without glyphs). Check the result with storyboard over the changed range; render with preset draft for a quick full check. Record decisions worth keeping across sessions in AGENTS.md under Notes.`;
 
 export function createServer(dir: string): McpServer {
   const server = new McpServer({ name: "splicewright", version: "0.0.0" }, { instructions: INSTRUCTIONS });
@@ -86,6 +86,11 @@ export function createServer(dir: string): McpServer {
     "get_summary",
     { description: "Tracks, item counts, total duration, markers, revision. No per-item detail." },
     async () => json(getSummary(load(dir))),
+  );
+  server.registerTool(
+    "lint",
+    { description: "Read-only checks before a master render: gaps on magnetic tracks, captions/text outside the title-safe area, CJK text in a font without CJK glyphs → [{ level, what, at, itemId? }]. No revision change." },
+    async () => json(lint(load(dir))),
   );
   server.registerTool(
     "get_range",

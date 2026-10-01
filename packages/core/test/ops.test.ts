@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { animate, apply, badFont, builtinTheme, captionWords, createProject, itemSpan, textCss, THEME_IDS, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
+import { animate, apply, bezier, Keyframes, badFont, builtinTheme, captionWords, createProject, itemSpan, textCss, THEME_IDS, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
 
 const ctx: Ctx = {
   assetDurations: { a_clip: 10, a_song: 60 },
@@ -568,5 +568,47 @@ describe("text themes", () => {
     const mine = { mine: { name: "mine", roles: { title: { font: "Anton" } } } };
     const q = ok(apply(ok(apply(p, "setMeta", { themes: mine }, ctx)), "setMeta", { theme: "mine" }, ctx));
     expect(err(apply(q, "setMeta", { themes: null }, ctx))).toBe("invalid");
+  });
+});
+
+describe("bezier ease", () => {
+  // Reference: 60-step bisection on the parametric curve, independent of the Newton solver.
+  const ref = (x1: number, y1: number, x2: number, y2: number, x: number) => {
+    const c = (a: number, b: number, s: number) => 3 * a * (1 - s) ** 2 * s + 3 * b * (1 - s) * s * s + s ** 3;
+    let [lo, hi] = [0, 1];
+    for (let i = 0; i < 60; i++) (c(x1, x2, (lo + hi) / 2) < x ? (lo = (lo + hi) / 2) : (hi = (lo + hi) / 2));
+    return c(y1, y2, (lo + hi) / 2);
+  };
+  const curves: [number, number, number, number][] = [[0.42, 0, 1, 1], [0, 0, 0.58, 1], [0.42, 0, 0.58, 1], [0.34, 1.56, 0.64, 1], [0.25, 0.1, 0.25, 1], [1, 0, 0, 1]];
+
+  it("matches the parametric reference within 1e-3 and hits both endpoints", () => {
+    for (const c of curves) {
+      expect(bezier(...c, 0)).toBe(0);
+      expect(bezier(...c, 1)).toBe(1);
+      for (const x of [0.05, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9, 0.97]) expect(Math.abs(bezier(...c, x) - ref(...c, x))).toBeLessThan(1e-3);
+    }
+    expect(bezier(0.34, 1.56, 0.64, 1, 0.5)).toBeGreaterThan(1); // overshoot
+    expect(bezier(0, 0, 1, 1, 0.3)).toBeCloseTo(0.3, 6);
+  });
+
+  it("schema rejects x outside [0, 1]; keys without a tuple are unchanged", () => {
+    const key = (ease: unknown) => Keyframes.safeParse({ opacity: [{ t: 0, v: 0, ease }, { t: 1, v: 1 }] }).success;
+    expect(key([0.3, 2, 0.6, 1])).toBe(true);
+    expect(key([1.2, 0, 0.5, 1])).toBe(false);
+    expect(key([0.2, 0, -0.1, 1])).toBe(false);
+    expect(key([0.2, 0, 0.5])).toBe(false);
+    expect(key("linear") && key("ease") && key(undefined)).toBe(true);
+  });
+
+  it("setKeyframe with a tuple ease round-trips and drives valueAt; re-keying keeps it", () => {
+    let p = ok(apply(fixture(), "setKeyframe", { itemId: "i_1", prop: "opacity", at: 0, value: 0, ease: [0.42, 0, 0.58, 1] }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 30, value: 1 }, ctx));
+    expect(item(p, "i_1").keyframes.opacity[0].ease).toEqual([0.42, 0, 0.58, 1]);
+    expect(validate(p)).toEqual([]);
+    expect(valueAt(p, item(p, "i_1"), "opacity", 15)).toBeCloseTo(0.5, 3);
+    expect(valueAt(p, item(p, "i_1"), "opacity", 7)).toBeLessThan(7 / 30);
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 0, value: 0.2 }, ctx));
+    expect(item(p, "i_1").keyframes.opacity[0].ease).toEqual([0.42, 0, 0.58, 1]);
+    expect(err(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 0, value: 0, ease: [2, 0, 0.5, 1] }, ctx))).not.toBe("ok");
   });
 });

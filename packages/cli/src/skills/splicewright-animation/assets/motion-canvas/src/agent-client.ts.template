@@ -7,6 +7,9 @@ export function agentClient(): Plugin {
     project(value) { project=value; },
     renderer(value) {
       renderer=value;
+      // Tell the bridge this tab can render; again after a reconnect, which is a new socket.
+      const hello=()=>import.meta.hot?.send('splicewright:hello',{});
+      hello();import.meta.hot?.on('vite:ws:connect',hello);
       renderer.onFinished.subscribe(result=>{
         if (!running) return;
         import.meta.hot?.send('splicewright:done',{id:running,

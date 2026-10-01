@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame, createEffect, type EffectsProp, type EffectDefinition } from "remotion";
+import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame, useRemotionEnvironment, createEffect, type EffectsProp, type EffectDefinition } from "remotion";
 import { Video as CanvasVideo } from "@remotion/media";
 import { colorKey } from "@remotion/effects/color-key";
 import { exposure } from "@remotion/effects/exposure";
@@ -318,6 +318,8 @@ export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: 
   return sample && effects.length === 0 ? [samplingCanvasEffect({})] : effects;
 }
 
+const lookOffStyle: React.CSSProperties = { position: "absolute", top: 8, right: 8, zIndex: 10, padding: "4px 8px", color: "#fff", background: "#9b1c1c", borderRadius: 4, font: "12px sans-serif" };
+
 const CanvasVideoPath: React.FC<{
   itemName: string;
   src: string;
@@ -337,7 +339,7 @@ const CanvasVideoPath: React.FC<{
   return (
     <div data-look-item-id={itemId} style={{ display: "contents" }}>
       {decodeError ? (
-        <div style={{ position: "absolute", top: 8, right: 8, zIndex: 10, padding: "4px 8px", color: "#fff", background: "#9b1c1c", borderRadius: 4, font: "12px sans-serif" }}>look off: can&apos;t decode ({itemName})</div>
+        <div style={lookOffStyle}>look off: can&apos;t decode ({itemName})</div>
       ) : (
         <CanvasVideo
           src={src}
@@ -378,7 +380,12 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; mu
   };
   const trimBefore = Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps);
   const volume = (v: number) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain;
-  const media = asset.kind === "image" && (raw.grade || raw.key) ? (
+  // A missing .cube must not take the whole preview down, but a render keeps failing on it (lookEffects throws) rather than writing an ungraded clip.
+  const { isRendering } = useRemotionEnvironment();
+  const lutMissing = !!raw.grade?.lut && !luts[raw.grade.lut.assetId];
+  const media = lutMissing && !isRendering ? (
+    <div style={lookOffStyle}>look off: LUT {raw.grade!.lut!.assetId} unavailable ({raw.label ?? raw.id})</div>
+  ) : asset.kind === "image" && (raw.grade || raw.key) ? (
     <div data-look-item-id={raw.id} style={{ display: "contents" }}><Img src={staticFile(asset.path)} style={style} effects={lookEffects(raw.id, raw.grade, raw.key, luts, sampleItemId === raw.id)} /></div>
   ) : asset.kind === "image" ? (
     <Img src={staticFile(asset.path)} style={style} />

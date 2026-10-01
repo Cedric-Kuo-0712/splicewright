@@ -32,7 +32,6 @@
     "@remotion/shapes": "4.0.520",
     "@splicewright/core": "*",
     "@splicewright/ingest": "*",
-    "cube-lut.js": "^1.0.2",
     "flubber": "^0.4.2",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -40,6 +39,7 @@
     "roughjs": "^4.6.6"
   },
   "devDependencies": {
+    "cube-lut.js": "^1.0.2",
     "@types/flubber": "^0.4.0",
     "@types/react": "19.2.7"
   }

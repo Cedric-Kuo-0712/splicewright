@@ -16,6 +16,7 @@ export { duckRanges };
 
 const here = dirname(fileURLToPath(import.meta.url));
 const lutCache = new Map<string, { stamp: string; value: ReturnType<typeof parseCube> }>();
+const lutVersions = new WeakMap<object, string>();
 /** Parsed tables of the LUTs some item's grade uses. A missing, escaping or invalid file is left out
  * (lookEffects then names the unavailable asset where it is used) so one bad .cube can't take the
  * editor or an unrelated render down. */
@@ -32,10 +33,13 @@ export function lutsOf(dir: string, project: Project) {
       let cached = lutCache.get(cacheKey);
       if (!cached || cached.stamp !== stamp) { cached = { stamp, value: parseCube(readFileSync(path, "utf8")) }; lutCache.set(cacheKey, cached); }
       luts[a.id] = cached.value;
+      lutVersions.set(cached.value, `${a.path}:${stamp}`);
     } catch { /* unavailable: see above */ }
   }
   return luts;
 }
+/** Changes whenever lutsOf has to re-read the file; lets the editor fetch a table only when it changed. */
+export const lutVersion = (lut: object) => lutVersions.get(lut);
 /** Folder holding the node_modules Remotion is installed in. Remotion keys its Chrome download and
  * webpack cache on cwd; pinning both here keeps ~100 MB of cache out of every project folder. */
 const root = join(dirname(createRequire(import.meta.url).resolve("@remotion/renderer/package.json")), "../../..");

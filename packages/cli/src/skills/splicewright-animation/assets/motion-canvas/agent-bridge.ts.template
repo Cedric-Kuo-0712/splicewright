@@ -1,26 +1,38 @@
 import {randomUUID} from 'node:crypto';
 import {mkdirSync, writeFileSync} from 'node:fs';
-import type {Plugin} from 'vite';
+import type {Plugin, WebSocketClient} from 'vite';
 
 // Deliberately only status/render. No arbitrary paths, browser scripts or screenshot payloads.
 export function agentBridge(): Plugin {
   return {name:'splicewright-agent-bridge',configureServer(server) {
     const pending=new Map<string,{resolve:(value:Record<string,unknown>)=>void;timer:ReturnType<typeof setTimeout>}>();
     const jobs=new Set<string>();
+    const expired=new Set<string>(); // render requests that timed out; the browser may still accept them late
+    // Browser tabs that announced themselves, oldest first. Only the newest live one is asked, so two open
+    // tabs cannot both start the same render.
+    const renderers=new Set<WebSocketClient>();
+    server.ws.on('splicewright:hello',(_data,client)=>{renderers.delete(client);renderers.add(client);});
     const ask=(action:string,params:Record<string,unknown>={})=>new Promise<Record<string,unknown>>((resolve)=>{
+      const client=[...renderers].reverse().find(c=>server.ws.clients.has(c));
+      if (!client) return resolve({error:'no connected renderer; open the project in a browser'});
       const id=randomUUID();
-      const timer=setTimeout(()=>{pending.delete(id);resolve({error:'no connected renderer; open the project in a browser'});},2000);
+      const timer=setTimeout(()=>{
+        pending.delete(id);
+        if (action==='render') expired.add(id);
+        resolve({id,error:action==='render'?`the renderer did not answer in time; the render may still have started, see .agent-render/${id}.json`:'the renderer did not answer in time'});
+      },2000);
       pending.set(id,{resolve,timer});
-      server.ws.send('splicewright:request',{id,action,...params});
+      client.send('splicewright:request',{id,action,...params});
     });
+    const track=(id:string)=>{
+      jobs.add(id);mkdirSync('.agent-render',{recursive:true});
+      writeFileSync(`.agent-render/${id}.json`,JSON.stringify({id,state:'running'})+'\n');
+    };
     server.ws.on('splicewright:response',(data:{id:string;accepted?:boolean;error?:string})=>{
       const request=pending.get(data.id);
-      if (!request) return;
+      if (!request) {if (data.accepted && expired.delete(data.id)) track(data.id);return;}
       clearTimeout(request.timer);pending.delete(data.id);
-      if (data.accepted) {
-        jobs.add(data.id);mkdirSync('.agent-render',{recursive:true});
-        writeFileSync(`.agent-render/${data.id}.json`,JSON.stringify({id:data.id,state:'running'})+'\n');
-      }
+      if (data.accepted) track(data.id);
       request.resolve({...data});
     });
     server.ws.on('splicewright:done',(data:{id:string;state:string;error?:string})=>{

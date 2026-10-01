@@ -66,3 +66,49 @@ it('agent render bridge refuses cross-origin and malformed rendering requests', 
   expect(JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',probe],{cwd,encoding:'utf8'})))
     .toEqual([403,403,400,400,400,400,413]);
 });
+
+it('agent render bridge asks only the newest live tab and tracks a render the browser accepts after the timeout', {timeout:20000}, () => {
+  const cwd=mkdtempSync(join(tmpdir(),'swr-render-bridge-tabs-'));
+  copyFileSync(join(import.meta.dirname,'../src/skills/splicewright-animation/assets/motion-canvas/agent-bridge.ts.template'),join(cwd,'bridge.ts'));
+  const probe = `
+    import {readFileSync} from 'node:fs';
+    import {agentBridge} from './bridge.ts';
+    const hooks={}, clients=new Set(); let middleware;
+    const tab=()=>({sent:[],send(event,payload){this.sent.push({event,payload});}});
+    agentBridge().configureServer({
+      ws:{on:(name,fn)=>hooks[name]=fn,clients,send:()=>{throw new Error('broadcast reached every tab')}},
+      httpServer:{on:()=>{}},config:{logger:{info:()=>{}}},middlewares:{use:fn=>middleware=fn}
+    });
+    async function call(method,url,body='') {
+      let code,payload;
+      const req={url,method,headers:{host:'127.0.0.1:9000'},socket:{remoteAddress:'127.0.0.1'},async *[Symbol.asyncIterator](){yield Buffer.from(body)}};
+      await middleware(req,{writeHead(value){code=value},end(data){payload=JSON.parse(data)}},()=>{throw new Error('route fell through')});
+      return [code,payload];
+    }
+    const answer=(tab,extra)=>hooks['splicewright:response']({id:tab.sent.at(-1).payload.id,...extra});
+    const a=tab(), b=tab(); clients.add(a); clients.add(b);
+    const out={};
+    out.noHello=(await call('GET','/__splicewright/status'))[0];
+    hooks['splicewright:hello']({},a); hooks['splicewright:hello']({},b);
+    const first=call('GET','/__splicewright/status');
+    out.newestOnly=[a.sent.length,b.sent.length];
+    answer(b,{ready:true}); out.newestAnswered=(await first)[0];
+    clients.delete(b); // the newest tab closed: fall back to the older one
+    const second=call('GET','/__splicewright/status');
+    out.fallback=[a.sent.length,b.sent.length];
+    answer(a,{ready:true}); await second;
+    const render=call('POST','/__splicewright/render',JSON.stringify({fps:30,width:1280,height:720}));
+    await new Promise(done=>setImmediate(done)); // the body is read before the browser is asked
+    const id=a.sent.at(-1).payload.id;
+    const [code,timedOut]=await render; // nobody answers within the 2 s window
+    out.timeout=[code,timedOut.id===id];
+    hooks['splicewright:response']({id,accepted:true}); // ...then the browser accepts it anyway
+    const state=()=>JSON.parse(readFileSync('.agent-render/'+id+'.json','utf8')).state;
+    out.late=state();
+    hooks['splicewright:done']({id,state:'complete'});
+    out.done=state();
+    console.log(JSON.stringify(out));
+  `;
+  expect(JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',probe],{cwd,encoding:'utf8'})))
+    .toEqual({noHello:503,newestOnly:[0,1],newestAnswered:200,fallback:[1,1],timeout:[503,true],late:'running',done:'complete'});
+});

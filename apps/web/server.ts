@@ -9,7 +9,7 @@ import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { addRecent, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo } from "@splicewright/core/node";
 import { ASPECTS, captionWords, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
 import { displayable, ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
-import { duckRanges, lutsOf } from "@splicewright/render/node";
+import { duckRanges, lutsOf, lutVersion } from "@splicewright/render/node";
 
 // Spec §7.3. `splicewright open` runs this: a Vite dev server for the UI (open question 5, the simple
 // option) plus a small API. Every mutation goes through core ops with the client's baseRevision.
@@ -99,7 +99,9 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     const probes = readAssets(dir);
     const durations = Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.duration ? [[id, a.duration]] : [])));
     const ctx = loadCtx(dir);
-    return { project, duck: duckRanges(project, ctx), words: captionWords(project, ctx), proxies, durations, sizes: sizesOf(probes), loudness: ctx.loudness ?? {}, luts: lutsOf(dir, project) };
+    // A 65³ LUT is ~4 MB of JSON; the editor gets its version here and fetches the table from /api/lut when that changes.
+    const lutVersions = Object.fromEntries(Object.entries(lutsOf(dir, project)).map(([id, lut]) => [id, lutVersion(lut)!]));
+    return { project, duck: duckRanges(project, ctx), words: captionWords(project, ctx), proxies, durations, sizes: sizesOf(probes), loudness: ctx.loudness ?? {}, lutVersions };
   };
   const result = (res: ServerResponse, r: ReturnType<typeof run>) =>
     "error" in r ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, { revision: r.project.revision, summary: r.changes.summary, ...snapshot() });
@@ -208,6 +210,11 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             return result(res, r);
           }
           if (route === "GET /api/history") return send(res, 200, historyList(dir));
+          if (route === "GET /api/lut") {
+            const id = url.searchParams.get("asset") ?? "";
+            const lut = lutsOf(dir, load(dir))[id];
+            return lut ? send(res, 200, lut) : send(res, 404, { error: { code: "not_found", message: `LUT ${id} is unused, missing or invalid` } });
+          }
           if (route === "GET /api/events") {
             res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
             res.write(": connected\n\n");

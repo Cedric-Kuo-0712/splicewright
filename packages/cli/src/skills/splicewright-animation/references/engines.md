@@ -37,7 +37,10 @@ curl --fail -X POST http://127.0.0.1:9000/__splicewright/render \
   -H 'Content-Type: application/json' -d '{"fps":30,"width":1920,"height":1080}'
 ```
 
-Status requires a connected project with a renderer. Render returns an accepted
+Status requires a connected project with a renderer. With several browser tabs
+open, only the newest one is asked. If the renderer does not answer within 2 s
+the response is a 503 carrying the job ID: the render may still have started, so
+check `.agent-render/<id>.json` before sending it again. Render returns an accepted
 job ID, **not completion**. The bridge records completion in `.agent-render/<id>.json`
 when the native renderer finishes; result `complete`, `failed` or `aborted`.
 Do not poll for completion. Follow the existing runner/notification policy or

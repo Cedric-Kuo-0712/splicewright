@@ -9,7 +9,7 @@ is core op/schema → render → UI → MCP/CLI). This file covers how a video *
 | # | Milestone | Needs | Acceptance (short) | Status |
 |---|---|---|---|---|
 | F | Built-in fonts + agent font guide | — | font still test: Latin and CJK render in the font, not the fallback | ✅ done (merged 9a5a746) |
-| L1 | Text styles and themes | F | one `setMeta { theme }` restyles every role-bound text in one undo step | ✅ done (merged 65092a6; user fonts from `raw/` not built) |
+| L1 | Text styles and themes | F | one `setMeta { theme }` restyles every role-bound text in one undo step | ✅ done (merged 65092a6; imported fonts from `raw/` supported) |
 | L0 | Canvas video path (spike) | — | a color-key still matches between Player and render; existing still tests unchanged | ✅ done (UI verified by user) |
 | L2 | Color: grade, curves, LUT | L0 | our LUT within 2/255 of ffmpeg `lut3d` on a test image | ✅ done (merged 18c69ac, presets 0db12fd; UI verified by user) |
 | L3 | Keying: chroma, luma | L2 | keyed green shows the track below; the red subject survives | ✅ done (merged 18c69ac; UI verified by user) |

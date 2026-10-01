@@ -49,10 +49,11 @@ const frameArg = (base: z.ZodNumber) =>
 const Patch = z.record(z.string(), z.unknown()); // null value = unset the field
 const KINDS = ["video", "audio", "caption", "overlay"] as const;
 
-const EXT_KIND: Record<string, "video" | "audio" | "image" | "lut"> = {
+const EXT_KIND: Record<string, "video" | "audio" | "image" | "lut" | "font"> = {
   mp4: "video", mov: "video", m4v: "video", mkv: "video", webm: "video", avi: "video",
   mp3: "audio", wav: "audio", m4a: "audio", aac: "audio", flac: "audio", ogg: "audio",
   jpg: "image", jpeg: "image", png: "image", webp: "image", gif: "image", cube: "lut",
+  ttf: "font", otf: "font", woff: "font", woff2: "font",
 };
 /** Phone photos Chrome can't decode, so neither the editor nor the render can show them. */
 export const HEIF = /\.hei[cf]$/i;
@@ -192,12 +193,12 @@ function patch(target: Record<string, unknown>, changes: Record<string, unknown>
 }
 
 /** A Text overlay's `props.role` / `props.textStyle`: valid shape, known font. */
-function checkText(props: Record<string, unknown>) {
+function checkText(props: Record<string, unknown>, p: Project) {
   if (props.role !== undefined && !FontRole.safeParse(props.role).success) fail("invalid", `role "${props.role}" is not one of title, subtitle, emphasis, handwritten`);
   if (props.textStyle === undefined) return;
   const s = TextStyle.safeParse(props.textStyle);
   if (!s.success) fail("invalid", `textStyle: ${s.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
-  const bad = badFont(s.data);
+  const bad = badFont(s.data, p.assets);
   if (bad) fail("invalid", bad);
 }
 
@@ -206,7 +207,7 @@ function checkText(props: Record<string, unknown>) {
 export const ops: Record<string, OpDef<any>> = {
   importAsset: def(
     "Register a media file (path relative to the project root). Idempotent by path and by content fingerprint; a probed asset whose file moved is re-pointed to the new path.",
-    z.object({ path: z.string().min(1), kind: z.enum(["video", "audio", "image", "lut"]).optional() }),
+    z.object({ path: z.string().min(1), kind: z.enum(["video", "audio", "image", "lut", "font"]).optional() }),
     (p, a, ctx) => {
       if (/^([/\\]|[a-zA-Z]:)/.test(a.path) || a.path.split(/[/\\]/).includes(".."))
         fail("invalid", `asset path must be relative to the project root and inside it: ${a.path}`);
@@ -228,6 +229,7 @@ export const ops: Record<string, OpDef<any>> = {
       const kind = a.kind ?? EXT_KIND[ext] ?? fail("invalid", `unknown media type ".${ext}"; pass kind`);
       if (ext === "cube" && kind !== "lut") fail("invalid", ".cube files must be imported as LUT assets");
       if (kind === "lut" && ext !== "cube") fail("invalid", "LUT assets must be .cube files");
+      if (kind === "font" && !["ttf", "otf", "woff", "woff2"].includes(ext)) fail("invalid", "font assets must be .ttf, .otf, .woff, or .woff2 files");
       if (kind === "lut") {
         if (!ctx.validateLut) fail("invalid", "cannot validate .cube LUT without a project file reader");
         try { ctx.validateLut(a.path); } catch (e) { fail("invalid", `invalid .cube LUT ${a.path}: ${(e as Error).message}`); }
@@ -246,6 +248,14 @@ export const ops: Record<string, OpDef<any>> = {
     (p, a) => {
       if (!p.assets[a.assetId]) fail("not_found", `no asset ${a.assetId}`);
       const users = p.tracks.flatMap((t): (VideoItem | AudioItem | CaptionItem | OverlayItem)[] => t.items).filter((i) => ("assetId" in i && i.assetId === a.assetId) || ("grade" in i && i.grade?.lut?.assetId === a.assetId) || ("component" in i && i.component === "Sticker" && i.props.src === p.assets[a.assetId].path));
+      if (p.assets[a.assetId].kind === "font") {
+        const styled = (s: TextStyle | undefined) => s?.font === a.assetId;
+        const themeUsers = Object.entries(p.themes ?? {}).filter(([, theme]) => Object.values(theme.roles).some(styled)).map(([id]) => `theme ${id}`);
+        const trackUsers = p.tracks.filter((t) => t.kind === "caption" && styled(t.textStyle)).map((t) => `track ${t.id}`);
+        const itemUsers = p.tracks.flatMap((t) => t.kind === "overlay" ? t.items.filter((i) => i.component === "Text" && styled(i.props.textStyle as TextStyle | undefined)).map((i) => i.id) : []);
+        const allUsers = [...themeUsers, ...trackUsers, ...itemUsers];
+        if (allUsers.length) fail("invalid", `${a.assetId} is used by ${allUsers.join(", ")}; update those styles first`);
+      }
       if (users.length) fail("invalid", `${a.assetId} is used by ${users.map((i) => i.id).join(", ")}; delete those first`);
       const { path } = p.assets[a.assetId];
       delete p.assets[a.assetId];
@@ -275,7 +285,7 @@ export const ops: Record<string, OpDef<any>> = {
       let item: Item;
       if (a.assetId !== undefined) {
         const asset = p.assets[a.assetId] ?? fail("not_found", `asset ${a.assetId} not found`);
-        if (asset.kind === "lut") fail("invalid", "LUT assets cannot be inserted on a track");
+        if (asset.kind === "lut" || asset.kind === "font") fail("invalid", `${asset.kind.toUpperCase()} assets cannot be inserted on a track`);
         kind = asset.kind === "audio" ? "audio" : "video";
         const sourceIn = a.sourceIn ?? 0;
         const len = asset.kind === "image" ? undefined : ctx.assetDurations?.[asset.id];
@@ -286,7 +296,7 @@ export const ops: Record<string, OpDef<any>> = {
       } else if (a.component !== undefined) {
         kind = "overlay";
         const duration = a.duration ?? fail("invalid", "duration required");
-        if (a.component === "Text") checkText(a.props ?? {});
+        if (a.component === "Text") checkText(a.props ?? {}, p);
         if (a.component === "Sticker") {
           const sticker = StickerProps.safeParse(a.props ?? {});
           if (!sticker.success || !Object.values(p.assets).some((asset) => asset.kind === "image" && asset.path === sticker.data.src))
@@ -498,7 +508,7 @@ export const ops: Record<string, OpDef<any>> = {
       for (const k of Object.keys(MASK_PROPS)) delete v.keyframes[k as keyof typeof MASK_PROPS];
       if (!Object.keys(v.keyframes).length) delete v.keyframes;
     }
-    if (t.kind === "overlay" && (item as OverlayItem).component === "Text") checkText((item as OverlayItem).props);
+    if (t.kind === "overlay" && (item as OverlayItem).component === "Text") checkText((item as OverlayItem).props, p);
     if (t.kind === "overlay" && (item as OverlayItem).component === "Sticker") {
       const sticker = StickerProps.safeParse((item as OverlayItem).props);
       if (!sticker.success || !Object.values(p.assets).some((asset) => asset.kind === "image" && asset.path === sticker.data.src))
@@ -621,7 +631,7 @@ export const ops: Record<string, OpDef<any>> = {
     const t = findTrack(p, a.trackId);
     patch(t as Record<string, unknown>, a.patch, TRACK_PROPS[t.kind], `${t.kind} track ${t.id}`);
     if (t.kind === "caption") {
-      const bad = badFont(t.textStyle);
+      const bad = badFont(t.textStyle, p.assets);
       if (bad) fail("invalid", bad);
     }
     return `updated track ${t.id}: ${Object.keys(a.patch).join(", ")}`;
@@ -638,7 +648,7 @@ export const ops: Record<string, OpDef<any>> = {
         if (themes === null) delete p.themes;
         else p.themes = themes;
       }
-      for (const t of Object.values(p.themes ?? {})) for (const s of Object.values(t.roles)) checkText({ textStyle: s });
+      for (const t of Object.values(p.themes ?? {})) for (const s of Object.values(t.roles)) checkText({ textStyle: s }, p);
       if (p.meta.theme && !isTheme(p, p.meta.theme)) fail("invalid", `unknown theme "${p.meta.theme}"; one of: ${[...THEME_IDS, ...Object.keys(p.themes ?? {})].join(", ")}`);
       return `updated meta: ${Object.keys(a).join(", ")}`;
     },

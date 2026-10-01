@@ -48,7 +48,7 @@ function sendFile(req: IncomingMessage, res: ServerResponse, file: string, type?
   stream(createReadStream(file, { start, end }), res);
 }
 
-const TYPES: Record<string, string> = { mp4: "video/mp4", mov: "video/quicktime", m4v: "video/mp4", webm: "video/webm", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", aac: "audio/aac", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", svg: "image/svg+xml" };
+const TYPES: Record<string, string> = { mp4: "video/mp4", mov: "video/quicktime", m4v: "video/mp4", webm: "video/webm", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", aac: "audio/aac", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", svg: "image/svg+xml", ttf: "font/ttf", otf: "font/otf", woff: "font/woff", woff2: "font/woff2" };
 
 // ponytail: at most 4 lazy ffmpeg jobs at once, FIFO; thumbs of 4K footage cost ~0.2 s each.
 const limited = limiter(4);
@@ -176,7 +176,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             await queue;
             if (asset.kind !== "lut") {
               await ingest(dir, { assets: [asset.id], only: [] }); // probe now, so the answer carries the duration
-              background(asset.id);
+              if (asset.kind !== "font") background(asset.id);
             }
             return send(res, 200, { assetId: asset.id, summary: r.changes.summary, ...snapshot() });
           }

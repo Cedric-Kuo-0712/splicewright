@@ -44,6 +44,9 @@ export const isTheme = (p: Pick<Project, "themes">, id: string) => THEME_IDS.inc
 const CJK = /[㐀-鿿豈-﫿]/;
 const font = (name?: string) => FONTS.find((f) => f.name === name);
 
+/** Stable CSS family for an imported font asset; the render package loads the font file itself. */
+export const fontAssetFamily = (id: string) => `Splicewright Font ${id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+
 /** Weight clamped to the font's range (variable) or snapped to its nearest installed weight (static). */
 function weightOf(f: (typeof FONTS)[number], w: number) {
   if (f.family.endsWith("Variable")) return Math.min(f.weights[1], Math.max(f.weights[0], w));
@@ -54,16 +57,17 @@ function weightOf(f: (typeof FONTS)[number], w: number) {
  * CSS for a text: the theme's `role` style, then `textStyle` over it, field by field. With no theme and no
  * textStyle this is empty, so existing projects render as before. Raw `props.style` goes over this.
  */
-export function textCss(p: Pick<Project, "meta" | "themes">, role: FontRole, textStyle: TextStyle | undefined, text: string): Record<string, string | number> {
+export function textCss(p: Pick<Project, "meta" | "themes" | "assets">, role: FontRole, textStyle: TextStyle | undefined, text: string): Record<string, string | number> {
   const theme = themeOf(p);
   const s: TextStyle = { ...theme?.roles[role], ...textStyle };
   const css: Record<string, string | number> = {};
   const f = font(s.font);
+  const custom = s.font ? p.assets[s.font]?.kind === "font" : false;
   if (s.font) {
     // CJK text in a font without CJK glyphs: the theme's subtitle font if it has them, else Noto Sans TC.
     const sub = font(theme?.roles.subtitle?.font);
     const cjk = CJK.test(text) && !f?.cjk ? `, "${(sub?.cjk ? sub : font(NOTO))!.family}"` : "";
-    css.fontFamily = `"${f?.family ?? s.font}"${cjk}, sans-serif`;
+    css.fontFamily = `"${f?.family ?? (custom ? fontAssetFamily(s.font!) : s.font)}"${cjk}, sans-serif`;
   }
   if (s.weight) css.fontWeight = f ? weightOf(f, s.weight) : s.weight;
   if (s.size) css.fontSize = s.size;
@@ -79,8 +83,10 @@ export function textCss(p: Pick<Project, "meta" | "themes">, role: FontRole, tex
 }
 
 /** Op error text for an unknown font name, or undefined if `style.font` is fine. */
-export const badFont = (style: TextStyle | undefined) =>
-  style?.font && !font(style.font) ? `unknown font "${style.font}"; one of: ${FONTS.map((f) => f.name).join(", ")}` : undefined;
+export const badFont = (style: TextStyle | undefined, assets?: Project["assets"]) =>
+  style?.font && !font(style.font) && assets?.[style.font]?.kind !== "font"
+    ? `unknown font "${style.font}"; choose a built-in font or an imported font asset`
+    : undefined;
 
 export type Word = { start: number; end: number; text: string };
 

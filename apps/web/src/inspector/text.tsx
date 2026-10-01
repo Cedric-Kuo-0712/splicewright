@@ -1,4 +1,4 @@
-import { FONT_ROLES, FONTS, THEME_IDS, type FontRole, type OverlayItem, type Project, type TextStyle, type Track } from "@splicewright/core";
+import { FONT_ROLES, FONTS, THEME_IDS, fontAssetFamily, type FontRole, type OverlayItem, type Project, type TextStyle, type Track } from "@splicewright/core";
 import { app, op } from "../store.ts";
 import { effectiveTextValues } from "../style.ts";
 import { Field } from "./fields.tsx";
@@ -51,6 +51,7 @@ export function StyleFields({ p, role, style = {}, rawStyle = {}, text, onChange
     </option>
   );
   const chosen = FONTS.find((f) => f.name === style.font);
+  const customFonts = Object.values(p.assets).filter((a) => a.kind === "font");
   const effectiveValues = effectiveTextValues(p, role, style, rawStyle, text);
   return (
     <>
@@ -64,6 +65,7 @@ export function StyleFields({ p, role, style = {}, rawStyle = {}, text, onChange
           <option value="">(theme)</option>
           <optgroup label="★ recommended">{FONTS.filter((f) => f.core).map(face)}</optgroup>
           <optgroup label="more">{FONTS.filter((f) => !f.core).map(face)}</optgroup>
+          {customFonts.length > 0 && <optgroup label="imported fonts">{customFonts.map((a) => <option key={a.id} value={a.id} style={{ fontFamily: `"${fontAssetFamily(a.id)}"` }}>{a.path.split("/").pop()} (raw)</option>)}</optgroup>}
         </select>
       </label>
       {chosen && !chosen.cjk && CJK.test(text) && <p className="dim">⚠ {chosen.name} has no Chinese glyphs; this text falls back to Noto Sans TC. Pick a 中 font for Chinese.</p>}
@@ -106,5 +108,4 @@ export function ThemeField({ p }: { p: Project }) {
     </label>
   );
 }
-
 

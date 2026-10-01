@@ -70,7 +70,7 @@ export function validate(project: unknown, prev?: Project, ctx: Ctx = {}): strin
       unique(i.id);
       if ("assetId" in i) {
         if (!p.assets[i.assetId]) errs.push(`${i.id}: unknown asset ${i.assetId}`);
-        else if (p.assets[i.assetId].kind === "lut") errs.push(`${i.id}: LUT assets cannot be placed on a track`);
+        else if (p.assets[i.assetId].kind === "lut" || p.assets[i.assetId].kind === "font") errs.push(`${i.id}: ${p.assets[i.assetId].kind.toUpperCase()} assets cannot be placed on a track`);
         const dur = ctx.assetDurations?.[i.assetId];
         if ("grade" in i && i.grade?.lut && p.assets[i.grade.lut.assetId]?.kind !== "lut")
           errs.push(`${i.id}: grade LUT ${i.grade.lut.assetId} is missing or is not a LUT asset`);

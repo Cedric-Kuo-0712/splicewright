@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from "react";
-import { AbsoluteFill, AnimatedImage, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame, useRemotionEnvironment, useVideoConfig, createEffect, type EffectsProp, type EffectDefinition } from "remotion";
+import React, { useEffect, useMemo, useState } from "react";
+import { AbsoluteFill, AnimatedImage, Audio, Img, OffthreadVideo, Sequence, cancelRender, continueRender, delayRender, staticFile, useCurrentFrame, useRemotionEnvironment, useVideoConfig, createEffect, type EffectsProp, type EffectDefinition } from "remotion";
 import { Video as CanvasVideo } from "@remotion/media";
 import { colorKey } from "@remotion/effects/color-key";
 import { exposure } from "@remotion/effects/exposure";
@@ -10,7 +10,7 @@ import { shadowsHighlights } from "@remotion/effects/shadows-highlights";
 import { gradeEffect, type GradeLut } from "./grade-effect.ts";
 import { lumaKey } from "./luma-key.ts";
 import "./fonts.ts";
-import { animate, itemSpan, sourceAt, textCss, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem, type Word, type FontRole, type TextStyle } from "@splicewright/core";
+import { animate, fontAssetFamily, itemSpan, sourceAt, textCss, themeOf, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem, type Word, type FontRole, type TextStyle } from "@splicewright/core";
 import type { Config } from "./config.ts";
 import { duckGain, type Ranges } from "./duck.ts";
 
@@ -38,6 +38,61 @@ const center = { justifyContent: "center", alignItems: "center", overflow: "hidd
 // video-cut's components were written against (sans-serif, line-height 1.5, box/margin reset).
 const BASE = ".swr *, .swr ::before, .swr ::after { box-sizing: border-box; margin: 0; padding: 0; border: 0 solid; }";
 const FONT = 'ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"';
+
+/** Load only font assets referenced by active text styles, and fail renders if a file cannot load. */
+const FontAssets: React.FC<{ project: Project }> = ({ project }) => {
+  const environment = useRemotionEnvironment();
+  const ids = new Set<string>();
+  const add = (font: unknown) => { if (typeof font === "string" && project.assets[font]?.kind === "font") ids.add(font); };
+  const activeTheme = themeOf(project);
+  for (const track of project.tracks) {
+    if (track.hidden) continue;
+    if (track.kind === "caption" && track.items.length) {
+      add(track.textStyle?.font ?? activeTheme?.roles.subtitle?.font);
+      if (track.highlight === "word") add(activeTheme?.roles.emphasis?.font);
+    }
+    if (track.kind === "overlay") for (const item of track.items) if (item.component === "Text") {
+      const props = item.props as { role?: FontRole; textStyle?: TextStyle; style?: Record<string, unknown> };
+      if (typeof props.style?.fontFamily === "string") {
+        const family = props.style.fontFamily.replace(/[\"']/g, "");
+        for (const asset of Object.values(project.assets)) if (asset.kind === "font" && family.includes(fontAssetFamily(asset.id))) add(asset.id);
+      } else add(props.textStyle?.font ?? activeTheme?.roles[props.role ?? "title"]?.font);
+    }
+  }
+  const fonts = [...ids].map((id) => ({ id, path: project.assets[id].path })).sort((a, b) => a.id.localeCompare(b.id));
+  const signature = JSON.stringify(fonts);
+  const [error, setError] = React.useState<string>();
+  useEffect(() => {
+    setError(undefined);
+    if (!fonts.length) return;
+    const handle = delayRender(`Loading imported fonts: ${fonts.map((f) => f.id).join(", ")}`);
+    let live = true;
+    let settled = false;
+    const faces: FontFace[] = [];
+    const finish = () => { if (!settled) { settled = true; continueRender(handle); } };
+    const url = (path: string) => environment.isRendering
+      ? staticFile(path)
+      : `/media/${path.split("/").map(encodeURIComponent).join("/")}`;
+    Promise.all(fonts.map(async ({ id, path }) => {
+      const face = new FontFace(fontAssetFamily(id), `url("${url(path)}")`);
+      try {
+        await face.load();
+        if (live) { faces.push(face); document.fonts.add(face); }
+      } catch (cause) {
+        throw new Error(`${id}: ${(cause as Error).message}`);
+      }
+    })).then(() => { if (live) finish(); }).catch((cause: unknown) => {
+      if (!live) return;
+      const message = `Could not load imported font ${(cause as Error).message}`;
+      if (environment.isRendering) cancelRender(new Error(message));
+      setError(message);
+      finish();
+    });
+    return () => { live = false; for (const face of faces) document.fonts.delete(face); finish(); };
+  // signature changes when an imported font is added, removed, or moved.
+  }, [signature, environment.isRendering]);
+  return error ? <AbsoluteFill style={{ zIndex: 1, color: "#fff", background: "#700", padding: 24, fontFamily: "sans-serif" }}>{error}</AbsoluteFill> : null;
+};
 
 export const Text: React.FC<{ text: string; style?: React.CSSProperties }> = ({ text, style }) => (
   <AbsoluteFill style={center}>
@@ -467,6 +522,7 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
   return (
     <AbsoluteFill className="swr" style={{ backgroundColor: p.meta.background ?? "#000", fontFamily: FONT, lineHeight: 1.5 }}>
       <style>{BASE}</style>
+      <FontAssets project={p} />
       {p.tracks.map((t) =>
         // ponytail: `hidden` drops the whole track, audio included; split visual/audio if a use appears.
         t.hidden ? null : t.kind === "caption" ? (

@@ -68,7 +68,7 @@ export function load(dir: string): Project {
 export interface Probe {
   path: string;
   fingerprint: string;
-  kind: "video" | "audio" | "image";
+  kind: "video" | "audio" | "image" | "font";
   duration?: number;
   width?: number;
   height?: number;

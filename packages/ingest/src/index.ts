@@ -118,6 +118,13 @@ export async function peek(dir: string, assetId: string, { from = 0, to, n = 12 
 // ---------- probe ----------
 
 export async function probe(file: string, kind: Asset["kind"]): Promise<Omit<Probe, "path" | "fingerprint">> {
+  if (kind === "font") {
+    const data = readFileSync(file);
+    const magic = data.subarray(0, 4).toString("ascii");
+    if (!(magic === "wOFF" || magic === "wOF2" || magic === "OTTO" || magic === "true" || data.readUInt32BE(0) === 0x00010000))
+      throw new Error("invalid font file: expected TrueType, OpenType, WOFF, or WOFF2 data");
+    return { kind };
+  }
   const info = JSON.parse(await exec("ffprobe", ["-v", "error", ...(kind === "image" ? ["-count_frames"] : []), "-print_format", "json", "-show_format", "-show_streams", file]));
   const v = info.streams.find((s: any) => s.codec_type === "video");
   const [num, den] = String(v?.avg_frame_rate ?? "0/1").split("/").map(Number);

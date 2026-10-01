@@ -145,7 +145,7 @@ export const Keyframes = z
 export const Asset = z.object({
   id: Id,
   path: z.string().min(1),
-  kind: z.enum(["video", "audio", "image", "lut"]),
+  kind: z.enum(["video", "audio", "image", "lut", "font"]),
   rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]).optional(),
 });
 

@@ -3,7 +3,7 @@ export { parseCube } from "./lut.ts";
 export { LUT_PRESETS, type LutPreset } from "./lut-presets.ts";
 export { ASPECTS, FPS_CHOICES } from "./presets.ts";
 export { FONT_PAIRS, FONTS, type Font } from "./fonts.ts";
-export { badFont, captionWords, type Word, builtinTheme, isTheme, textCss, themeOf, THEME_IDS } from "./themes.ts";
+export { badFont, captionWords, fontAssetFamily, type Word, builtinTheme, isTheme, textCss, themeOf, THEME_IDS } from "./themes.ts";
 export { anchorOf, frameOf, itemSpan, secPerFrame, sourceAt, transitionOf, validate } from "./validate.ts";
 export { apply, createProject, gapAt, HEIF, nextId, ops, OpError, type OpDef, type OpResult } from "./ops.ts";
 export { lint, type LintIssue } from "./lint.ts";

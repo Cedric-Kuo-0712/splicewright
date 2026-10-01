@@ -46,7 +46,9 @@ export function MediaBin({ p }: { p: Project }) {
                 : [
                     { label: "Insert at playhead", run: () => op("insertItem", { assetId: a.id, at: playhead.get().frame }) },
                     { label: "Replace selected clip", run: () => replaceWith(a.id), disabled: app.get().selection.length !== 1 },
+                    "-" as const,
                   ]),
+              { label: "Remove from project (keeps file)", run: () => op("removeAsset", { assetId: a.id }) },
             ])
           }
           title={a.kind === "lut" ? `${a.id} — choose this LUT in the Color inspector` : `${a.id} — drag onto the timeline`}

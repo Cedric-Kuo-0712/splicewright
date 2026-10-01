@@ -238,6 +238,19 @@ export const ops: Record<string, OpDef<any>> = {
     },
   ),
 
+  removeAsset: def(
+    "Remove an asset from the project's media list. The file stays on disk. Refused while any item or LUT grade uses it.",
+    z.object({ assetId: Id }),
+    (p, a) => {
+      if (!p.assets[a.assetId]) fail("not_found", `no asset ${a.assetId}`);
+      const users = p.tracks.flatMap((t): (VideoItem | AudioItem | CaptionItem | OverlayItem)[] => t.items).filter((i) => ("assetId" in i && i.assetId === a.assetId) || ("grade" in i && i.grade?.lut?.assetId === a.assetId));
+      if (users.length) fail("invalid", `${a.assetId} is used by ${users.map((i) => i.id).join(", ")}; delete those first`);
+      const { path } = p.assets[a.assetId];
+      delete p.assets[a.assetId];
+      return `removed ${a.assetId} from the project (${path} kept on disk)`;
+    },
+  ),
+
   insertItem: def(
     "Insert one item at frame `at`: pass assetId (video/audio/image), component (overlay), or text (free caption). Omitted trackId picks the first track of the right kind with room, else creates one. Ripple defaults to the track's magnetic flag.",
     z
@@ -867,6 +880,9 @@ export function apply(project: Project, name: string, args: unknown, ctx: Ctx = 
     const parsed = parseArgs(d, resolveNear(project, args));
     const next = structuredClone(project);
     const summary = d.run(next, parsed, ctx);
+    // A track this op emptied goes with it (magnetic main tracks stay); tracks created or left empty on purpose are kept.
+    const hadItems = new Set(project.tracks.filter((t) => t.items.length).map((t) => t.id));
+    next.tracks = next.tracks.filter((t) => t.items.length || t.magnetic || !hadItems.has(t.id));
     refresh(next);
     next.revision = project.revision + 1;
     const errs = validate(next, project, ctx);

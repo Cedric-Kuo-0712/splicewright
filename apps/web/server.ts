@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream, type ReadStream, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, watch } from "node:fs";
+import { createReadStream, createWriteStream, type ReadStream, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, watch } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
@@ -7,28 +7,14 @@ import react from "@vitejs/plugin-react";
 import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { addRecent, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo } from "@splicewright/core/node";
-import { ASPECTS, captionWords, FPS_CHOICES, parseCube, sourceAt, type Project } from "@splicewright/core";
+import { ASPECTS, captionWords, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
 import { displayable, ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
-import { duckRanges } from "@splicewright/render/node";
+import { duckRanges, lutsOf } from "@splicewright/render/node";
 
 // Spec §7.3. `splicewright open` runs this: a Vite dev server for the UI (open question 5, the simple
 // option) plus a small API. Every mutation goes through core ops with the client's baseRevision.
 
 const here = dirname(fileURLToPath(import.meta.url));
-const lutCache = new Map<string, { stamp: string; value: ReturnType<typeof parseCube> }>();
-function lutsOf(dir: string, project: Project) {
-  const root = realpathSync(dir);
-  return Object.fromEntries(Object.values(project.assets).filter((a) => a.kind === "lut").map((a) => {
-    const path = realpathSync(resolve(dir, a.path));
-    if (!path.startsWith(root + sep)) throw new Error(`LUT asset path escapes project directory: ${a.path}`);
-    const stat = statSync(path), stamp = `${stat.size}:${stat.mtimeMs}`;
-    const cacheKey = `${dir}:${a.id}`;
-    let cached = lutCache.get(cacheKey);
-    if (!cached || cached.stamp !== stamp) { cached = { stamp, value: parseCube(readFileSync(path, "utf8")) }; lutCache.set(cacheKey, cached); }
-    return [a.id, cached.value];
-  }));
-}
-
 function send(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));

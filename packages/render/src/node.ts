@@ -15,17 +15,25 @@ export { duckRanges };
 
 const here = dirname(fileURLToPath(import.meta.url));
 const lutCache = new Map<string, { stamp: string; value: ReturnType<typeof parseCube> }>();
-function lutsOf(dir: string, project: Project) {
-  const root = realpathSync(dir);
-  return Object.fromEntries(Object.values(project.assets).filter((a) => a.kind === "lut").map((a) => {
-    const path = realpathSync(resolve(dir, a.path));
-    if (!path.startsWith(root + sep)) throw new Error(`LUT asset path escapes project directory: ${a.path}`);
-    const stat = statSync(path), stamp = `${stat.size}:${stat.mtimeMs}`;
-    const cacheKey = `${dir}:${a.id}`;
-    let cached = lutCache.get(cacheKey);
-    if (!cached || cached.stamp !== stamp) { cached = { stamp, value: parseCube(readFileSync(path, "utf8")) }; lutCache.set(cacheKey, cached); }
-    return [a.id, cached.value];
-  }));
+/** Parsed tables of the LUTs some item's grade uses. A missing, escaping or invalid file is left out
+ * (lookEffects then names the unavailable asset where it is used) so one bad .cube can't take the
+ * editor or an unrelated render down. */
+export function lutsOf(dir: string, project: Project) {
+  const used = new Set(project.tracks.flatMap((t) => t.items.flatMap((i) => ("grade" in i && i.grade?.lut ? [i.grade.lut.assetId] : []))));
+  const luts: Record<string, ReturnType<typeof parseCube>> = {};
+  for (const a of Object.values(project.assets)) {
+    if (a.kind !== "lut" || !used.has(a.id)) continue;
+    try {
+      const root = realpathSync(dir), path = realpathSync(resolve(dir, a.path));
+      if (!path.startsWith(root + sep)) throw new Error(`LUT asset path escapes project directory: ${a.path}`);
+      const stat = statSync(path), stamp = `${stat.size}:${stat.mtimeMs}`;
+      const cacheKey = `${dir}:${a.id}:${a.path}`;
+      let cached = lutCache.get(cacheKey);
+      if (!cached || cached.stamp !== stamp) { cached = { stamp, value: parseCube(readFileSync(path, "utf8")) }; lutCache.set(cacheKey, cached); }
+      luts[a.id] = cached.value;
+    } catch { /* unavailable: see above */ }
+  }
+  return luts;
 }
 /** Folder holding the node_modules Remotion is installed in. Remotion keys its Chrome download and
  * webpack cache on cwd; pinning both here keeps ~100 MB of cache out of every project folder. */

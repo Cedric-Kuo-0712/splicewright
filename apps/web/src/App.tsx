@@ -3,7 +3,7 @@ import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
 import { anchorOf, animate, ASPECTS, BLENDS, FONT_ROLES, FONTS, FPS_CHOICES, THEME_IDS, MASK_PROPS, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, valueAt, withKey, type Animatable, type AudioItem, type FontRole, type Item, type OverlayItem, type Project, type SnapPoint, type TextStyle, type Track, type VideoItem } from "@splicewright/core";
 import { mediaBox, SplicewrightProject, type Props } from "@splicewright/render";
-import { addMarker, addText, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, pipEntries, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
+import { addMarker, addText, copy, cut, detachAudio, duplicate, findItem, freezeFrame, gradeWith, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, pipEntries, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
 import { app, dnd, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
 import { mapSamplePoint, multiplyMatrix, sampledRgb } from "./sample-coordinates.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
@@ -214,6 +214,11 @@ function Preview({ p }: { p: Project }) {
     r?.addEventListener("seeked", (e) => playhead.set({ frame: e.detail.frame }));
     r?.addEventListener("pause", () => app.get().looping && app.set({ looping: false }));
   }, []);
+  // The eyedropper belongs to one item; a different selection (or none) ends it.
+  const selected = app.use((s) => s.selection);
+  useEffect(() => {
+    if (sampling && !(selected.length === 1 && selected[0] === sampling)) app.set({ sampling: null });
+  }, [sampling, selected]);
   const sampleLookColor = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!sampling || !p) return;
     const wrapper = e.currentTarget.querySelector<HTMLElement>(`[data-look-item-id="${CSS.escape(sampling)}"]`);
@@ -527,8 +532,12 @@ function MediaBin({ p }: { p: Project }) {
           onDragEnd={() => (dnd.assetId = null)}
           onContextMenu={(e) =>
             openMenu(e, [
-              ...(a.kind === "lut" ? [] : [{ label: "Insert at playhead", run: () => op("insertItem", { assetId: a.id, at: playhead.get().frame }) }]),
-              { label: "Replace selected clip", run: () => replaceWith(a.id), disabled: app.get().selection.length !== 1 },
+              ...(a.kind === "lut"
+                ? []
+                : [
+                    { label: "Insert at playhead", run: () => op("insertItem", { assetId: a.id, at: playhead.get().frame }) },
+                    { label: "Replace selected clip", run: () => replaceWith(a.id), disabled: app.get().selection.length !== 1 },
+                  ]),
             ])
           }
           title={a.kind === "lut" ? `${a.id} — choose this LUT in the Color inspector` : `${a.id} — drag onto the timeline`}
@@ -905,7 +914,7 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
       <h4>color</h4>
       {(["exposure", "temperature", "tint", "vibrance", "shadows", "highlights"] as const).map((k) => {
         const [min, max, step] = { exposure: [-5, 5, 0.05], temperature: [-1, 1, 0.01], tint: [-1, 1, 0.01], vibrance: [-1, 1, 0.01], shadows: [-1, 1, 0.01], highlights: [-1, 1, 0.01] }[k];
-        return <Slider key={k} itemId={item.id} label={k} min={min} max={max} step={step} zero={0} value={item.grade?.[k] ?? 0} patch={(v) => ({ grade: { ...item.grade, [k]: v } })} />;
+        return <Slider key={k} itemId={item.id} label={k} min={min} max={max} step={step} zero={0} value={item.grade?.[k] ?? 0} patch={(v) => ({ grade: gradeWith(item.grade, k, v) })} />;
       })}
       {(["inBlack", "inWhite", "gamma", "outBlack", "outWhite"] as const).map((k) => {
         const levels = { inBlack: 0, inWhite: 1, gamma: 1, outBlack: 0, outWhite: 1, ...item.grade?.levels };
@@ -976,7 +985,7 @@ function CurveEditor({ itemId, grade, onCommit }: { itemId: string; grade: Video
       <div className="curve-tools"><span>click to add · drag to edit · double-click a point to remove</span><button onClick={() => commit(CURVE_IDENTITY)}>Reset</button></div>
       <svg className="curve-graph" viewBox="0 0 240 240" role="img" aria-label={`${channel} tone curve`} onClick={add}
         onPointerMove={(e) => { if (dragging !== null) { const [x, y] = at(e); preview(move(dragging, x, y)); } }}
-        onPointerUp={() => { if (dragging !== null) { setDragging(null); commit(points); } }} onPointerCancel={() => setDragging(null)}>
+        onPointerUp={() => { if (dragging !== null) { setDragging(null); commit(points); } }} onPointerCancel={() => { setDragging(null); setDraft(null); app.set({ live: null }); }}>
         <rect x="20" y="20" width="200" height="200" className="curve-grid" />
         <line x1="20" y1="220" x2="220" y2="20" className="curve-reference" />
         <polyline points={points.map(coords).join(" ")} className="curve-line" />

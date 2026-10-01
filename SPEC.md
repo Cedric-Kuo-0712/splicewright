@@ -261,7 +261,7 @@ Snapping, the adaptive ruler, and beat points are specified in §15.
 ```
 splicewright init [--fps 30 --size 1920x1080]  # also AGENTS.md, CLAUDE.md, .mcp.json
 splicewright import <paths...> [--no-ingest]  # register + ingest; files outside the project are copied into raw/
-splicewright ingest [--only probe,proxy,analysis,thumbs,waveform,transcript,beats,loudness] [--jobs N]
+splicewright ingest [--only probe,proxy,reverse,analysis,thumbs,waveform,transcript,beats,loudness] [--jobs N]
 splicewright status                         # compact JSON summary (see get_summary)
 splicewright op <opName> '<json args>'      # any core op
 splicewright open                           # start the UI for the current folder
@@ -657,7 +657,7 @@ composition or bakes a file that both sides play.
 - **R1 Reverse.** `reverse?: boolean` on video items. `@remotion/media` `<Video>` can't play backwards and
   `OffthreadVideo` would seek frame by frame, so ingest bakes a reversed proxy (ffmpeg `reverse` + `areverse`, in
   ~10 s chunks and concatenated, since `reverse` buffers the whole input). `sourceIn` keeps meaning source time
-  on the forward file. Acceptance: frame k of a reversed item equals frame (n−1−k) of the forward one.
+  on the forward file. Acceptance: frame k of a reversed item equals frame (n−1−k) of the forward one. ✅ done: ingest reverses bounded ~10 s chunks with ffmpeg reverse/areverse and concatenates chunks in reverse order; sourceIn remains the lower bound of the forward-source selection, with trim, speed, transition, preview, and render time mapping handled in reverse.
 - **Lint.** Read-only op `lint` → `{ level, what, at, itemId? }[]`: gaps on the magnetic track, captions or text
   outside the title-safe area, CJK text in a font without CJK glyphs, peaks above −1 dBFS without the limiter,
   items on the canvas path that can't decode. MCP instructions tell agents to run it before `render` master. ✅ done: `lint(project)` in core, CLI `splicewright lint`, MCP `lint`. Implemented: magnetic-track gaps, default-caption/Text inset vs title-safe (px insets only), CJK font. Not yet: peaks (no peak measurement is stored, only LUFS) and decode failures (no recorded probe signal).

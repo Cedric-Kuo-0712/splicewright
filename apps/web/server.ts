@@ -8,8 +8,8 @@ import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { addRecent, applyLutPreset, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
 import { ASPECTS, captionWords, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
-import { audioFxPath, displayable, ensureAudioFx, ffmpeg, ingest, limiter, loudness, thumb, waveform } from "@splicewright/ingest";
-import { duckRanges, fontVersionsOf, lutsOf, lutVersion } from "@splicewright/render/node";
+import { audioFxPath, displayable, ensureAudioFx, ffmpeg, ingest, limiter, loudness, reverseAudioPath, reverseProjectAudio, thumb, waveform, type Step } from "@splicewright/ingest";
+import { duckRanges, fontVersionsOf, lutsOf, lutVersion, reverseProxiesOf } from "@splicewright/render/node";
 
 // Spec §7.3. `splicewright open` runs this: a Vite dev server for the UI (open question 5, the simple
 // option) plus a small API. Every mutation goes through core ops with the client's baseRevision.
@@ -80,6 +80,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
   const audioFxErrors = new Map<string, { path: string; message: string }>();
   const audioFxState = (project: Project) => {
     const sources: Record<string, string> = {};
+    const reverseSources: Record<string, string> = {};
     const processing: string[] = [];
     const errors: Record<string, string> = {};
     for (const track of project.tracks) for (const item of track.items) {
@@ -90,38 +91,48 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
       let path: string;
       try { path = audioFxPath(dir, asset.id, asset.path, itemFx); }
       catch (error) { errors[item.id] = (error as Error).message; continue; }
-      const file = join(dir, path);
-      if (existsSync(file)) {
+      const reverse = "reverse" in item && !!item.reverse;
+      const key = reverse ? reverseAudioPath(path) : path;
+      const file = join(dir, key);
+      if (existsSync(file) && existsSync(join(dir, path))) {
         sources[item.id] = `/media/${path.split("/").map(encodeURIComponent).join("/")}`;
+        if (reverse) reverseSources[item.id] = `/media/${key.split("/").map(encodeURIComponent).join("/")}`;
         audioFxErrors.delete(item.id);
         continue;
       }
       const prior = audioFxErrors.get(item.id);
-      if (prior?.path === path) errors[item.id] = prior.message;
-      else if (audioFxPending.get(item.id) === path) processing.push(item.id);
+      if (prior?.path === key) errors[item.id] = prior.message;
+      else if (audioFxPending.get(item.id) === key) processing.push(item.id);
       else {
         audioFxErrors.delete(item.id);
-        audioFxPending.set(item.id, path);
+        audioFxPending.set(item.id, key);
         processing.push(item.id);
         void limited(() => ensureAudioFx(dir, asset.id, asset.path, itemFx)).then(async (output) => {
+          if (reverse) await limited(() => reverseProjectAudio(dir, output));
           const lufs = await limited(() => loudness(join(dir, output)));
           if (lufs !== undefined) writeAtomic(join(dir, `${output}.json`), { lufs });
         }).catch((error) => {
-          audioFxErrors.set(item.id, { path, message: (error as Error).message });
+          audioFxErrors.set(item.id, { path: key, message: (error as Error).message });
         }).finally(() => {
-          if (audioFxPending.get(item.id) === path) audioFxPending.delete(item.id);
+          if (audioFxPending.get(item.id) === key) audioFxPending.delete(item.id);
           broadcast({ revision: load(dir).revision });
         });
       }
     }
-    return { sources, processing, errors };
+    return { sources, reverseSources, processing, errors };
   };
   // One ingest at a time: concurrent runs would each rewrite assets.json from their own snapshot.
   let queue = Promise.resolve();
-  const background = (id: string) =>
+  const background = (id: string, only?: Step[]) =>
     (queue = queue.then(async () => {
-      await ingest(dir, { assets: [id], log: (line) => broadcast({ ingest: { id, step: line.split(" ")[0] } }) }).catch(() => {});
-      broadcast({ ingest: { id, step: null } });
+      let error: string | undefined;
+      try {
+        const result = await ingest(dir, { assets: [id], ...(only && { only }), log: (line) => broadcast({ ingest: { id, step: line.split(" ")[0] } }) });
+        error = result.errors?.join("; ");
+      } catch (e) {
+        error = (e as Error).message;
+      }
+      broadcast({ ingest: { id, step: null, ...(error && { error }) } });
     }));
   let timer: NodeJS.Timeout | undefined;
   // project.json is replaced by rename, so watch the folder, not the file.
@@ -137,13 +148,15 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     const project = load(dir);
     const fx = audioFxState(project);
     const proxies = Object.keys(project.assets).filter((id) => existsSync(join(dir, ".splicewright", "proxies", "edit", `${id}.mp4`)));
+    const reverseProxies = reverseProxiesOf(dir, project);
     const probes = readAssets(dir);
     const durations = Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.duration ? [[id, a.duration]] : [])));
+    const frameRates = Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.fps ? [[id, a.fps]] : [])));
     const ctx = loadCtx(dir);
     // A 65³ LUT is ~4 MB of JSON; the editor gets its version here and fetches the table from /api/lut when that changes.
     const lutVersions = Object.fromEntries(Object.entries(lutsOf(dir, project)).map(([id, lut]) => [id, lutVersion(lut)!]));
     const animated = Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : []));
-    return { project, duck: duckRanges(project, ctx), words: captionWords(project, ctx), proxies, durations, sizes: sizesOf(probes), animated, fontVersions: fontVersionsOf(dir, project), loudness: ctx.loudness ?? {}, audioFx: fx.sources, audioFxProcessing: fx.processing, audioFxErrors: fx.errors, audioFxLoudness: ctx.audioFxLoudness ?? {}, lutVersions };
+    return { project, duck: duckRanges(project, ctx), words: captionWords(project, ctx), proxies, reverseProxies, durations, frameRates, sizes: sizesOf(probes), animated, fontVersions: fontVersionsOf(dir, project), loudness: ctx.loudness ?? {}, audioFx: fx.sources, reverseAudioFx: fx.reverseSources, audioFxProcessing: fx.processing, audioFxErrors: fx.errors, audioFxLoudness: ctx.audioFxLoudness ?? {}, lutVersions };
   };
   const result = (res: ServerResponse, r: ReturnType<typeof run>) =>
     "error" in r ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, { revision: r.project.revision, summary: r.changes.summary, ...snapshot() });
@@ -195,6 +208,15 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
           if (route === "POST /api/op") {
             const b = await body(req);
             return result(res, run(dir, b.op, b.args, b.baseRevision));
+          }
+          if (route === "POST /api/reverse-proxy") {
+            const b = await body(req);
+            const asset = load(dir).assets[b.assetId];
+            if (!asset || asset.kind !== "video") return send(res, 400, { error: { code: "invalid", message: "reverse proxy requires a video asset" } });
+            const path = join(dir, ".splicewright", "proxies", "reverse", `${asset.id}.mp4`);
+            if (existsSync(path)) return send(res, 200, { ready: true, ...snapshot() });
+            background(asset.id, ["reverse"]);
+            return send(res, 202, { queued: true });
           }
           if (route === "POST /api/lut-presets/apply") {
             const b = await body(req);

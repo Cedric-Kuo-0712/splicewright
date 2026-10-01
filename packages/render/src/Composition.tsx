@@ -24,6 +24,14 @@ export interface Props extends Record<string, unknown> {
   sizes?: Record<string, [number, number]>;
   /** Probe-marked animated image assets (GIF, animated WebP/PNG). */
   animated?: Record<string, boolean>;
+  /** Probed asset duration in seconds, used to map reverse source time into the reversed proxy. */
+  durations?: Record<string, number>;
+  /** Probed source frame rate, used to map forward-source time into reversed proxy time. */
+  frameRates?: Record<string, number>;
+  /** Asset ids whose reverse proxies are ready; the browser shows a preparation message otherwise. */
+  reverseProxies?: string[];
+  /** Reversed A1 audio bakes by video item id, when both reverse and processed audio are enabled. */
+  reverseAudioFx?: Record<string, string>;
   /** From captionWords(); transcript words per anchored caption on a highlight: "word" track. */
   words?: Record<string, Word[]>;
   luts?: Record<string, GradeLut>;
@@ -42,6 +50,12 @@ export function audioSourceFor(item: AudioItem | VideoItem, original: string, au
   if (!item.audioFx) return original;
   return "reverse" in item && item.reverse ? reverseAudioFx[item.id] : audioFx[item.id];
 }
+/** Index into a full reversed proxy for the forward-source frame visible at timeline frame `frame`. */
+export const reverseTrimBefore = (p: Project, item: VideoItem, duration: number, frame: number, sourceFps = p.meta.fps) => {
+  const reversedSourceFrame = Math.round(duration * sourceFps) - 1 - Math.round(sourceAt(p, item, frame) * sourceFps);
+  // Remotion trimBefore is measured in composition frames, while the proxy retains source FPS.
+  return Math.round((reversedSourceFrame / sourceFps) * p.meta.fps);
+};
 
 // Base styles, scoped so the M4 UI page isn't touched. They mirror the Tailwind preflight rules that
 // video-cut's components were written against (sans-serif, line-height 1.5, box/margin reset).
@@ -430,7 +444,7 @@ const CanvasVideoPath: React.FC<{
   );
 };
 
-const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; animated?: boolean; muted?: boolean; from: number; inc?: Transition; out?: Transition; luts: Record<string, GradeLut>; audioFx?: Record<string, string>; sampleItemId?: string }> = ({ p, item: raw, size, animated, muted, from, inc, out, luts, audioFx, sampleItemId }) => {
+const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; animated?: boolean; audioFx?: Record<string, string>; durations: Record<string, number>; frameRates: Record<string, number>; reverseProxies?: string[]; reverseAudioFx?: Record<string, string>; muted?: boolean; from: number; inc?: Transition; out?: Transition; luts: Record<string, GradeLut>; sampleItemId?: string }> = ({ p, item: raw, size, animated, audioFx, durations, frameRates, reverseProxies, reverseAudioFx, muted, from, inc, out, luts, sampleItemId }) => {
   const asset = p.assets[raw.assetId];
   const f = from + useCurrentFrame();
   const item = animate(p, raw, f);
@@ -449,27 +463,32 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
     filter: filterOf(item.effects),
     clipPath: cropPath(box, item.crop),
   };
-  const trimBefore = Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps);
+  const source = item.reverse ? `.splicewright/proxies/reverse/${item.assetId}.mp4` : asset.path;
+  const trimBefore = item.reverse
+    ? reverseTrimBefore(p, raw, durations[item.assetId] ?? 0, from, frameRates[item.assetId] ?? p.meta.fps)
+    : Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps);
   const animatedFrom = Math.round(item.start - from - item.sourceIn * p.meta.fps);
-  const processedAudio = raw.audioFx ? audioSourceFor(raw, asset.path, audioFx) : undefined;
+  const processedAudio = raw.audioFx ? audioSourceFor(raw, asset.path, audioFx, reverseAudioFx) : undefined;
   const volume = (v: number) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain;
   // A missing .cube must not take the whole preview down, but a render keeps failing on it (lookEffects throws) rather than writing an ungraded clip.
   const { isRendering } = useRemotionEnvironment();
   const lutMissing = !!raw.grade?.lut && !luts[raw.grade.lut.assetId];
-  const media = lutMissing && !isRendering ? (
+  const media = item.reverse && !reverseProxies?.includes(item.assetId) && !isRendering ? (
+    <div style={lookOffStyle}>reverse proxy is missing; prepare it in the inspector ({raw.label ?? raw.id})</div>
+  ) : lutMissing && !isRendering ? (
     <div style={lookOffStyle}>look off: LUT {raw.grade!.lut!.assetId} unavailable ({raw.label ?? raw.id})</div>
   ) : asset.kind === "image" && animated ? (
     <div data-look-item-id={raw.id} style={{ display: "contents" }}><AnimatedImage src={staticFile(asset.path)} from={animatedFrom} fit={item.fit ?? "contain"} style={style} effects={(raw.grade || raw.key) ? lookEffects(raw.id, raw.grade, raw.key, luts, sampleItemId === raw.id) : undefined} /></div>
   ) : asset.kind === "image" && (raw.grade || raw.key) ? (
-    <div data-look-item-id={raw.id} style={{ display: "contents" }}><Img src={staticFile(asset.path)} style={style} effects={lookEffects(raw.id, raw.grade, raw.key, luts, sampleItemId === raw.id)} /></div>
+    <div data-look-item-id={raw.id} style={{ display: "contents" }}><Img src={staticFile(source)} style={style} effects={lookEffects(raw.id, raw.grade, raw.key, luts, sampleItemId === raw.id)} /></div>
   ) : asset.kind === "image" ? (
-    <Img src={staticFile(asset.path)} style={style} />
+    <Img src={staticFile(source)} style={style} />
   ) : raw.key || raw.grade ? (
-    <CanvasVideoPath key={asset.path} itemName={raw.label ?? raw.id} itemId={raw.id} sample={sampleItemId === raw.id} src={staticFile(asset.path)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted || !!raw.audioFx} fit={item.fit} style={style} keyLook={raw.key} grade={raw.grade} luts={luts} />
+    <CanvasVideoPath key={source} itemName={raw.label ?? raw.id} itemId={raw.id} sample={sampleItemId === raw.id} src={staticFile(source)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted || !!raw.audioFx} fit={item.fit} style={style} keyLook={raw.key} grade={raw.grade} luts={luts} />
   ) : (
     // Legacy items stay on OffthreadVideo; only pixel-look items opt into the canvas decoder.
     <OffthreadVideo
-      src={staticFile(asset.path)}
+      src={staticFile(source)}
       trimBefore={trimBefore}
       playbackRate={speed}
       volume={volume}
@@ -513,7 +532,7 @@ const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges; 
   return <Audio src={src.startsWith("/") ? src : staticFile(src)} trimBefore={Math.round(item.sourceIn * p.meta.fps)} volume={volume} muted={t.muted} />;
 };
 
-export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, animated = {}, words = {}, luts = {}, audioFx, fontVersions, sampleItemId, components }) => {
+export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, durations = {}, frameRates = {}, reverseProxies, reverseAudioFx, animated = {}, words = {}, luts = {}, audioFx, fontVersions, sampleItemId, components }) => {
   const registry: Record<string, React.ComponentType<any>> = { Text, Image, Sticker, CaptionLayer, ...components };
   const component = (name: string, where: string) => {
     const C = registry[name];
@@ -521,7 +540,7 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
     return C;
   };
   const body = (t: Track, item: Item, from: number, inc?: Transition, out?: Transition) => {
-    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} audioFx={audioFx} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} animated={animated[(item as VideoItem).assetId]} muted={t.muted} from={from} inc={inc} out={out} luts={luts} audioFx={audioFx} sampleItemId={sampleItemId} />;
+    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} audioFx={audioFx} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} animated={animated[(item as VideoItem).assetId]} durations={durations} frameRates={frameRates} reverseProxies={reverseProxies} reverseAudioFx={reverseAudioFx} muted={t.muted} from={from} inc={inc} out={out} luts={luts} audioFx={audioFx} sampleItemId={sampleItemId} />;
     const C = component((item as { component: string }).component, item.id);
     const { mask } = item as OverlayItem;
     let props = (item as { props: Record<string, unknown> }).props;

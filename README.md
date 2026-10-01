@@ -207,7 +207,7 @@ Every command prints one JSON object. On error it exits with status 1.
 ```
 splicewright init [--title T] [--fps 30] [--size 1920x1080]
 splicewright import <paths...> [--no-ingest]
-splicewright ingest [--only proxy,analysis,thumbs,waveform,transcript,beats] [--jobs N]
+splicewright ingest [--only proxy,reverse,analysis,thumbs,waveform,transcript,beats] [--jobs N]
 splicewright status
 splicewright op <opName> '<json args>' [--base <revision>]
 splicewright undo | redo [--base <revision>]

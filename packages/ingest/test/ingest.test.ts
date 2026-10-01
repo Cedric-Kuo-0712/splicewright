@@ -1,11 +1,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { beatFrames, type AudioItem } from "@splicewright/core";
 import { cacheDir, init, load, readAssets, run, writeAtomic } from "@splicewright/core/node";
-import { ingest, peek, stamp, TRANSCRIPT_FORMAT } from "../src/index.ts";
+import { ingest, peek, reverseAudioPath, reverseFile, reverseProjectAudio, stamp, TRANSCRIPT_FORMAT } from "../src/index.ts";
 
 const example = join(import.meta.dirname, "../../../examples/basic");
 const venv = join(import.meta.dirname, "../../../ingest/.venv/bin/python");
@@ -56,6 +56,40 @@ describe("ingest", () => {
     expect(probes.a_still_2.animated).toBeUndefined();
   });
 
+  it("reverses numbered frames across chunk boundaries and reverses audio numerically", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swr-reverse-"));
+    const video = join(dir, "numbered.mkv");
+    const reversedVideo = join(dir, "numbered-reversed.mp4");
+    execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=black:s=32x32:r=1:d=22,format=gray,geq=lum='N*8'", "-frames:v", "22", "-c:v", "ffv1", video]);
+    await reverseFile(video, reversedVideo);
+    const levels = (path: string) => {
+      const raw = execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", path, "-f", "rawvideo", "-pix_fmt", "gray", "-"]);
+      return Array.from({ length: raw.length / (32 * 32) }, (_, i) => raw[i * 32 * 32]);
+    };
+    const forward = levels(video);
+    const backward = levels(reversedVideo);
+    expect(backward).toHaveLength(22);
+    for (let k = 0; k < backward.length; k++) expect(Math.abs(backward[k] - forward[forward.length - 1 - k]), `frame ${k}: reverse=${backward[k]} source=${forward[forward.length - 1 - k]}`).toBeLessThan(15);
+    expect(backward[9]).toBeGreaterThan(backward[10]); // crosses the 10 s reversed-chunk join
+
+    const audioRelative = ".splicewright/audio/ramp-hash.m4a";
+    const audio = join(dir, audioRelative);
+    mkdirSync(join(dir, ".splicewright", "audio"), { recursive: true });
+    execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "aevalsrc='0.8*(0.1+mod(floor(t),22)*0.03)*sin(2*PI*440*t)':s=44100:d=22", "-c:a", "aac", audio]);
+    const reversedRelative = await reverseProjectAudio(dir, audioRelative);
+    const reversedAudio = join(dir, reversedRelative);
+    expect(reverseAudioPath(audioRelative)).toBe(reversedRelative);
+    await expect(reverseProjectAudio(dir, "../ramp.m4a")).rejects.toThrow("missing or outside project");
+    const decoded = execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-i", reversedAudio, "-f", "f32le", "-acodec", "pcm_f32le", "-"], { maxBuffer: 8 * 1024 * 1024 });
+    const samples = new Float32Array(decoded.buffer, decoded.byteOffset, decoded.byteLength / 4);
+    const rms = (second: number) => {
+      const start = Math.round((second + 0.15) * 44100), end = Math.round((second + 0.85) * 44100);
+      return Math.sqrt(samples.slice(start, end).reduce((sum, x) => sum + x * x, 0) / (end - start));
+    };
+    for (const second of [0, 9, 10, 11, 20]) expect(Math.abs(rms(second) - (0.8 * (0.1 + (21 - second) * 0.03)) / Math.sqrt(2))).toBeLessThan(0.025);
+    rmSync(dir, { recursive: true, force: true });
+  }, 60_000);
+
   it("does not send LUT assets to ffprobe", async () => {
     const dir = mkdtempSync(join(tmpdir(), "swr-lut-ingest-"));
     init(dir, { title: "lut only", fps: 30, width: 320, height: 180 });
@@ -69,16 +103,17 @@ describe("ingest", () => {
 
   it("probes, builds ffmpeg caches, and skips unchanged assets", async () => {
     const dir = project();
-    const only = ["proxy", "thumbs", "waveform"] as const;
+    const only = ["proxy", "reverse", "thumbs", "waveform"] as const;
     const first = await ingest(dir, { only: [...only] });
     expect(first.errors).toBeUndefined();
     expect(first.steps.proxy).toMatchObject({ ran: 1 });
+    expect(first.steps.reverse).toMatchObject({ ran: 1 });
     const probe = readAssets(dir).a_clip;
     expect(probe).toMatchObject({ kind: "video", duration: 2, width: 320, height: 180, fps: 30 });
-    for (const f of ["proxies/edit/a_clip.mp4", "thumbs/a_clip/1.jpg", "contact-sheets/a_clip.jpg"]) expect(existsSync(join(dir, ".splicewright", f))).toBe(true);
+    for (const f of ["proxies/edit/a_clip.mp4", "proxies/reverse/a_clip.mp4", "thumbs/a_clip/1.jpg", "contact-sheets/a_clip.jpg"]) expect(existsSync(join(dir, ".splicewright", f))).toBe(true);
 
     const again = await ingest(dir, { only: [...only] });
-    expect(again.steps).toMatchObject({ probe: { ran: 0, cached: 1 }, proxy: { ran: 0, cached: 1 }, thumbs: { cached: 1 } });
+    expect(again.steps).toMatchObject({ probe: { ran: 0, cached: 1 }, proxy: { ran: 0, cached: 1 }, reverse: { ran: 0, cached: 1 }, thumbs: { cached: 1 } });
     // insertItem can now default the duration from the probe.
     expect(run(dir, "insertItem", { assetId: "a_clip", at: 500 })).toMatchObject({ changes: { summary: expect.stringContaining("(60f)") } });
   }, 60_000);

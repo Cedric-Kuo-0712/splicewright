@@ -174,6 +174,8 @@ export const VideoItem = z.object({
   role: z.string().optional(),
   /** Playback rate: source seconds per timeline second. Changes how much source `duration` covers. */
   speed: z.number().min(0.1).max(10).optional(),
+  /** Play the selected forward-source range in reverse; `sourceIn` remains its lower source bound. */
+  reverse: z.boolean().optional(),
   /** Opacity and volume ramps at the ends, in frames. */
   fadeIn: Frames.min(0).optional(),
   fadeOut: Frames.min(0).optional(),

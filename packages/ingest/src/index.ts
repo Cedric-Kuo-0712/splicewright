@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HEIF, type Asset } from "@splicewright/core";
 import { cacheDir, fingerprint, load, rawPath, readAssets, writeAtomic, type Probe } from "@splicewright/core/node";
@@ -10,7 +10,7 @@ import { audioFxPath, ensureAudioFx } from "./audio-fx.ts";
 // Spec §8. ffmpeg steps run here; transcript and beats need Python libraries and run ingest/*.py.
 // Every step is cached by content fingerprint: a probe entry records, per step, the fingerprint it ran on.
 
-export const STEPS = ["proxy", "analysis", "thumbs", "waveform", "transcript", "beats", "loudness", "audioFx"] as const;
+export const STEPS = ["proxy", "reverse", "analysis", "thumbs", "waveform", "transcript", "beats", "loudness", "audioFx"] as const;
 export type Step = (typeof STEPS)[number];
 type Entry = Probe & { done?: Partial<Record<Step, string>> };
 
@@ -165,6 +165,78 @@ async function editProxy(src: string, out: string) {
   await ffmpeg([...common, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", out]);
 }
 
+/** Reverse a source with bounded memory: reverse each ~10 s decoded chunk, then concatenate chunks backwards. */
+export async function reverseFile(src: string, out: string) {
+  const info = JSON.parse(await exec("ffprobe", ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", src]));
+  const video = info.streams.find((s: any) => s.codec_type === "video");
+  const duration = Number(video?.duration ?? info.format.duration);
+  const audio = info.streams.some((s: any) => s.codec_type === "audio");
+  if (!Number.isFinite(duration) || duration <= 0 || (!video && !audio)) throw new Error(`cannot reverse media with duration ${duration}`);
+  await scratch(async (tmp) => {
+    const sourcePattern = join(tmp, `source-%06d.${video ? "mkv" : "wav"}`);
+    const split = ["-i", src];
+    if (video) split.push("-map", "0:v:0", "-c:v", "ffv1", "-g", "1", "-force_key_frames", "expr:gte(t,n_forced*10)");
+    if (audio) split.push("-map", "0:a:0", "-c:a", "pcm_s16le");
+    split.push("-f", "segment", "-segment_time", "10", "-reset_timestamps", "1");
+    if (video) split.push("-segment_format", "matroska");
+    else split.push("-segment_format", "wav");
+    await ffmpeg([...split, sourcePattern]);
+    const sourceChunks = readdirSync(tmp).filter((name) => name.startsWith("source-")).sort();
+    if (!sourceChunks.length) throw new Error("ffmpeg produced no reverse chunks");
+    const reversed: string[] = [];
+    for (const [index, name] of sourceChunks.entries()) {
+      const path = join(tmp, `reverse-${String(index).padStart(6, "0")}.mkv`);
+      const args = ["-i", join(tmp, name)];
+      if (video) args.push("-map", "0:v:0", "-vf", "reverse", "-c:v", "ffv1", "-g", "1");
+      if (audio) args.push("-map", "0:a:0", "-af", "areverse", "-c:a", "pcm_s16le");
+      args.push("-f", "matroska", path);
+      await ffmpeg(args);
+      reversed.push(path);
+    }
+    const list = join(tmp, "concat.txt");
+    writeFileSync(list, reversed.reverse().map((path) => `file '${path}'`).join("\n") + "\n");
+    const args = ["-f", "concat", "-safe", "0", "-i", list];
+    if (video) args.push("-map", "0:v:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p");
+    else args.push("-vn");
+    if (audio) args.push("-map", "0:a:0", "-c:a", "aac", "-b:a", "192k");
+    else args.push("-an");
+    args.push("-movflags", "+faststart", out);
+    await ffmpeg(args);
+  });
+}
+
+/** Stable companion name for a hash-addressed, project-relative audio bake. */
+export function reverseAudioPath(projectPath: string): string {
+  if (!projectPath.toLowerCase().endsWith(".m4a")) throw new Error(`reverse audio requires an .m4a path: ${projectPath}`);
+  return `${projectPath.slice(0, -4)}-reverse.m4a`;
+}
+
+/** Ensure a reverse-ordered companion for a project-relative processed audio file. */
+export async function reverseProjectAudio(dir: string, projectPath: string): Promise<string> {
+  const root = realpathSync(dir);
+  const sourcePath = resolve(root, projectPath);
+  if (relative(root, sourcePath).startsWith("..") || !existsSync(sourcePath)) throw new Error(`processed audio is missing or outside project: ${projectPath}`);
+  const source = realpathSync(sourcePath);
+  if (relative(root, source).startsWith("..")) throw new Error(`processed audio is missing or outside project: ${projectPath}`);
+  const outputPath = reverseAudioPath(projectPath);
+  const outputPathOnDisk = resolve(root, outputPath);
+  mkdirSync(dirname(outputPathOnDisk), { recursive: true });
+  const outputDir = realpathSync(dirname(outputPathOnDisk));
+  if (relative(root, outputDir).startsWith("..")) throw new Error(`reverse audio output is outside project: ${outputPath}`);
+  const output = join(outputDir, basename(outputPathOnDisk));
+  if (!existsSync(output)) {
+    const temp = `${output.slice(0, -4)}.tmp-${process.pid}.m4a`;
+    try {
+      await reverseFile(source, temp);
+      renameSync(temp, output);
+    } catch (error) {
+      rmSync(temp, { force: true });
+      throw error;
+    }
+  }
+  return outputPath;
+}
+
 /** Seconds between analysis-proxy frames. */
 const analysisStep = (duration = 0) => (duration > 60 ? 2 : 1);
 
@@ -310,6 +382,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
   // loudness has no file: its value lives on the probe entry.
   const outputs: Record<Exclude<Step, "loudness" | "audioFx">, (id: string) => string> = {
     proxy: (id) => cacheDir(dir, "proxies", "edit", `${id}.mp4`),
+    reverse: (id) => cacheDir(dir, "proxies", "reverse", `${id}.mp4`),
     analysis: (id) => cacheDir(dir, "proxies", "analysis", `${id}.mp4`),
     thumbs: (id) => cacheDir(dir, "contact-sheets", `${id}.jpg`),
     waveform: (id) => cacheDir(dir, "waveforms", `${id}.json`),
@@ -318,6 +391,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
   };
   const applies: Record<Exclude<Step, "audioFx">, (e: Entry) => boolean> = {
     proxy: (e) => e.kind === "video",
+    reverse: (e) => e.kind === "video",
     analysis: (e) => e.kind === "video",
     thumbs: (e) => e.kind === "video",
     waveform: (e) => e.kind !== "image" && !!e.audio,
@@ -334,14 +408,15 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
     });
   const mark = (e: Entry, step: Step) => (dirty.add(idOf.get(e)!), ((e.done ??= {})[step] = stamp(e.fingerprint, step)));
 
-  const ff: Record<"proxy" | "analysis" | "thumbs" | "waveform", (e: Entry, id: string, out: string) => Promise<unknown>> = {
+  const ff: Record<"proxy" | "reverse" | "analysis" | "thumbs" | "waveform", (e: Entry, id: string, out: string) => Promise<unknown>> = {
     proxy: (e, _, out) => run(() => editProxy(join(dir, e.path), out)),
+    reverse: (e, _, out) => run(() => reverseFile(join(dir, e.path), out)),
     analysis: (e, _, out) => run(() => analysisProxy(join(dir, e.path), out, e.duration)),
     thumbs: (e, id, out) => run(() => thumbs(join(dir, e.path), cacheDir(dir, "thumbs", id), out, e.duration)),
     waveform: (e, id) => waveform(dir, id, e.path, run, true),
   };
   await Promise.all(
-    (["proxy", "analysis", "thumbs", "waveform"] as const).filter((s) => steps.has(s)).flatMap((step) =>
+    (["proxy", "reverse", "analysis", "thumbs", "waveform"] as const).filter((s) => steps.has(s)).flatMap((step) =>
       todo(step).map(async (e) => {
         const id = idOf.get(e)!;
         const out = outputs[step](id);
@@ -405,11 +480,13 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
       const id = item.id;
       try {
         const output = audioFxPath(dir, asset.id, asset.path, item.audioFx!);
-        if (existsSync(join(dir, output)) && existsSync(join(dir, `${output}.json`))) {
+        const reverse = "reverse" in item && item.reverse;
+        if (existsSync(join(dir, output)) && existsSync(join(dir, `${output}.json`)) && (!reverse || existsSync(join(dir, reverseAudioPath(output))))) {
           tally.audioFx.cached++;
           return;
         }
         const made = await run(() => ensureAudioFx(dir, asset.id, asset.path, item.audioFx!));
+        if (reverse) await run(() => reverseProjectAudio(dir, made));
         const lufs = await loudness(join(dir, made));
         writeAtomic(join(dir, `${made}.json`), { lufs: lufs ?? null });
         tally.audioFx.ran++;

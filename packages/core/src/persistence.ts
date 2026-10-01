@@ -83,6 +83,8 @@ export function load(dir: string): Project {
 export interface Probe {
   path: string;
   fingerprint: string;
+  /** Content stamp of each completed ingest step. */
+  done?: Partial<Record<string, string>>;
   kind: "video" | "audio" | "image" | "font";
   duration?: number;
   width?: number;

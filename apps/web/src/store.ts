@@ -35,8 +35,12 @@ export interface State {
   words: Record<string, Word[]>;
   /** Asset ids with an edit proxy in .splicewright/proxies/edit/. */
   proxies: string[];
+  /** Asset ids with a reverse proxy in .splicewright/proxies/reverse/. */
+  reverseProxies: string[];
   /** Probed durations in seconds, from .splicewright/assets.json. */
   durations: Record<string, number>;
+  /** Probed source frame rates, used to seek reverse proxies in source frames. */
+  frameRates: Record<string, number>;
   /** Coded pixel sizes per asset, for crop and the transform box. */
   sizes: Record<string, [number, number]>;
   /** Probe-marked animated images for frame-accurate Player playback. */
@@ -47,6 +51,7 @@ export interface State {
   loudness: Record<string, number>;
   /** Baked audioFx sources by timeline item id; preview URLs are served through /media. */
   audioFx: Record<string, string>;
+  reverseAudioFx: Record<string, string>;
   audioFxProcessing: string[];
   audioFxErrors: Record<string, string>;
   audioFxLoudness: Record<string, number>;
@@ -90,12 +95,12 @@ const hash = new URLSearchParams(location.hash.slice(1));
 const num = (v: string | null) => (v === null || v === "" || isNaN(Number(v)) ? null : Number(v));
 
 export const app = store<State>({
-  project: null, empty: false, recent: [], duck: {}, words: {}, proxies: [], durations: {}, sizes: {}, animated: {}, fontVersions: {}, loudness: {}, audioFx: {}, audioFxProcessing: [], audioFxErrors: {}, audioFxLoudness: {}, luts: {}, useProxies: true, selection: [], sampling: null, gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
+  project: null, empty: false, recent: [], duck: {}, words: {}, proxies: [], reverseProxies: [], durations: {}, frameRates: {}, sizes: {}, animated: {}, fontVersions: {}, loudness: {}, audioFx: {}, reverseAudioFx: {}, audioFxProcessing: [], audioFxErrors: {}, audioFxLoudness: {}, luts: {}, useProxies: true, selection: [], sampling: null, gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
   io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, cropping: false, masking: false, ingesting: {}, uploads: [], reveal: null,
 });
 export const playhead = store({ frame: 0 });
 
-type Snapshot = Pick<State, "project" | "duck" | "words" | "proxies" | "durations" | "sizes" | "animated" | "fontVersions" | "loudness" | "audioFx" | "audioFxProcessing" | "audioFxErrors" | "audioFxLoudness"> & { lutVersions: Record<string, string> };
+type Snapshot = Pick<State, "project" | "duck" | "words" | "proxies" | "reverseProxies" | "durations" | "frameRates" | "sizes" | "animated" | "fontVersions" | "loudness" | "audioFx" | "reverseAudioFx" | "audioFxProcessing" | "audioFxErrors" | "audioFxLoudness"> & { lutVersions: Record<string, string> };
 const lutCache = new Map<string, { version: string; lut: State["luts"][string] }>();
 let latest = 0;
 
@@ -109,7 +114,7 @@ const take = (s: Snapshot) => {
     app.set(({ gap }) => {
       // Drop a gap selection that an undo, redo, or another writer filled.
       const t = gap && s.project?.tracks.find((t) => t.id === gap.trackId);
-      return { project: s.project, duck: s.duck, words: s.words, proxies: s.proxies, durations: s.durations, sizes: s.sizes, animated: s.animated, fontVersions: s.fontVersions, loudness: s.loudness, audioFx: s.audioFx, audioFxProcessing: s.audioFxProcessing, audioFxErrors: s.audioFxErrors, audioFxLoudness: s.audioFxLoudness, luts, gap: t && gapAt(t, gap.at) ? gap : null };
+      return { project: s.project, duck: s.duck, words: s.words, proxies: s.proxies, reverseProxies: s.reverseProxies, durations: s.durations, frameRates: s.frameRates, sizes: s.sizes, animated: s.animated, fontVersions: s.fontVersions, loudness: s.loudness, audioFx: s.audioFx, reverseAudioFx: s.reverseAudioFx, audioFxProcessing: s.audioFxProcessing, audioFxErrors: s.audioFxErrors, audioFxLoudness: s.audioFxLoudness, luts, gap: t && gapAt(t, gap.at) ? gap : null };
     });
   };
   const stale = Object.entries(s.lutVersions).filter(([id, version]) => lutCache.get(id)?.version !== version);
@@ -129,6 +134,12 @@ const take = (s: Snapshot) => {
 async function call(path: string, body?: unknown) {
   const res = await fetch(path, body === undefined ? undefined : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   return { status: res.status, data: await res.json() };
+}
+
+export async function prepareReverse(assetId: string) {
+  const { status, data } = await call("/api/reverse-proxy", { assetId });
+  if (status >= 400) return fail(data.error?.message ?? "could not prepare reverse proxy");
+  app.set({ message: { text: data.queued ? "Preparing reverse proxy…" : "Reverse proxy ready" } });
 }
 
 export async function refresh() {
@@ -192,12 +203,13 @@ export function listen() {
   new EventSource("/api/events").onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.ingest) {
-      const { id, step } = m.ingest as { id: string; step: string | null };
+      const { id, step, error } = m.ingest as { id: string; step: string | null; error?: string };
       app.set(({ ingesting }) => {
         const next: Record<string, string> = { ...ingesting, [id]: step ?? "" };
         if (!step) delete next[id];
         return { ingesting: next };
       });
+      if (error) app.set({ message: { text: `Ingest ${id} failed: ${error}`, error: true } });
       // Probe results bring durations; the end brings proxies.
       if (!step || step === "probe") refresh();
       return;

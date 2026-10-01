@@ -77,7 +77,7 @@ export function createServer(dir: string): McpServer {
   server.registerTool(
     "ingest",
     {
-      description: "Probe assets and build caches (proxies, thumbs, contact sheets, waveforms, transcripts, beats). Cached by content fingerprint, so re-running is cheap. Needed before insertItem can default a duration, and before detectBeats / addCaptionsFromTranscript.",
+      description: "Probe assets and build caches (edit/reverse/analysis proxies, thumbs, contact sheets, waveforms, transcripts, beats). Cached by content fingerprint, so re-running is cheap. Needed before insertItem can default a duration, and before detectBeats / addCaptionsFromTranscript.",
       inputSchema: { only: z.array(z.enum(STEPS)).optional(), assets: z.array(z.string()).optional().describe("Asset ids; default all.") },
     },
     async ({ only, assets }) => json(await ingest(dir, { only, assets })),

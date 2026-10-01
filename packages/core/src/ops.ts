@@ -59,7 +59,7 @@ const EXT_KIND: Record<string, "video" | "audio" | "image" | "lut" | "font"> = {
 export const HEIF = /\.hei[cf]$/i;
 
 const ITEM_PROPS: Record<TrackKind, string[]> = {
-  video: ["volume", "audioFx", "fit", "transform", "effects", "grade", "key", "crop", "mask", "blend", "keyframes", "fadeIn", "fadeOut", "transition", "speed", "label", "note"],
+  video: ["volume", "audioFx", "fit", "transform", "effects", "grade", "key", "crop", "mask", "blend", "keyframes", "fadeIn", "fadeOut", "transition", "speed", "reverse", "label", "note"],
   audio: ["volume", "audioFx", "fadeIn", "fadeOut", "label", "note"],
   caption: ["label", "note"],
   overlay: ["props", "mask", "blend", "label", "note"],
@@ -333,7 +333,10 @@ export const ops: Record<string, OpDef<any>> = {
       second.start = a.at;
       second.duration = item.duration - offset;
       item.duration = offset;
-      if ("sourceIn" in second) second.sourceIn += offset * secPerFrame(p, item as VideoItem);
+      if ("sourceIn" in second) {
+        if (t.kind === "video" && (item as VideoItem).reverse) (item as VideoItem).sourceIn += second.duration * secPerFrame(p, item as VideoItem);
+        else (second as VideoItem | AudioItem).sourceIn += offset * secPerFrame(p, item as VideoItem);
+      }
       delete (second as { fadeIn?: number }).fadeIn;
       delete (item as { fadeOut?: number }).fadeOut;
       delete (item as VideoItem).transition; // it leads out of the second half now
@@ -345,7 +348,12 @@ export const ops: Record<string, OpDef<any>> = {
         // the cut; duplicate it into both halves if that proves visible.
         for (const other of allItems(p)) {
           const anchor = anchorOf(other);
-          if (anchor?.itemId === item.id && anchor.sourceStart >= second.sourceIn - 1e-9) {
+          if (
+            anchor?.itemId === item.id &&
+            ((item as VideoItem).reverse
+              ? anchor.sourceStart < (second as VideoItem).sourceIn + second.duration * secPerFrame(p, item as VideoItem) - 1e-9
+              : anchor.sourceStart >= (second as VideoItem).sourceIn - 1e-9)
+          ) {
             anchor.itemId = second.id;
             moved++;
           }
@@ -370,12 +378,16 @@ export const ops: Record<string, OpDef<any>> = {
       if (a.edge === "end") {
         const delta = a.to - oldEnd;
         item.duration += delta;
+        if ("sourceIn" in item && t.kind === "video" && (item as VideoItem).reverse) {
+          item.sourceIn -= delta * secPerFrame(p, item as VideoItem);
+          if (item.sourceIn < 0) fail("invalid", `reverse trim moves ${item.id} before source time 0`);
+        }
         if (ripple) shift(t, oldEnd, delta);
       } else {
         // The right edge stays put (or, with ripple, the left edge stays and later items follow).
         const delta = a.to - item.start;
         item.duration -= delta;
-        if ("sourceIn" in item) item.sourceIn += delta * secPerFrame(p, item as VideoItem);
+        if ("sourceIn" in item && !(t.kind === "video" && (item as VideoItem).reverse)) item.sourceIn += delta * secPerFrame(p, item as VideoItem);
         if (ripple) shift(t, oldEnd, -delta);
         else item.start = a.to;
       }
@@ -431,9 +443,13 @@ export const ops: Record<string, OpDef<any>> = {
       if (!("sourceIn" in item)) fail("invalid", `${item.id} has no source to cut`);
       const media = item as VideoItem | AudioItem;
       const whole = [media.start, end(media)];
+      const reverse = "reverse" in media && media.reverse;
       // Source seconds → timeline frames, clamped to the item as it is now; later cuts leave earlier frames untouched.
       const cuts = a.ranges
-        .map(([s, e]) => [Math.max(whole[0], Math.round(frameOf(p, media, s))), Math.min(whole[1], Math.round(frameOf(p, media, e)))])
+        .map(([s, e]) => [
+          Math.max(whole[0], Math.round(frameOf(p, media, reverse ? e - secPerFrame(p, media) : s))),
+          Math.min(whole[1], Math.round(frameOf(p, media, reverse ? s : e)) + (reverse ? 1 : 0)),
+        ])
         .filter(([from, to]) => to > from)
         .sort((x, y) => x[0] - y[0]);
       const merged: number[][] = [];

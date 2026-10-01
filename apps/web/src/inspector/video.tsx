@@ -1,7 +1,7 @@
 import React from "react";
 import { animate, BLENDS, LUT_PRESETS, MASK_SHAPES, withKey, type Animatable, type OverlayItem, type Project, type VideoItem } from "@splicewright/core";
 import { gradeWith, lookEntries, openMenu, pipEntries } from "../edit.ts";
-import { app, applyLutPreset, op, player, playhead } from "../store.ts";
+import { app, applyLutPreset, op, player, playhead, prepareReverse } from "../store.ts";
 import { Field, KeyButton, KeyGroupButton, EFFECTS, EFFECT_ZERO, prune, Slider } from "./fields.tsx";
 
 
@@ -10,6 +10,8 @@ const TRANSITIONS = ["dissolve", "dip", "wipe", "slide", "push", "zoom"] as cons
 
 export function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem; fps: number; still: boolean; set: (patch: Record<string, unknown>) => void }) {
   const cropping = app.use((s) => s.cropping);
+  const reverseProxies = app.use((s) => s.reverseProxies);
+  const ingesting = app.use((s) => s.ingesting);
   const frame = playhead.use((s) => s.frame);
   const tf: Record<string, number> = item.transform ?? {};
   const tr = item.transition;
@@ -61,6 +63,16 @@ export function VideoFields({ p, item, fps, still, set }: { p: Project; item: Vi
         );
       })}
       {!still && <Field label="speed (×)" type="number" value={item.speed ?? 1} onCommit={(v) => Number(v) > 0 && op("setSpeed", { itemId: item.id, speed: Number(v) })} />}
+      {!still && <>
+        <label className="field"><span>reverse</span><input type="checkbox" checked={item.reverse ?? false} onChange={(e) => {
+          const reverse = e.currentTarget.checked;
+          set({ reverse: reverse || null });
+          if (reverse && !reverseProxies.includes(item.assetId)) void prepareReverse(item.assetId);
+        }} /></label>
+        {item.reverse && !reverseProxies.includes(item.assetId) && <small className="hint">
+          {ingesting[item.assetId] === "reverse" ? "Preparing reverse proxy…" : <button onClick={() => void prepareReverse(item.assetId)}>Prepare reverse proxy</button>}
+        </small>}
+      </>}
       <label className="field">
         <span>transition out</span>
         <select value={tr?.kind ?? ""} onChange={(e) => set({ transition: e.target.value ? { kind: e.target.value, duration: tr?.duration ?? Math.round(fps) } : null })}>
@@ -256,5 +268,4 @@ export function MaskFields({ p, item, set }: { p: Project; item: VideoItem | Ove
     </>
   );
 }
-
 

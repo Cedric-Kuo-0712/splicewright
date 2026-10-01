@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { animate, apply, bezier, Keyframes, badFont, builtinTheme, captionWords, createProject, itemSpan, textCss, THEME_IDS, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
+import { animate, apply, bezier, Keyframes, badFont, builtinTheme, captionWords, createProject, itemSpan, sourceAt, textCss, THEME_IDS, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
 
 const ctx: Ctx = {
   assetDurations: { a_clip: 10, a_song: 60 },
@@ -295,6 +295,37 @@ describe("ops", () => {
     expect(item(ok(apply(p, "setSpeed", { itemId: "i_1", speed: 1 }, ctx)), "i_1").speed).toBeUndefined();
     // setProps speed keeps the duration, so i_2 would read 5 s + 60f × 4 / 30 = 13 s of a 10 s clip.
     expect(err(apply(fixture(), "setProps", { itemId: "i_2", patch: { speed: 4 } }, ctx))).toBe("invalid");
+  });
+
+  it("reverse preserves forward sourceIn while split, trim, speed and source-time mapping stay aligned", () => {
+    let p = ok(apply(fixture(), "setProps", { itemId: "i_1", patch: { reverse: true } }, ctx));
+    expect(sourceAt(p, item(p, "i_1"), 0)).toBeCloseTo(89 / 30);
+    expect(sourceAt(p, item(p, "i_1"), 89)).toBe(0);
+    const split = ok(apply(p, "split", { itemId: "i_1", at: 30 }, ctx));
+    expect(item(split, "i_1")).toMatchObject({ reverse: true, sourceIn: 2, duration: 30 });
+    expect(item(split, "i_3")).toMatchObject({ reverse: true, sourceIn: 0, duration: 60 });
+    expect(sourceAt(split, item(split, "i_1"), 0)).toBeCloseTo(89 / 30);
+    expect(sourceAt(split, item(split, "i_3"), 30)).toBeCloseTo(59 / 30);
+    const trimStart = ok(apply(p, "trim", { itemId: "i_1", edge: "start", to: 30 }, ctx));
+    expect(item(trimStart, "i_1")).toMatchObject({ sourceIn: 0, duration: 60 });
+    const trimEnd = ok(apply(p, "trim", { itemId: "i_1", edge: "end", to: 60 }, ctx));
+    expect(item(trimEnd, "i_1")).toMatchObject({ sourceIn: 1, duration: 60 });
+    expect(sourceAt(trimEnd, item(trimEnd, "i_1"), 0)).toBeCloseTo(89 / 30);
+    const speed = ok(apply(p, "setSpeed", { itemId: "i_1", speed: 2 }, ctx));
+    expect(item(speed, "i_1")).toMatchObject({ reverse: true, sourceIn: 0, duration: 45, speed: 2 });
+    expect(err(apply(p, "setProps", { itemId: "i_1", patch: { sourceIn: 8, duration: 90 } }, ctx))).toBe("invalid");
+  });
+
+  it("reverse transition handles check source bounds in the opposite direction", () => {
+    const p = fixture();
+    const transition = { kind: "dissolve", duration: 2 };
+    expect(err(apply(p, "setProps", { itemId: "i_1", patch: { reverse: true, transition } }, ctx))).toBe("invalid");
+    const shifted = ok(apply(p, "slip", { itemId: "i_1", deltaSec: 1 / 30 }, ctx));
+    const outgoing = ok(apply(shifted, "setProps", { itemId: "i_1", patch: { reverse: true, transition } }, ctx));
+    expect(item(outgoing, "i_1")).toMatchObject({ reverse: true, sourceIn: 1 / 30 });
+    const linked = ok(apply(p, "setProps", { itemId: "i_1", patch: { transition } }, ctx));
+    const incoming = ok(apply(linked, "setProps", { itemId: "i_2", patch: { reverse: true } }, ctx));
+    expect(item(incoming, "i_2")).toMatchObject({ reverse: true, sourceIn: 5 });
   });
 
   it("effects and crop patch like any prop; a crop that hides the picture is rejected", () => {

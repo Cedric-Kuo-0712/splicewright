@@ -15,6 +15,9 @@ export function Preview({ p }: { p: Project }) {
   const duck = app.use((s) => s.duck);
   const words = app.use((s) => s.words);
   const proxies = app.use((s) => s.proxies);
+  const reverseProxies = app.use((s) => s.reverseProxies);
+  const durations = app.use((s) => s.durations);
+  const frameRates = app.use((s) => s.frameRates);
   const useProxies = app.use((s) => s.useProxies);
   const rate = app.use((s) => s.rate);
   const slip = app.use((s) => s.slip);
@@ -25,6 +28,7 @@ export function Preview({ p }: { p: Project }) {
   const fontVersions = app.use((s) => s.fontVersions);
   const luts = app.use((s) => s.luts);
   const audioFx = app.use((s) => s.audioFx);
+  const reverseAudioFx = app.use((s) => s.reverseAudioFx);
   const sampling = app.use((s) => s.sampling);
   const shown = useMemo(() => {
     let out = p;
@@ -82,7 +86,7 @@ export function Preview({ p }: { p: Project }) {
       <Player
         ref={ref}
         component={Composition}
-        inputProps={{ project: shown, duck, sizes, animated, fontVersions, words, luts, audioFx, sampleItemId: sampling ?? undefined }}
+        inputProps={{ project: shown, duck, sizes, durations, frameRates, reverseProxies, reverseAudioFx, animated, fontVersions, words, luts, audioFx, sampleItemId: sampling ?? undefined }}
         durationInFrames={total}
         inFrame={range?.[0]}
         outFrame={range ? Math.min(total - 1, range[1] - 1) : undefined}

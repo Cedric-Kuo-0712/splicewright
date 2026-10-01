@@ -63,6 +63,18 @@ it("cutRanges is one undo step", () => {
   expect(load(dir).tracks).toEqual(before);
 });
 
+it("reverse is persisted and undoable as one video-item edit", () => {
+  const dir = project();
+  run(dir, "importAsset", { path: "raw/clip.mp4" });
+  run(dir, "insertItem", { assetId: "a_clip", at: 0 });
+  expect(run(dir, "setProps", { itemId: "i_1", patch: { reverse: true } })).not.toHaveProperty("error");
+  expect(load(dir).tracks[0].items[0]).toMatchObject({ reverse: true });
+  expect(undo(dir)).not.toHaveProperty("error");
+  expect(load(dir).tracks[0].items[0]).not.toHaveProperty("reverse");
+  expect(redo(dir)).not.toHaveProperty("error");
+  expect(load(dir).tracks[0].items[0]).toMatchObject({ reverse: true });
+});
+
 it("stale writes are rejected, not merged", () => {
   const dir = project();
   run(dir, "addMarker", { label: "a", start: 0 });

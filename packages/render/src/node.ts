@@ -8,7 +8,7 @@ import { bundle } from "@remotion/bundler";
 import { renderMedia, renderStill, selectComposition } from "@remotion/renderer";
 import { fingerprint, load, loadCtx, readAssets, sizesOf } from "@splicewright/core/node";
 import { captionWords, parseCube, type Project } from "@splicewright/core";
-import { audioFxPath, ffmpeg, grid, scratch, spread } from "@splicewright/ingest";
+import { audioFxPath, ffmpeg, grid, reverseAudioPath, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
 import type { GradeLut } from "./grade-effect.ts";
 import { duckRanges } from "./duck.ts";
@@ -26,6 +26,18 @@ export function fontVersionsOf(dir: string, project: Project): Record<string, st
       return [asset.id, fingerprint(file) ?? "missing"];
     } catch { return [asset.id, "missing"]; }
   }));
+}
+
+/** An existing reverse file is usable only for the exact source content it was baked from. */
+export function reverseProxiesOf(dir: string, project: Project): string[] {
+  const probes = readAssets(dir);
+  return Object.values(project.assets).filter((asset) => {
+    if (asset.kind !== "video") return false;
+    const probe = probes[asset.id];
+    const current = fingerprint(join(dir, asset.path));
+    return !!current && probe?.path === asset.path && probe.fingerprint === current && probe.done?.reverse === current
+      && existsSync(join(dir, ".splicewright", "proxies", "reverse", `${asset.id}.mp4`));
+  }).map((asset) => asset.id);
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -118,12 +130,32 @@ export function audioFxSources(dir: string, project: Project): Record<string, st
   return audioFx;
 }
 
+export function reverseAudioFxSources(dir: string, project: Project, audioFx: Record<string, string>): Record<string, string> {
+  const sources: Record<string, string> = {};
+  for (const track of project.tracks) for (const item of track.items) {
+    if (!("reverse" in item) || !item.reverse || !item.audioFx) continue;
+    const forward = audioFx[item.id];
+    if (!forward) throw new Error(`audioFx artifact for reverse item ${item.id} is missing`);
+    const path = reverseAudioPath(forward);
+    if (!existsSync(join(dir, path))) throw new Error(`reversed audioFx artifact for item ${item.id} is missing; run splicewright ingest --only audioFx`);
+    sources[item.id] = path;
+  }
+  return sources;
+}
+
 async function prepare(dir: string) {
   const project = load(dir);
   const ctx = loadCtx(dir);
   const probes = readAssets(dir);
+  const reverseProxies = reverseProxiesOf(dir, project);
+  for (const track of project.tracks) for (const item of track.items)
+    if (track.kind === "video" && "reverse" in item && item.reverse && !reverseProxies.includes(item.assetId))
+      throw new Error(`reverse proxy missing for ${item.id} (${item.assetId}); run splicewright ingest --only reverse`);
+  const durations = Object.fromEntries(Object.entries(probes).flatMap(([id, asset]) => (asset.duration ? [[id, asset.duration]] : [])));
+  const frameRates = Object.fromEntries(Object.entries(probes).flatMap(([id, asset]) => (asset.fps ? [[id, asset.fps]] : [])));
   const audioFx = audioFxSources(dir, project);
-  const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(probes), animated: Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : [])), words: captionWords(project, ctx), luts: lutsOf(dir, project), audioFx, fontVersions: fontVersionsOf(dir, project) };
+  const reverseAudioFx = reverseAudioFxSources(dir, project, audioFx);
+  const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(probes), durations, frameRates, reverseProxies, animated: Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : [])), words: captionWords(project, ctx), luts: lutsOf(dir, project), audioFx, reverseAudioFx, fontVersions: fontVersionsOf(dir, project) };
   const serveUrl = await bundleProject(dir);
   // Canvas effects need a WebGL2 context in Remotion's headless Chromium. Keep the legacy render
   // defaults for projects that do not opt into the per-pixel path.

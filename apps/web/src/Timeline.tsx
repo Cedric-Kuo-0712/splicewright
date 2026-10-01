@@ -589,13 +589,15 @@ function CaptionEditor({ p, t, item, left, width }: { p: Project; t: Track; item
 
 /** Slip preview: the new first and last source frames at the item's ends. */
 function SlipEnds({ p, item }: { p: Project; item: Item & { assetId: string; sourceIn: number } }) {
-  const last = item.sourceIn + (item.duration - 1) * secPerFrame(p, item);
+  const reverse = "reverse" in item && item.reverse;
+  const first = item.sourceIn + (reverse ? item.duration - 1 : 0) * secPerFrame(p, item);
+  const last = item.sourceIn + (reverse ? 0 : item.duration - 1) * secPerFrame(p, item);
   return (
     <>
-      <img className="slip-end in" src={`/api/thumb?asset=${item.assetId}&t=${Math.floor(item.sourceIn)}`} alt="" draggable={false} />
+      <img className="slip-end in" src={`/api/thumb?asset=${item.assetId}&t=${Math.floor(first)}`} alt="" draggable={false} />
       <img className="slip-end out" src={`/api/thumb?asset=${item.assetId}&t=${Math.floor(last)}`} alt="" draggable={false} />
       <span className="slip-label">
-        {formatFrame(Math.round(item.sourceIn * p.meta.fps), p.meta.fps)} → {formatFrame(Math.round(last * p.meta.fps), p.meta.fps)}
+        {formatFrame(Math.round(first * p.meta.fps), p.meta.fps)} → {formatFrame(Math.round(last * p.meta.fps), p.meta.fps)}
       </span>
     </>
   );
@@ -685,8 +687,9 @@ function Thumbs({ p, item, width, viewLeft, viewWidth }: { p: Project; item: Ite
   const fps = p.meta.fps;
   const ppf = width / item.duration;
   const out: React.ReactNode[] = [];
+  const reverse = "reverse" in item && item.reverse;
   for (let x = Math.max(0, Math.floor(viewLeft / W) * W); x < Math.min(width, viewLeft + viewWidth); x += W) {
-    const t = Math.floor(item.sourceIn + (x / ppf) * secPerFrame(p, item));
+    const t = Math.floor(item.sourceIn + (reverse ? item.duration - 1 - x / ppf : x / ppf) * secPerFrame(p, item));
     out.push(<img key={x} src={`/api/thumb?asset=${item.assetId}&t=${t}`} style={{ left: x, width: W }} draggable={false} alt="" />);
   }
   return <div className="thumbs">{out}</div>;

@@ -17,20 +17,22 @@ export function itemSpan(project: Project, it: Item): { start: number; duration:
   const item = videoItems(project).get(anchor.itemId);
   if (!item) return null;
   const lo = Math.max(anchor.sourceStart, item.sourceIn);
-  const hi = Math.min(anchor.sourceEnd, sourceAt(project, item, item.start + item.duration));
-  const start = Math.round(frameOf(project, item, lo));
-  const end = Math.round(frameOf(project, item, hi));
+  const hi = Math.min(anchor.sourceEnd, item.sourceIn + item.duration * secPerFrame(project, item));
+  const start = Math.round(frameOf(project, item, item.reverse ? hi - secPerFrame(project, item) : lo));
+  const end = Math.round(frameOf(project, item, item.reverse ? lo : hi)) + (item.reverse ? 1 : 0);
   return end - start >= 1 ? { start, duration: end - start } : null;
 }
 
-type Media = { start: number; sourceIn: number; speed?: number };
+type Media = { start: number; sourceIn: number; duration?: number; speed?: number; reverse?: boolean };
 
 /** Source seconds per timeline frame (speed only exists on video items). */
 export const secPerFrame = (p: Project, i: Media) => (i.speed ?? 1) / p.meta.fps;
 /** Source seconds shown at timeline frame `f`. */
-export const sourceAt = (p: Project, i: Media, f: number) => i.sourceIn + (f - i.start) * secPerFrame(p, i);
+export const sourceAt = (p: Project, i: Media, f: number) =>
+  i.sourceIn + ((i.reverse && i.duration ? i.duration - 1 - (f - i.start) : f - i.start) * secPerFrame(p, i));
 /** Timeline frame (unrounded) that shows source second `s`. */
-export const frameOf = (p: Project, i: Media, s: number) => i.start + (s - i.sourceIn) / secPerFrame(p, i);
+export const frameOf = (p: Project, i: Media, s: number) =>
+  i.start + (i.reverse && i.duration ? i.duration - 1 - (s - i.sourceIn) / secPerFrame(p, i) : (s - i.sourceIn) / secPerFrame(p, i));
 
 /** A video item's transition when the next item touches it: that item, plus the frames before and
  * after the cut the transition covers. */
@@ -71,18 +73,25 @@ export function validate(project: unknown, prev?: Project, ctx: Ctx = {}): strin
       if ("assetId" in i) {
         if (!p.assets[i.assetId]) errs.push(`${i.id}: unknown asset ${i.assetId}`);
         else if (p.assets[i.assetId].kind === "lut" || p.assets[i.assetId].kind === "font") errs.push(`${i.id}: ${p.assets[i.assetId].kind.toUpperCase()} assets cannot be placed on a track`);
+        if ("reverse" in i && i.reverse && p.assets[i.assetId]?.kind !== "video") errs.push(`${i.id}: reverse playback requires a video asset`);
         const dur = ctx.assetDurations?.[i.assetId];
         if ("grade" in i && i.grade?.lut && p.assets[i.grade.lut.assetId]?.kind !== "lut")
           errs.push(`${i.id}: grade LUT ${i.grade.lut.assetId} is missing or is not a LUT asset`);
-        if (dur !== undefined && sourceAt(p, i, i.start + i.duration) > dur + 1e-6)
+        if (dur !== undefined && i.sourceIn + i.duration * secPerFrame(p, i) > dur + 1e-6)
           errs.push(`${i.id}: source range ends past asset duration ${dur}s`);
         // dissolve and wipe play both sides past the cut; images have no source limits.
         const tr = transitionOf(t, i);
         if (tr && tr.kind !== "dip") {
           const still = (x: { assetId: string }) => p.assets[x.assetId]?.kind === "image";
-          if (!still(i) && dur !== undefined && sourceAt(p, i, i.start + i.duration + tr.after) > dur + 1e-6)
+          const reversed = "reverse" in i && i.reverse;
+          if (!still(i) && dur !== undefined && (reversed
+            ? i.sourceIn - tr.after * secPerFrame(p, i) < -1e-6
+            : sourceAt(p, i, i.start + i.duration + tr.after) > dur + 1e-6))
             errs.push(`${i.id}: ${tr.kind} into ${tr.next.id} needs ${tr.after} frames of source after ${i.id}'s end; shorten it or use dip`);
-          if (!still(tr.next) && sourceAt(p, tr.next, tr.next.start - tr.before) < -1e-6)
+          const nextDur = ctx.assetDurations?.[tr.next.assetId];
+          if (!still(tr.next) && (tr.next.reverse
+            ? nextDur !== undefined && tr.next.sourceIn + (tr.next.duration + tr.before) * secPerFrame(p, tr.next) > nextDur + 1e-6
+            : sourceAt(p, tr.next, tr.next.start - tr.before) < -1e-6))
             errs.push(`${i.id}: ${tr.kind} into ${tr.next.id} needs ${tr.before} frames of source before ${tr.next.id}'s start; shorten it or use dip`);
         }
       }

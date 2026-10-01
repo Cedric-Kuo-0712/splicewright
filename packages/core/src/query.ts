@@ -1,6 +1,6 @@
 import type { AudioItem, Ctx, Item, Project } from "./schema.ts";
 import { beatFrames } from "./timing.ts";
-import { frameOf, itemSpan, sourceAt } from "./validate.ts";
+import { frameOf, itemSpan, secPerFrame } from "./validate.ts";
 
 // Token-budget read views (§7.2). Pure; shared by `splicewright status` and the MCP read tools.
 
@@ -68,7 +68,7 @@ export function getItem(p: Project, itemId: string, ctx: Ctx = {}) {
       if (item.id !== itemId) continue;
       if (!("assetId" in item)) return { track: t.id, item, visible: visible(p, item) !== null };
       const lo = item.sourceIn;
-      const hi = sourceAt(p, item, item.start + item.duration);
+      const hi = item.sourceIn + item.duration * secPerFrame(p, item);
       return {
         track: t.id,
         item,
@@ -104,7 +104,7 @@ export function findFillers(p: Project, ctx: Ctx = {}, { itemId, words = ["um", 
         if (itemId || segs?.length) hints.push(`${item.id}: asset ${item.assetId} has no word timestamps; run ingest with --only transcript to re-transcribe`);
         continue;
       }
-      const [lo, hi] = [item.sourceIn, sourceAt(p, item, end(item))];
+      const [lo, hi] = [item.sourceIn, item.sourceIn + item.duration * secPerFrame(p, item)];
       const cuts: { range: [number, number]; what: string }[] = [];
       ws.forEach((w, i) => {
         const text = trimWord(w.text);
@@ -138,7 +138,7 @@ export function find(p: Project, query: string, ctx: Ctx = {}, limit = 50) {
       if ("text" in item && has(item.text)) add("text", item.text, visible(p, item)?.start ?? item.start);
       if ("props" in item && has(JSON.stringify(item.props))) add("props", JSON.stringify(item.props));
       if (t.kind === "video" && "assetId" in item) {
-        const hi = sourceAt(p, item, item.start + item.duration);
+        const hi = item.sourceIn + item.duration * secPerFrame(p, item);
         for (const s of ctx.transcript?.(item.assetId) ?? [])
           if (s.start < hi && s.end > item.sourceIn && has(s.text))
             add("transcript", s.text.trim(), Math.max(item.start, Math.round(frameOf(p, item, s.start))));

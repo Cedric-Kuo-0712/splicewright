@@ -8,7 +8,7 @@ import { bundle } from "@remotion/bundler";
 import { renderMedia, renderStill, selectComposition } from "@remotion/renderer";
 import { load, loadCtx, readAssets, sizesOf } from "@splicewright/core/node";
 import { captionWords, parseCube, type Project } from "@splicewright/core";
-import { ffmpeg, grid, scratch, spread } from "@splicewright/ingest";
+import { audioFxPath, ffmpeg, grid, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
 import type { GradeLut } from "./grade-effect.ts";
 import { duckRanges } from "./duck.ts";
@@ -93,11 +93,25 @@ export function bundleProject(dir: string): Promise<string> {
   return bundles.get(dir)!;
 }
 
+export function audioFxSources(dir: string, project: Project): Record<string, string> {
+  const audioFx: Record<string, string> = {};
+  for (const track of project.tracks) for (const item of track.items) {
+    if (!("audioFx" in item) || !item.audioFx || !("assetId" in item)) continue;
+    const asset = project.assets[item.assetId];
+    if (!asset) throw new Error(`audioFx item ${item.id} references missing asset ${item.assetId}`);
+    const path = audioFxPath(dir, asset.id, asset.path, item.audioFx);
+    if (!existsSync(join(dir, path))) throw new Error(`audioFx artifact for item ${item.id} is missing or stale; wait for processing to finish before rendering`);
+    audioFx[item.id] = path;
+  }
+  return audioFx;
+}
+
 async function prepare(dir: string) {
   const project = load(dir);
   const ctx = loadCtx(dir);
   const probes = readAssets(dir);
-  const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(probes), animated: Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : [])), words: captionWords(project, ctx), luts: lutsOf(dir, project) };
+  const audioFx = audioFxSources(dir, project);
+  const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(probes), animated: Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : [])), words: captionWords(project, ctx), luts: lutsOf(dir, project), audioFx };
   const serveUrl = await bundleProject(dir);
   // Canvas effects need a WebGL2 context in Remotion's headless Chromium. Keep the legacy render
   // defaults for projects that do not opt into the per-pixel path.

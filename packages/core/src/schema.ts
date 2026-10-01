@@ -149,11 +149,19 @@ export const Asset = z.object({
   rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]).optional(),
 });
 
+export const AudioFx = z.object({
+  eq: z.array(z.object({ hz: z.number().min(20).max(20_000), gain: z.number().min(-24).max(24), q: z.number().positive().max(10).optional() })).min(1).max(16).optional(),
+  pan: z.number().min(-1).max(1).optional(),
+  denoise: z.object({ kind: z.enum(["rnnoise", "fft"]), mix: z.number().min(0).max(1).optional() }).optional(),
+}).strict().refine((fx) => !!fx.eq?.length || fx.pan !== undefined || !!fx.denoise, { message: "audioFx needs at least one effect" });
+export type AudioFx = z.infer<typeof AudioFx>;
+
 export const VideoItem = z.object({
   ...itemBase,
   assetId: Id,
   sourceIn: Seconds.min(0),
   volume: Volume.optional(),
+  audioFx: AudioFx.optional(),
   fit: z.enum(["contain", "cover"]).optional(),
   transform: Transform.optional(),
   effects: Effects.optional(),
@@ -186,6 +194,7 @@ export const AudioItem = z.object({
   assetId: Id,
   sourceIn: Seconds.min(0),
   volume: z.number().min(0).optional(),
+  audioFx: AudioFx.optional(),
   /** `volume` only; source seconds like video keys. */
   keyframes: Keyframes.refine((k) => Object.keys(k).every((p) => p === "volume"), { message: "audio items can only key volume" }).optional(),
   fadeIn: Frames.min(0).optional(),
@@ -310,6 +319,8 @@ export interface Ctx {
   fingerprint?: (path: string) => string | undefined;
   /** Integrated loudness in LUFS from the `loudness` ingest step, by asset id. */
   loudness?: Record<string, number>;
+  /** Integrated loudness from an item's baked audioFx artifact, keyed by item id. */
+  audioFxLoudness?: Record<string, number>;
   /** Validate a project-relative LUT when registering it. */
   validateLut?: (path: string) => void;
 }

@@ -645,6 +645,7 @@ composition or bakes a file that both sides play.
   missing. Loudness (M9) is measured on the baked file. Later: DeepFilterNet (MIT/Apache) as a better `denoise`
   kind through its `deep-filter` CLI (48 kHz WAV only). Acceptance: a 1 kHz tone + pink noise: `eq` −12 dB at 1 kHz
   lowers the tone by 12 ± 1 dB; `pan: -1` leaves the right channel silent; `denoise` lowers noise-only RMS.
+  **As built (partial, 2026-10-01):** EQ, pan, FFT denoise, baked preview/render selection, per-item baked loudness, and render preflight are implemented and tested. RNNoise processing is wired but requires a redistributable model; the referenced upstream model repository has no model license statement, so the model is not bundled and RNNoise reports a missing-model error.
 - **E1 Bezier ease.** Keys gain `ease: [x1, y1, x2, y2]` besides `"linear" | "ease"`. Core evaluates it with its own
   cubic-bezier solver (Newton + bisection, ~20 lines), since core does not depend on Remotion. UI: presets
   (ease-in, ease-out, ease-in-out, overshoot) on a key's context menu. Acceptance: the solver matches CSS

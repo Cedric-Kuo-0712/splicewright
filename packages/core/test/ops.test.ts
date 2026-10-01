@@ -159,6 +159,13 @@ describe("ops", () => {
     expect(err(apply(p, "setProps", { itemId: "i_1", patch: { start: 5 } }, ctx))).toBe("invalid");
     expect(err(apply(p, "setProps", { itemId: "i_1", patch: { volume: 9 } }, ctx))).toBe("invalid");
     expect(err(apply(p, "setTrack", { trackId: "t_1", patch: { style: "x" } }, ctx))).toBe("invalid");
+    const fx = ok(apply(p, "setProps", { itemId: "i_1", patch: { audioFx: { eq: [{ hz: 1000, gain: -12, q: 1 }], pan: -1, denoise: { kind: "fft", mix: 0.5 } } } }, ctx));
+    expect(item(fx, "i_1").audioFx).toEqual({ eq: [{ hz: 1000, gain: -12, q: 1 }], pan: -1, denoise: { kind: "fft", mix: 0.5 } });
+    for (const audioFx of [{}, { pan: 2 }, { eq: [] }, { eq: [{ hz: 0, gain: 0 }] }, { denoise: { kind: "fft", mix: 2 } }, { mystery: true }])
+      expect(err(apply(p, "setProps", { itemId: "i_1", patch: { audioFx } }, ctx))).toBe("invalid");
+    let still = ok(apply(fixture(), "importAsset", { path: "raw/still.png" }, ctx));
+    still = ok(apply(still, "insertItem", { assetId: "a_still", at: 150, duration: 30 }, ctx));
+    expect(err(apply(still, "setProps", { itemId: "i_3", patch: { audioFx: { pan: 1 } } }, ctx))).toBe("invalid");
   });
 
   it("validates built-in Sticker props against imported image assets", () => {
@@ -512,6 +519,17 @@ describe("ops", () => {
     expect(err(apply(p, "normalizeLoudness", { itemIds: ["i_1"] }, ctx))).toBe("not_found");
     p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "volume", at: 0, value: 1 }, ctx));
     expect(err(apply(p, "normalizeLoudness", { itemIds: ["i_1"] }, lctx))).toBe("invalid");
+  });
+
+  it("normalizes same-asset audioFx items from their own baked loudness and refuses missing processed LUFS", () => {
+    const detached = ok(apply(fixture(), "detachAudio", { itemId: "i_1" }, ctx));
+    const two = ok(apply(detached, "setProps", { itemId: "i_2", patch: { audioFx: { pan: -0.5 } } }, ctx));
+    const fx = ok(apply(two, "setProps", { itemId: "i_3", patch: { audioFx: { eq: [{ hz: 1000, gain: -6 }] } } }, ctx));
+    expect(err(apply(fx, "normalizeLoudness", { itemIds: ["i_2", "i_3"] }, { ...ctx, loudness: { a_clip: -20 } }))).toBe("not_found");
+    const normalized = ok(apply(fx, "normalizeLoudness", { itemIds: ["i_2", "i_3"] }, { ...ctx, loudness: { a_clip: -20 }, audioFxLoudness: { i_2: -10, i_3: -30 } }));
+    expect(item(normalized, "i_2").volume).toBeCloseTo(10 ** (-4 / 20));
+    expect(item(normalized, "i_3").volume).toBeCloseTo(2);
+    expect(normalized.revision).toBe(fx.revision + 1);
   });
 
   it("detachAudio refuses images, speed ≠ 1 and silent items", () => {

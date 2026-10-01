@@ -5,11 +5,12 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HEIF, type Asset } from "@splicewright/core";
 import { cacheDir, fingerprint, load, rawPath, readAssets, writeAtomic, type Probe } from "@splicewright/core/node";
+import { audioFxPath, ensureAudioFx } from "./audio-fx.ts";
 
 // Spec §8. ffmpeg steps run here; transcript and beats need Python libraries and run ingest/*.py.
 // Every step is cached by content fingerprint: a probe entry records, per step, the fingerprint it ran on.
 
-export const STEPS = ["proxy", "analysis", "thumbs", "waveform", "transcript", "beats", "loudness"] as const;
+export const STEPS = ["proxy", "analysis", "thumbs", "waveform", "transcript", "beats", "loudness", "audioFx"] as const;
 export type Step = (typeof STEPS)[number];
 type Entry = Probe & { done?: Partial<Record<Step, string>> };
 
@@ -307,7 +308,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
 
   const idOf = new Map(ready.map((e) => [e, Object.keys(cache).find((k) => cache[k] === e)!]));
   // loudness has no file: its value lives on the probe entry.
-  const outputs: Record<Exclude<Step, "loudness">, (id: string) => string> = {
+  const outputs: Record<Exclude<Step, "loudness" | "audioFx">, (id: string) => string> = {
     proxy: (id) => cacheDir(dir, "proxies", "edit", `${id}.mp4`),
     analysis: (id) => cacheDir(dir, "proxies", "analysis", `${id}.mp4`),
     thumbs: (id) => cacheDir(dir, "contact-sheets", `${id}.jpg`),
@@ -315,7 +316,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
     transcript: (id) => cacheDir(dir, "transcripts", `${id}.json`),
     beats: (id) => cacheDir(dir, "beats", `${id}.json`),
   };
-  const applies: Record<Step, (e: Entry) => boolean> = {
+  const applies: Record<Exclude<Step, "audioFx">, (e: Entry) => boolean> = {
     proxy: (e) => e.kind === "video",
     analysis: (e) => e.kind === "video",
     thumbs: (e) => e.kind === "video",
@@ -325,7 +326,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
     loudness: (e) => e.kind !== "image" && !!e.audio,
   };
   /** Entries this step still has to process; the rest are tallied as cached or skipped. */
-  const todo = (step: Step) =>
+  const todo = (step: Exclude<Step, "audioFx">) =>
     ready.filter((e) => {
       if (!applies[step](e)) return tally[step].skipped++, false;
       if (e.done?.[step] === stamp(e.fingerprint, step) && (step === "loudness" || existsSync(outputs[step](idOf.get(e)!)))) return tally[step].cached++, false;
@@ -394,5 +395,33 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
     save();
   }
 
+  if (steps.has("audioFx")) {
+    const items = project.tracks.flatMap((track) => track.items.flatMap((item) =>
+      "audioFx" in item && item.audioFx && "assetId" in item && (!opts.assets || opts.assets.includes(item.assetId))
+        ? [{ item, asset: project.assets[item.assetId] }]
+        : [],
+    )).filter((x) => !!x.asset);
+    await Promise.all(items.map(async ({ item, asset }) => {
+      const id = item.id;
+      try {
+        const output = audioFxPath(dir, asset.id, asset.path, item.audioFx!);
+        if (existsSync(join(dir, output)) && existsSync(join(dir, `${output}.json`))) {
+          tally.audioFx.cached++;
+          return;
+        }
+        const made = await run(() => ensureAudioFx(dir, asset.id, asset.path, item.audioFx!));
+        const lufs = await loudness(join(dir, made));
+        writeAtomic(join(dir, `${made}.json`), { lufs: lufs ?? null });
+        tally.audioFx.ran++;
+        log(`audioFx ${id}${lufs === undefined ? " (silent)" : ` (${lufs.toFixed(1)} LUFS)`}`);
+      } catch (err) {
+        fail("audioFx", id, err);
+      }
+    }));
+    tally.audioFx.skipped += project.tracks.reduce((n, track) => n + track.items.filter((item) => "assetId" in item && (!opts.assets || opts.assets.includes(item.assetId)) && !("audioFx" in item && item.audioFx)).length, 0);
+  }
+
   return { assets: assets.length, steps: tally, ...(errors.length && { errors }) };
 }
+
+export { audioFxPath, ensureAudioFx };

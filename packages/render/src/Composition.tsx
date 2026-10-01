@@ -27,6 +27,8 @@ export interface Props extends Record<string, unknown> {
   /** From captionWords(); transcript words per anchored caption on a highlight: "word" track. */
   words?: Record<string, Word[]>;
   luts?: Record<string, GradeLut>;
+  /** Baked item audio sources, relative project paths in renders and `/media/...` URLs in the editor. */
+  audioFx?: Record<string, string>;
   sampleItemId?: string;
   /** Carried through so the Node side can read config presets via selectComposition(). */
   presets?: Config["presets"];
@@ -421,7 +423,7 @@ const CanvasVideoPath: React.FC<{
   );
 };
 
-const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; animated?: boolean; muted?: boolean; from: number; inc?: Transition; out?: Transition; luts: Record<string, GradeLut>; sampleItemId?: string }> = ({ p, item: raw, size, animated, muted, from, inc, out, luts, sampleItemId }) => {
+const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; animated?: boolean; muted?: boolean; from: number; inc?: Transition; out?: Transition; luts: Record<string, GradeLut>; audioFx?: Record<string, string>; sampleItemId?: string }> = ({ p, item: raw, size, animated, muted, from, inc, out, luts, audioFx, sampleItemId }) => {
   const asset = p.assets[raw.assetId];
   const f = from + useCurrentFrame();
   const item = animate(p, raw, f);
@@ -455,7 +457,7 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
   ) : asset.kind === "image" ? (
     <Img src={staticFile(asset.path)} style={style} />
   ) : raw.key || raw.grade ? (
-    <CanvasVideoPath key={asset.path} itemName={raw.label ?? raw.id} itemId={raw.id} sample={sampleItemId === raw.id} src={staticFile(asset.path)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted} fit={item.fit} style={style} keyLook={raw.key} grade={raw.grade} luts={luts} />
+    <CanvasVideoPath key={asset.path} itemName={raw.label ?? raw.id} itemId={raw.id} sample={sampleItemId === raw.id} src={staticFile(asset.path)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted || !!audioFx?.[raw.id]} fit={item.fit} style={style} keyLook={raw.key} grade={raw.grade} luts={luts} />
   ) : (
     // Legacy items stay on OffthreadVideo; only pixel-look items opt into the canvas decoder.
     <OffthreadVideo
@@ -463,7 +465,7 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
       trimBefore={trimBefore}
       playbackRate={speed}
       volume={volume}
-      muted={muted}
+      muted={muted || !!audioFx?.[raw.id]}
       style={style}
     />
   );
@@ -483,11 +485,12 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
       ) : (
         media
       )}
+      {audioFx?.[raw.id] && <Audio src={audioFx[raw.id].startsWith("/") ? audioFx[raw.id] : staticFile(audioFx[raw.id])} trimBefore={trimBefore} playbackRate={speed} volume={volume} muted={muted} />}
     </AbsoluteFill>
   );
 };
 
-const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges }> = ({ p, t, item, ranges }) => {
+const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges; audioFx?: Record<string, string> }> = ({ p, t, item, ranges, audioFx }) => {
   const track = "volume" in t ? (t.volume ?? 1) : 1;
   const { duration: d, fadeIn = 0, fadeOut = 0 } = item;
   const volume = (f: number) => {
@@ -497,10 +500,11 @@ const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges }
     if (item.duck && ranges) v *= duckGain(item.start + f, ranges, item.duck.level);
     return Math.max(0, v);
   };
-  return <Audio src={staticFile(p.assets[item.assetId].path)} trimBefore={Math.round(item.sourceIn * p.meta.fps)} volume={volume} muted={t.muted} />;
+  const src = audioFx?.[item.id] ?? p.assets[item.assetId].path;
+  return <Audio src={src.startsWith("/") ? src : staticFile(src)} trimBefore={Math.round(item.sourceIn * p.meta.fps)} volume={volume} muted={t.muted} />;
 };
 
-export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, animated = {}, words = {}, luts = {}, sampleItemId, components }) => {
+export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, animated = {}, words = {}, luts = {}, audioFx, sampleItemId, components }) => {
   const registry: Record<string, React.ComponentType<any>> = { Text, Image, Sticker, CaptionLayer, ...components };
   const component = (name: string, where: string) => {
     const C = registry[name];
@@ -508,7 +512,7 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
     return C;
   };
   const body = (t: Track, item: Item, from: number, inc?: Transition, out?: Transition) => {
-    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} animated={animated[(item as VideoItem).assetId]} muted={t.muted} from={from} inc={inc} out={out} luts={luts} sampleItemId={sampleItemId} />;
+    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} audioFx={audioFx} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} animated={animated[(item as VideoItem).assetId]} muted={t.muted} from={from} inc={inc} out={out} luts={luts} audioFx={audioFx} sampleItemId={sampleItemId} />;
     const C = component((item as { component: string }).component, item.id);
     const { mask } = item as OverlayItem;
     let props = (item as { props: Record<string, unknown> }).props;

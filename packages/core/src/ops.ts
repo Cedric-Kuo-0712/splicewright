@@ -59,8 +59,8 @@ const EXT_KIND: Record<string, "video" | "audio" | "image" | "lut" | "font"> = {
 export const HEIF = /\.hei[cf]$/i;
 
 const ITEM_PROPS: Record<TrackKind, string[]> = {
-  video: ["volume", "fit", "transform", "effects", "grade", "key", "crop", "mask", "blend", "keyframes", "fadeIn", "fadeOut", "transition", "speed", "label", "note"],
-  audio: ["volume", "fadeIn", "fadeOut", "label", "note"],
+  video: ["volume", "audioFx", "fit", "transform", "effects", "grade", "key", "crop", "mask", "blend", "keyframes", "fadeIn", "fadeOut", "transition", "speed", "label", "note"],
+  audio: ["volume", "audioFx", "fadeIn", "fadeOut", "label", "note"],
   caption: ["label", "note"],
   overlay: ["props", "mask", "blend", "label", "note"],
 };
@@ -501,6 +501,8 @@ export const ops: Record<string, OpDef<any>> = {
     'Patch item fields: volume, fit, transform, effects {brightness, contrast, saturation, hue, blur, grayscale, sepia, invert}, grade {exposure, temperature, tint, vibrance, shadows, highlights, levels, curves, lut}, key {kind: chroma|luma, color, similarity, smoothness, spill, low, high, invert}, crop {top, right, bottom, left} (fractions), mask {shape: rect|ellipse|diamond|star|polygon, x, y, w, h (fractions of the fitted picture box, x,y = top-left, w,h > 0), radius (rect only, 0..0.5 of min(w,h)), points [[x,y],...] (polygon only, >= 3, fractions of the mask box), feather (px, 0..200), invert} (video and overlay; drawn after crop), blend (video and overlay: normal|multiply|screen|overlay|darken|lighten|difference), keyframes (whole map; use setKeyframe to key one value), fadeIn, fadeOut, transition {kind: dissolve|dip|wipe|slide|push|zoom, duration, direction (left|right|up|down: side the incoming picture enters from, default left; wipe/slide/push)}, speed (video; speed here keeps duration, so the source range scales; setSpeed keeps the source range); volume, fadeIn, fadeOut (audio); props (overlay; a Text overlay takes text, role title|subtitle|emphasis|handwritten (default title), textStyle {font (a built-in font name), weight, size px, color, tracking em, lineHeight, upper, align, stroke {color,width}, shadow {color,blur,y}, box {color,radius,pad}} over the theme role, style raw CSS); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
     const { track: t, item } = locate(p, a.itemId);
     patch(item as Record<string, unknown>, a.patch, ITEM_PROPS[t.kind], `${t.kind} item ${item.id}`);
+    if (a.patch.audioFx !== undefined && a.patch.audioFx !== null && "assetId" in item && p.assets[item.assetId]?.kind === "image")
+      fail("invalid", `${item.id} uses an image asset and cannot have audio processing`);
     const v = item as VideoItem;
     if (v.grade?.lut && p.assets[v.grade.lut.assetId]?.kind !== "lut") fail("invalid", `grade LUT ${v.grade.lut.assetId} must reference an imported .cube LUT asset`);
     if (a.patch.mask === null && v.keyframes) {
@@ -596,8 +598,8 @@ export const ops: Record<string, OpDef<any>> = {
           silent++; // deliberately silenced, e.g. the video after detachAudio; raising it would double the sound
           continue;
         }
-        const l = ctx.loudness?.[item.assetId];
-        if (l === undefined) fail("not_found", `no loudness for ${item.assetId}; run splicewright ingest --only loudness`);
+        const l = item.audioFx ? ctx.audioFxLoudness?.[item.id] : ctx.loudness?.[item.assetId];
+        if (l === undefined) fail("not_found", `no ${item.audioFx ? "processed " : ""}loudness for ${item.id}; run splicewright ingest --only loudness and wait for audio processing`);
         if (item.keyframes?.volume) fail("invalid", `${id} has volume keyframes; remove them before normalizing`);
         item.volume = Math.min(2, Math.max(0, 10 ** ((a.target - l) / 20)));
       }

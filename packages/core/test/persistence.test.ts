@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, utimesSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { commit, historyList, init, load, loadCtx, rawPath, redo, run, undo } from "../src/persistence.ts";
+import { audioFxCachePath, commit, historyList, init, load, loadCtx, rawPath, redo, run, undo, writeAtomic } from "../src/persistence.ts";
 
 function project() {
   const dir = mkdtempSync(join(tmpdir(), "swr-"));
@@ -33,6 +33,23 @@ it("run commits atomically and reads probe + transcript caches", () => {
   expect(run(dir, "addCaptionsFromTranscript", { itemId: "i_1" })).not.toHaveProperty("error");
   expect(load(dir)).toMatchObject({ revision: 3 });
   expect(readdirSync(dir).filter((f) => f.includes(".tmp"))).toEqual([]);
+});
+
+it("loads baked loudness by item for same-asset items with distinct audioFx", () => {
+  const dir = project();
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  writeFileSync(join(dir, "raw", "music.wav"), "fixture audio source bytes");
+  run(dir, "importAsset", { path: "raw/music.wav" });
+  run(dir, "insertItem", { assetId: "a_music", at: 0, duration: 30 });
+  run(dir, "insertItem", { assetId: "a_music", at: 30, duration: 30 });
+  run(dir, "setProps", { itemId: "i_1", patch: { audioFx: { pan: -1 } } });
+  run(dir, "setProps", { itemId: "i_2", patch: { audioFx: { eq: [{ hz: 1000, gain: -6 }] } } });
+  const p = load(dir);
+  const source = p.assets.a_music.path;
+  mkdirSync(join(dir, ".splicewright", "audio"), { recursive: true });
+  writeAtomic(join(dir, `${audioFxCachePath(dir, "a_music", source, { pan: -1 })}.json`), { lufs: -8 });
+  writeAtomic(join(dir, `${audioFxCachePath(dir, "a_music", source, { eq: [{ hz: 1000, gain: -6 }] })}.json`), { lufs: -24 });
+  expect(loadCtx(dir).audioFxLoudness).toEqual({ i_1: -8, i_2: -24 });
 });
 
 it("cutRanges is one undo step", () => {

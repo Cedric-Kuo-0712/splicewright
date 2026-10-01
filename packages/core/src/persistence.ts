@@ -5,7 +5,7 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { apply, createProject, type OpResult } from "./ops.ts";
-import type { Ctx, Project } from "./schema.ts";
+import type { AudioFx, Ctx, Project } from "./schema.ts";
 import { validate } from "./validate.ts";
 import { parseCube } from "./lut.ts";
 import { LUT_PRESETS } from "./lut-presets.ts";
@@ -16,6 +16,21 @@ type Err = { error: { code: string; message: string } };
 interface HistoryEntry { op: string; args: unknown; project: Project; summary?: string }
 
 export const cacheDir = (dir: string, ...parts: string[]) => join(dir, ".splicewright", ...parts);
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v)}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+/** Same hashed project-relative path used by ingest for an item's full-source baked audio. */
+export function audioFxCachePath(dir: string, assetId: string, sourcePath: string, audioFx: AudioFx, modelStamp?: string): string {
+  const source = fingerprint(join(dir, sourcePath));
+  if (!source) throw new Error(`audioFx source missing for ${assetId}: ${sourcePath}`);
+  const model = modelStamp ?? (audioFx.denoise?.kind === "rnnoise" ? "model-missing" : "");
+  const hash = createHash("sha256").update(`${source}\n${model}\n${stableJson(audioFx)}`).digest("hex").slice(0, 20);
+  return `.splicewright/audio/${assetId.replace(/[^A-Za-z0-9._-]/g, "_")}-${hash}.m4a`;
+}
 
 function projectLutPath(dir: string, path: string) {
   const root = realpathSync(dir), file = realpathSync(resolve(dir, path));
@@ -114,19 +129,31 @@ const readJson = (f: string) => (existsSync(f) ? JSON.parse(readFileSync(f, "utf
 
 /** Adapter context: probe results, transcripts and beats from the ingest cache. */
 export function loadCtx(dir: string): Ctx {
+  const project = load(dir);
   const probed = readAssets(dir);
   const assetDurations: Record<string, number> = {};
   const fingerprints: Record<string, string> = {};
   const loudness: Record<string, number> = {};
+  const audioFxLoudness: Record<string, number> = {};
   for (const [id, a] of Object.entries(probed)) {
     if (typeof a.duration === "number") assetDurations[id] = a.duration;
     if (typeof a.loudness === "number") loudness[id] = a.loudness;
     fingerprints[id] = a.fingerprint;
   }
+  for (const track of project.tracks) for (const item of track.items) {
+    if (!("audioFx" in item) || !item.audioFx || !("assetId" in item)) continue;
+    const asset = project.assets[item.assetId];
+    if (!asset) continue;
+    try {
+      const cache = readJson(join(dir, `${audioFxCachePath(dir, asset.id, asset.path, item.audioFx)}.json`));
+      if (typeof cache?.lufs === "number") audioFxLoudness[item.id] = cache.lufs;
+    } catch { /* missing or stale bake remains unavailable to normalization */ }
+  }
   return {
     assetDurations,
     fingerprints,
     loudness,
+    audioFxLoudness,
     validateLut: (path) => parseCube(readFileSync(projectLutPath(dir, path), "utf8")),
     fingerprint: (path) => fingerprint(join(dir, path)),
     transcript: (assetId) => readJson(cacheDir(dir, "transcripts", `${assetId}.json`))?.segments,

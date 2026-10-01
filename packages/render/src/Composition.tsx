@@ -37,6 +37,12 @@ export interface Props extends Record<string, unknown> {
 
 const center = { justifyContent: "center", alignItems: "center", overflow: "hidden" } as const;
 
+/** Pending or failed processing must never play the unprocessed source as if the effect were ready. */
+export function audioSourceFor(item: AudioItem | VideoItem, original: string, audioFx: Record<string, string> = {}, reverseAudioFx: Record<string, string> = {}): string | undefined {
+  if (!item.audioFx) return original;
+  return "reverse" in item && item.reverse ? reverseAudioFx[item.id] : audioFx[item.id];
+}
+
 // Base styles, scoped so the M4 UI page isn't touched. They mirror the Tailwind preflight rules that
 // video-cut's components were written against (sans-serif, line-height 1.5, box/margin reset).
 const BASE = ".swr *, .swr ::before, .swr ::after { box-sizing: border-box; margin: 0; padding: 0; border: 0 solid; }";
@@ -445,6 +451,7 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
   };
   const trimBefore = Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps);
   const animatedFrom = Math.round(item.start - from - item.sourceIn * p.meta.fps);
+  const processedAudio = raw.audioFx ? audioSourceFor(raw, asset.path, audioFx) : undefined;
   const volume = (v: number) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain;
   // A missing .cube must not take the whole preview down, but a render keeps failing on it (lookEffects throws) rather than writing an ungraded clip.
   const { isRendering } = useRemotionEnvironment();
@@ -458,7 +465,7 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
   ) : asset.kind === "image" ? (
     <Img src={staticFile(asset.path)} style={style} />
   ) : raw.key || raw.grade ? (
-    <CanvasVideoPath key={asset.path} itemName={raw.label ?? raw.id} itemId={raw.id} sample={sampleItemId === raw.id} src={staticFile(asset.path)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted || !!audioFx?.[raw.id]} fit={item.fit} style={style} keyLook={raw.key} grade={raw.grade} luts={luts} />
+    <CanvasVideoPath key={asset.path} itemName={raw.label ?? raw.id} itemId={raw.id} sample={sampleItemId === raw.id} src={staticFile(asset.path)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted || !!raw.audioFx} fit={item.fit} style={style} keyLook={raw.key} grade={raw.grade} luts={luts} />
   ) : (
     // Legacy items stay on OffthreadVideo; only pixel-look items opt into the canvas decoder.
     <OffthreadVideo
@@ -466,7 +473,7 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
       trimBefore={trimBefore}
       playbackRate={speed}
       volume={volume}
-      muted={muted || !!audioFx?.[raw.id]}
+      muted={muted || !!raw.audioFx}
       style={style}
     />
   );
@@ -486,7 +493,7 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
       ) : (
         media
       )}
-      {audioFx?.[raw.id] && <Audio src={audioFx[raw.id].startsWith("/") ? audioFx[raw.id] : staticFile(audioFx[raw.id])} trimBefore={trimBefore} playbackRate={speed} volume={volume} muted={muted} />}
+      {processedAudio && <Audio src={processedAudio.startsWith("/") ? processedAudio : staticFile(processedAudio)} trimBefore={trimBefore} playbackRate={speed} volume={volume} muted={muted} />}
     </AbsoluteFill>
   );
 };
@@ -501,7 +508,8 @@ const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges; 
     if (item.duck && ranges) v *= duckGain(item.start + f, ranges, item.duck.level);
     return Math.max(0, v);
   };
-  const src = audioFx?.[item.id] ?? p.assets[item.assetId].path;
+  const src = audioSourceFor(item, p.assets[item.assetId].path, audioFx);
+  if (!src) return null;
   return <Audio src={src.startsWith("/") ? src : staticFile(src)} trimBefore={Math.round(item.sourceIn * p.meta.fps)} volume={volume} muted={t.muted} />;
 };
 

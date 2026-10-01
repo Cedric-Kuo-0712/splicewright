@@ -7,6 +7,7 @@ import { init, load, rawPath, redo, run, undo } from "@splicewright/core/node";
 import { displayable, ingest, STEPS, type Step } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
 import { render, still } from "@splicewright/render/node";
+import { provisionAgentSkills } from "./agent-skills.ts";
 import { migrateVideoCut } from "./migrate.ts";
 
 // Spec §7.1. Every command prints one JSON object on stdout; errors exit 1.
@@ -69,6 +70,7 @@ const fontGuide = () =>
  * Existing files are kept; .mcp.json only gains a splicewright entry if it has none. Returns what was written.
  * `refresh` rewrites AGENTS.md from the current template and meta, keeping its Brief and Notes sections.
  */
+let agentWarnings: string[] = [];
 function agentFiles(dir: string, meta: { title: string; fps: number; width: number; height: number }, refresh = false): string[] {
   const written: string[] = [];
   const write = (name: string, text: string) => {
@@ -102,7 +104,9 @@ function agentFiles(dir: string, meta: { title: string; fps: number; width: numb
     writeFileSync(mcpPath, JSON.stringify(mcp, null, 2) + "\n");
     written.push(".mcp.json");
   }
-  return written;
+  const skills = provisionAgentSkills(dir, join(import.meta.dirname, "skills"), refresh);
+  agentWarnings = skills.warnings;
+  return [...written, ...skills.created];
 }
 
 /** Frame number, or [hh:]mm:ss[.s] timecode, to a timeline frame. */
@@ -129,8 +133,9 @@ switch (cmd) {
     const r = init(dir, { title, fps, width, height });
     if ("error" in r && r.error.code !== "exists") out(r);
     const meta = load(dir).meta;
-    const created = [...("error" in r ? [] : ["project.json"]), ...agentFiles(dir, meta, flags["refresh-agents"])];
-    out({ created, revision: load(dir).revision });
+    const provisioned = agentFiles(dir, meta, flags["refresh-agents"]);
+    const created = [...("error" in r ? [] : ["project.json"]), ...provisioned];
+    out({ created, ...(agentWarnings.length ? { warnings: agentWarnings } : {}), revision: load(dir).revision });
   }
   case "import": {
     if (!args.length) out({ error: { code: "usage", message: "import <paths...>" } });

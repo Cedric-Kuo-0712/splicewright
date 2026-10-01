@@ -1,0 +1,15 @@
+from manim import *
+
+
+class TravelScene(Scene):
+    def construct(self):
+        self.camera.background_color = '#102c32'
+        stops = [LEFT * 4, ORIGIN, RIGHT * 4]
+        names = ['Station', 'Coffee', 'Riverside']
+        route = VMobject(color='#78d5bc').set_points_smoothly(stops)
+        dots = VGroup(*[Dot(p, color='#ffb36a') for p in stops])
+        labels = VGroup(*[Text(name, font_size=26, color='#fff1d6').next_to(dot, DOWN)
+                         for name, dot in zip(names, dots)])
+        self.play(Create(route), run_time=1)
+        self.play(LaggedStart(*[FadeIn(VGroup(dot, label)) for dot, label in zip(dots, labels)], lag_ratio=.3), run_time=1)
+        self.wait(2)

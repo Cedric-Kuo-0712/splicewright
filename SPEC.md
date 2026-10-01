@@ -278,6 +278,7 @@ existing project): `AGENTS.md` (the per-project brief and notes, from `packages/
 `mcp` by absolute path). How to use the tools is not in AGENTS.md: it is the MCP server's `instructions` (§7.2),
 so it stays current with the tools. Project state is not in AGENTS.md either: agents read it with `get_summary`.
 `init --refresh-agents` rewrites `AGENTS.md` from the current template and `meta`, keeping its `## Brief` and `## Notes` sections.
+`init` also copies bundled animation and art-direction skills (including references, component templates and optional-engine setup scripts) to `.agents/skills/`. Existing files are preserved. Managed content hashes in `.splicewright/agent-skills.json` allow `--refresh-agents` to update unchanged shipped files while preserving local edits; missing/invalid tracking data never authorizes overwriting existing skills. The CLI's web `onInit` hook uses the same provisioning path. Animation/style choices are recorded in the project's existing Notes.
 
 ### 7.2 MCP server
 Write tools map 1:1 to core ops (`splicewright_split`, `splicewright_trim`, …, `splicewright_batch`).
@@ -390,6 +391,7 @@ so the tool also runs on Linux.
 - `@splicewright/render` provides one Remotion composition, `SplicewrightProject`, that renders any
   `project.json`. It draws tracks bottom to top with `<Sequence from={start} durationInFrames={duration}>`.
 - Built-in components (v1): `Text`, `Image`, `CaptionLayer` (styleable).
+- Agent-authored custom overlays can import `splicewright/animation` in both preview and render: seeded `SketchPath` (Rough.js), `MorphPath` (Flubber), Remotion `Lottie`, and selected SVG shapes. These are authoring helpers, not new timeline item kinds or user controls. Optional Motion Canvas/Manim scenes are prepared in isolated project-local folders and imported as rendered media.
 - Props: `project`, `duck` (speech ranges), and `sizes` (coded asset size from the probe; crop and the
   editor's transform box use it to find the fitted picture, else the picture is taken to fill the frame).
   `effects` is a CSS `filter` and `crop` a `clip-path: inset()` on the media element.

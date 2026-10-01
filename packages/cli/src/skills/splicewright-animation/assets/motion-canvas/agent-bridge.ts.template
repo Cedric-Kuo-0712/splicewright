@@ -1,0 +1,61 @@
+import {randomUUID} from 'node:crypto';
+import {mkdirSync, writeFileSync} from 'node:fs';
+import type {Plugin} from 'vite';
+
+// Deliberately only status/render. No arbitrary paths, browser scripts or screenshot payloads.
+export function agentBridge(): Plugin {
+  return {name:'splicewright-agent-bridge',configureServer(server) {
+    const pending=new Map<string,{resolve:(value:Record<string,unknown>)=>void;timer:ReturnType<typeof setTimeout>}>();
+    const jobs=new Set<string>();
+    const ask=(action:string,params:Record<string,unknown>={})=>new Promise<Record<string,unknown>>((resolve)=>{
+      const id=randomUUID();
+      const timer=setTimeout(()=>{pending.delete(id);resolve({error:'no connected renderer; open the project in a browser'});},2000);
+      pending.set(id,{resolve,timer});
+      server.ws.send('splicewright:request',{id,action,...params});
+    });
+    server.ws.on('splicewright:response',(data:{id:string;accepted?:boolean;error?:string})=>{
+      const request=pending.get(data.id);
+      if (!request) return;
+      clearTimeout(request.timer);pending.delete(data.id);
+      if (data.accepted) {
+        jobs.add(data.id);mkdirSync('.agent-render',{recursive:true});
+        writeFileSync(`.agent-render/${data.id}.json`,JSON.stringify({id:data.id,state:'running'})+'\n');
+      }
+      request.resolve({...data});
+    });
+    server.ws.on('splicewright:done',(data:{id:string;state:string;error?:string})=>{
+      if (!jobs.delete(data.id)) return;
+      writeFileSync(`.agent-render/${data.id}.json`,JSON.stringify(data)+'\n');
+      server.config.logger.info(`Animation ${data.id}: ${data.state}`);
+    });
+    server.httpServer?.on('close',()=>{
+      for (const request of pending.values()) {clearTimeout(request.timer);request.resolve({error:'server closed'});}
+      pending.clear();
+    });
+    server.middlewares.use(async (req,res,next)=>{
+      if (!req.url?.startsWith('/__splicewright/')) return next();
+      const reply=(code:number,data:unknown)=>{res.writeHead(code,{'Content-Type':'application/json'});res.end(JSON.stringify(data));};
+      const host=req.headers.host??'';
+      const address=req.socket.remoteAddress??'';
+      if (!['127.0.0.1:9000','localhost:9000'].includes(host) || !['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address))
+        return reply(403,{error:'loopback requests only'});
+      if (req.headers.origin && ![`http://${host}`].includes(req.headers.origin)) return reply(403,{error:'cross-origin request refused'});
+      try {
+        if (req.method==='GET' && req.url==='/__splicewright/status') {
+          const data=await ask('status');return reply(data.error?503:200,data);
+        }
+        if (req.method!=='POST' || req.url!=='/__splicewright/render') return reply(404,{error:'unknown endpoint'});
+        let body='';
+        for await (const chunk of req) {
+          body+=chunk.toString();if (Buffer.byteLength(body)>1024) return reply(413,{error:'request too large'});
+        }
+        const data=JSON.parse(body) as Record<string,unknown>;
+        if (!data || Array.isArray(data) || Object.keys(data).some(key=>!['fps','width','height'].includes(key)))
+          return reply(400,{error:'provide only fps, width and height'});
+        if (![data.fps,data.width,data.height].every(value=>Number.isInteger(value) && Number(value)>0) || Number(data.fps)>120 || Number(data.width)>8192 || Number(data.height)>8192)
+          return reply(400,{error:'positive integer fps <=120 and dimensions <=8192 required'});
+        const result=await ask('render',data);return reply(result.error?503:202,result);
+      } catch (error) { return reply(400,{error:String(error)}); }
+    });
+  }};
+}

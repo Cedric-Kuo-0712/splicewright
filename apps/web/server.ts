@@ -255,7 +255,10 @@ export async function open(dir: string, { port = 5190, onInit }: { port?: number
       logLevel: "warn",
       plugins: [react(), api(dir, { home, onInit, switchTo })],
       // Project components import react/remotion but the project folder has no node_modules.
-      resolve: { dedupe: ["react", "react-dom", "remotion"], alias: { splicewright: join(here, "../../packages/render/src/config.ts") } },
+      resolve: { dedupe: ["react", "react-dom", "remotion"], alias: {
+        "splicewright/animation": join(here, "../../packages/render/src/animation.tsx"),
+        splicewright: join(here, "../../packages/render/src/config.ts"),
+      } },
       server: { host: "127.0.0.1", port, strictPort, fs: { allow: [dir, join(here, "../..")] }, watch: { ignored: [join(dir, ".splicewright") + "/**"] } },
     });
     await server.listen();

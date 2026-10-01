@@ -1,0 +1,16 @@
+import {Circle, Line, Txt, makeScene2D} from '@motion-canvas/2d';
+import {all, createRef, waitFor} from '@motion-canvas/core';
+
+export default makeScene2D(function* (view) {
+  const route=createRef<Line>();
+  const labels=[createRef<Txt>(),createRef<Txt>(),createRef<Txt>()];
+  view.fill('#102c32');
+  view.add(<Line ref={route} points={[[-400,0],[0,-80],[400,0]]} stroke="#78d5bc" lineWidth={5} end={0}/>);
+  ['Station','Coffee','Riverside'].forEach((name,index)=>view.add(<>
+    <Circle x={(index-1)*400} y={index===1?-80:0} size={20} fill="#ffb36a"/>
+    <Txt ref={labels[index]} text={name} x={(index-1)*400} y={index===1?-30:50} fill="#fff1d6" fontSize={32} opacity={0}/>
+  </>));
+  yield* route().end(1,1);
+  yield* all(...labels.map(label=>label().opacity(1,.5)));
+  yield* waitFor(2);
+});

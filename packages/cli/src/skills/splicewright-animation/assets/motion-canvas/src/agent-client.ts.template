@@ -1,0 +1,44 @@
+import {RendererResult, type Plugin, type Project, type Renderer} from '@motion-canvas/core';
+
+export function agentClient(): Plugin {
+  let project: Project | undefined, renderer: Renderer | undefined, running: string | undefined;
+  return {
+    name:'splicewright-agent',
+    project(value) { project=value; },
+    renderer(value) {
+      renderer=value;
+      renderer.onFinished.subscribe(result=>{
+        if (!running) return;
+        import.meta.hot?.send('splicewright:done',{id:running,
+          state:result===RendererResult.Success?'complete':result===RendererResult.Aborted?'aborted':'failed'});
+        running=undefined;
+      });
+      import.meta.hot?.on('splicewright:request', async (request: {id:string;action:string;fps:number;width:number;height:number})=>{
+        if (!project || !renderer) return;
+        if (request.action==='status') {
+          import.meta.hot?.send('splicewright:response',{id:request.id,ready:true,running:running??null});
+          return;
+        }
+        if (request.action!=='render') {
+          import.meta.hot?.send('splicewright:response',{id:request.id,error:'unknown action'});
+          return;
+        }
+        if (running) {
+          import.meta.hot?.send('splicewright:response',{id:request.id,error:'render already running'});
+          return;
+        }
+        running=request.id;
+        import.meta.hot?.send('splicewright:response',{id:request.id,accepted:true});
+        try {
+          const settings=project.meta.getFullRenderingSettings();
+          settings.size.x=request.width;
+          settings.size.y=request.height;
+          await renderer.render({...settings,name:project.name,fps:request.fps});
+        } catch (error) {
+          import.meta.hot?.send('splicewright:done',{id:request.id,state:'failed',error:String(error)});
+          running=undefined;
+        }
+      });
+    },
+  };
+}

@@ -10,6 +10,7 @@ import { captionWords, type Project } from "@splicewright/core";
 import { ffmpeg, grid, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
 import { duckRanges } from "./duck.ts";
+import { projectAliases } from "./aliases.ts";
 
 export { duckRanges };
 
@@ -52,7 +53,7 @@ export function bundleProject(dir: string): Promise<string> {
       symlinkPublicDir: true, // never copy raw footage into the bundle
       webpackOverride: (c) => ({
         ...c,
-        resolve: { ...c.resolve, alias: { ...(c.resolve?.alias as object), splicewright: join(here, "config.ts") } },
+        resolve: { ...c.resolve, alias: projectAliases(here, c.resolve?.alias as Record<string, unknown> | undefined) },
       }),
     });
     promise.catch(() => bundles.delete(dir));

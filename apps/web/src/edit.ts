@@ -1,6 +1,7 @@
 import { anchorOf, durationFrames, frameOf, itemSpan, nextId, secPerFrame, type Item, type Project, type Track, type TrackKind, type VideoItem } from "@splicewright/core";
 import { pip, type PipPreset } from "@splicewright/render";
 import { app, history, ioRange, op, player, playhead, refresh, say, seek, type MenuEntry } from "./store.ts";
+import { captureStyle, styleOperations, type StyleClipboard } from "./style.ts";
 
 // Editing commands shared by the keyboard, the toolbar, and the context menus. Multi-op edits go out
 // as one batch, so each is one undo step.
@@ -127,6 +128,7 @@ interface Clip {
 }
 
 let clipboard: Clip[] = [];
+let styleClipboard: StyleClipboard | null = null;
 
 function clips(p: Project, ids: string[]): Clip[] {
   return ids
@@ -142,6 +144,27 @@ export function copy() {
   const { project, selection } = app.get();
   clipboard = clips(project!, selection);
   say(`copied ${clipboard.length} item${clipboard.length === 1 ? "" : "s"}`);
+}
+
+/** Style clipboard is separate from the timeline item clipboard and lives only in app memory. */
+export function copyStyle() {
+  const { project, selection } = app.get();
+  if (!project || selection.length !== 1) return say("select one item to copy its style", true);
+  const found = findItem(project, selection[0]);
+  styleClipboard = found ? captureStyle(found.track, found.item) : null;
+  return styleClipboard ? say(`${styleClipboard.kind} style copied`) : say("this item has no copyable style", true);
+}
+
+export function pasteStyle() {
+  const { project, selection } = app.get();
+  if (!project || !selection.length) return say("select items to apply style", true);
+  if (!styleClipboard) return say("style clipboard is empty", true);
+  const words = app.get().words;
+  const wordTimedIds = new Set(Object.entries(words).filter(([, list]) => list.length).map(([id]) => id));
+  const { operations, skipped, animated, noWordTiming } = styleOperations(project, selection, styleClipboard, wordTimedIds);
+  if (!operations.length) return say("no compatible unlocked selection for this style", true);
+  const hint = [skipped && `${skipped} skipped (locked or incompatible)`, animated && `${animated} animated clip${animated === 1 ? "" : "s"} keep their effect keys`, noWordTiming && `${noWordTiming} caption track${noWordTiming === 1 ? "" : "s"} kept existing highlight (no timed words)`].filter(Boolean).join("; ");
+  return send(operations).then((ok) => ok && hint && say(`style applied; ${hint}`));
 }
 
 /** Cmd+X: copy, then delete the selection (a single delete op, so one undo step). */
@@ -427,11 +450,18 @@ export const pipEntries = (p: Project, item: VideoItem): MenuEntry[] =>
     disabled: k !== "circle" && !!(item.keyframes?.x || item.keyframes?.y || item.keyframes?.scale),
   }));
 
-export const lookEntries = (item: VideoItem): MenuEntry[] => [
-  ...Object.entries(LOOKS).map(([label, effects]) => ({ label, run: () => op("setProps", { itemId: item.id, patch: { effects } }) })),
-  "-",
-  { label: "Reset effects", run: () => op("setProps", { itemId: item.id, patch: { effects: null } }), disabled: !item.effects },
-];
+const LOOK_EFFECT_KEYS = ["brightness", "contrast", "saturation", "hue", "blur", "grayscale", "sepia", "invert"] as const;
+export const lookEntries = (item: VideoItem): MenuEntry[] => {
+  const hasKeys = LOOK_EFFECT_KEYS.some((key) => item.keyframes?.[key]?.length);
+  const keyframes = { ...item.keyframes };
+  LOOK_EFFECT_KEYS.forEach((key) => delete keyframes[key]);
+  return [
+    ...(hasKeys ? [{ label: "Looks are unavailable while effect animation keys exist", disabled: true, run: () => {} }] : Object.entries(LOOKS).map(([label, effects]) => ({ label, run: () => op("setProps", { itemId: item.id, patch: { effects } }) }))),
+    "-",
+    { label: "Reset static effects", run: () => op("setProps", { itemId: item.id, patch: { effects: null } }), disabled: !item.effects },
+    ...(hasKeys ? [{ label: "Remove effect animation", run: () => op("setProps", { itemId: item.id, patch: { effects: null, keyframes: Object.keys(keyframes).length ? keyframes : null } }) }] : []),
+  ];
+};
 
 // ---- selection ----
 

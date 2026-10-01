@@ -12,7 +12,13 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .new-project form { display: flex; gap: 8px; }
 .new-project form input { flex: 1; }
 
-.app { display: grid; height: 100%; grid-template: "bar bar bar" auto "bin preview inspector" minmax(0, 1fr) "tl tl tl" minmax(0, 42%) "status status status" auto / 220px minmax(0, 1fr) 260px; }
+.app { display: grid; height: 100%; grid-template: "bar bar bar bar bar" auto "bin bin-split preview inspector-split inspector" minmax(0, 1fr) "tl-split tl-split tl-split tl-split tl-split" 6px "tl tl tl tl tl" var(--timeline-size) "status status status status status" auto / var(--bin-size) 6px minmax(0, 1fr) 6px var(--inspector-size); }
+.separator { position: relative; z-index: 8; touch-action: none; background: #24262b; outline-offset: -2px; }
+.separator:hover, .separator:focus-visible { background: #4c6ef5; outline: 1px solid #8aa1ff; }
+.separator.vertical { grid-row: 2; cursor: col-resize; }
+.separator.bin-split { grid-area: bin-split; }
+.separator.inspector-split { grid-area: inspector-split; }
+.separator.horizontal { grid-area: tl-split; cursor: row-resize; }
 .toolbar { grid-area: bar; display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid #2a2c31; }
 .toolbar .spacer { flex: 1; }
 .timecode { font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; margin-left: 12px; }
@@ -23,6 +29,17 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .thumb { width: 64px; height: 36px; object-fit: cover; background: #000; border-radius: 2px; flex: none; display: grid; place-items: center; }
 .preview { grid-area: preview; background: #000; min-height: 0; }
 .inspector { grid-area: inspector; overflow: auto; padding: 10px; border-left: 1px solid #2a2c31; }
+.inspector-fields { border: 0; min-width: 0; margin: 0; padding: 0; }
+.inspector-tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.scope-label { margin: 0 0 8px; padding: 4px 6px; border-left: 2px solid #4c6ef5; color: #aab9ff; background: #4c6ef511; }
+.effective-style { display: grid; gap: 3px; padding: 7px; margin: 4px 0 8px; background: #202126; border-radius: 4px; }
+.effective-style strong { color: #bbb; font-size: 11px; }
+.effective-style div { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 5px; align-items: baseline; }
+.effective-style code { overflow-wrap: anywhere; color: #ddd; }
+.effective-style small { color: #888; }
+.style-actions { flex-wrap: wrap; }
+.advanced { margin: 8px 0; }
+.advanced summary { color: #999; cursor: pointer; padding: 4px 0; }
 .field { display: grid; grid-template-columns: 80px 1fr; gap: 6px; align-items: center; margin-bottom: 6px; }
 .field.slider { grid-template-columns: 80px 1fr 44px; }
 .field.slider output { font: 11px ui-monospace, monospace; text-align: right; color: #aaa; }

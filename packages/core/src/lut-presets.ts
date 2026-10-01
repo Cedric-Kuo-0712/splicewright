@@ -2,7 +2,7 @@
 const PURPLE = "https://github.com/stripedpurple/color-grading-luts/tree/9757e8b5147693cab49c3fd674bf23dbe28d6c8e";
 const FILM = "https://github.com/t3mujinpack/t3mujinpack/tree/0b421f3e25209ed78253d1724a29cc6255c5e7fe";
 const native = (id: string, name: string, category: string, file: string, sourcePath: string, sourceGitBlobSha1: string) => ({
-  id, name, category, file: `luts/native/${file}`, source: PURPLE, sourcePath, commit: "9757e8b5147693cab49c3fd674bf23dbe28d6c8e",
+  id, name, category, file: `luts/native/${file}.gz`, source: PURPLE, sourcePath, commit: "9757e8b5147693cab49c3fd674bf23dbe28d6c8e",
   sourceGitBlobSha1, license: "MIT", licenseFile: "luts/native/LICENSE",
   // Stated as found, not as a claim that the three names are one party.
   credit: { repositoryLicenseCopyright: "Nixua", fileHeaderCopyright: "Austin Barrett - Striped Purple (wording varies per file)" }, inputProfile: "unspecified" as const, format: "cube" as const,

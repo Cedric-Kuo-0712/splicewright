@@ -179,8 +179,8 @@ export function applyLutPreset(dir: string, itemId: string, presetId: string, ba
   try {
     if (!existsSync(source)) return { error: { code: "not_found", message: `built-in LUT file missing: ${presetId}` } };
     const bundled = readFileSync(source);
-    const sourceBlob = createHash("sha1").update(`blob ${bundled.length}\0`).update(bundled).digest("hex");
-    const bytes = preset.format === "hald-rgb8-to-cube-gzip65" ? gunzipSync(bundled) : bundled;
+    const bytes = preset.file.endsWith(".gz") ? gunzipSync(bundled) : bundled;
+    const sourceBlob = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
     const sha = createHash("sha256").update(bytes).digest("hex");
     const assetId = `a_lut_${sha}`;
     const relativePath = `raw/luts/${preset.id}-${sha.slice(0, 16)}.cube`;

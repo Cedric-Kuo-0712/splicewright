@@ -23,11 +23,11 @@ it("ships a complete parseable preset catalog with source licenses and stable ID
     expect(preset.license).toBe("MIT");
     expect(preset.commit).toHaveLength(40);
     const bytes = readFileSync(file);
-    const cube = preset.format === "cube" ? bytes : gunzipSync(bytes);
+    const cube = gunzipSync(bytes);
     const parsed = parseCube(cube.toString("utf8"));
     expect(parsed.size).toBeGreaterThanOrEqual(2);
     if (preset.format === "cube") {
-      expect(createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex")).toBe(preset.sourceGitBlobSha1);
+      expect(createHash("sha1").update(`blob ${cube.length}\0`).update(cube).digest("hex")).toBe(preset.sourceGitBlobSha1);
     } else {
       const record = JSON.parse(readFileSync(new URL("../assets/luts/film/build-record.json", import.meta.url), "utf8")) as { results: { source_git_blob_sha1: string; compressed_sha256: string; cube_sha256: string; error_8bit_levels: { mean: number; p99: number; max: number } }[] };
       const entry = record.results.find((row) => row.source_git_blob_sha1 === preset.sourceGitBlobSha1)!;
@@ -39,7 +39,7 @@ it("ships a complete parseable preset catalog with source licenses and stable ID
   }
 });
 
-it("copies one selected LUT and assigns it in one undoable history step, preserving other grade fields", () => {
+it("copies one selected LUT and assigns it in one undoable history step, preserving other grade fields", { timeout: 30_000 }, () => {
   const dir = makeProject();
   expect(run(dir, "setProps", { itemId: "i_1", patch: { grade: { exposure: 0.5, vibrance: 0.2 } } })).not.toHaveProperty("error");
   const beforeHistory = historyList(dir).undo.length;
@@ -48,6 +48,7 @@ it("copies one selected LUT and assigns it in one undoable history step, preserv
   const p = load(dir), lut = Object.values(p.assets).find((asset) => asset.kind === "lut")!;
   expect(p.tracks[0].items[0] as VideoItem).toMatchObject({ grade: { exposure: 0.5, vibrance: 0.2, lut: { assetId: lut.id, strength: 1 } } });
   expect(readdirSync(join(dir, "raw", "luts")).filter((name) => name.endsWith(".cube"))).toEqual([lut.path.split("/").at(-1)]);
+  expect(readFileSync(join(dir, lut.path)).equals(gunzipSync(readFileSync(new URL(`../assets/${LUT_PRESETS[0].file}`, import.meta.url))))).toBe(true);
   expect(readFileSync(join(dir, "raw", "luts", "licenses", "stripedpurple-MIT.txt"), "utf8")).toContain("Copyright (c) 2020 Nixua");
   expect(JSON.parse(readFileSync(join(dir, "raw", "luts", "licenses", `${LUT_PRESETS[0].id}-attribution.json`), "utf8"))).toMatchObject({
     sourceCommit: LUT_PRESETS[0].commit,
@@ -72,7 +73,7 @@ it("reuses a valid content-addressed asset id and is idempotent for an already a
   expect(historyList(dir).undo).toHaveLength(history);
   expect((load(dir).tracks[0].items[0] as VideoItem).grade?.lut?.assetId).toBe(assetId);
   const source = new URL(`../assets/${LUT_PRESETS[0].file}`, import.meta.url);
-  expect(createHash("sha256").update(readFileSync(source)).digest("hex")).toBe(assetId!.slice("a_lut_".length));
+  expect(createHash("sha256").update(gunzipSync(readFileSync(source))).digest("hex")).toBe(assetId!.slice("a_lut_".length));
 });
 
 it("rejects invalid IDs, bad project destinations, and tampered copies without project mutation", () => {

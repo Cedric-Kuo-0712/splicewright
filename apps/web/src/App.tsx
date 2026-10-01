@@ -3,8 +3,9 @@ import { Player, type PlayerRef } from "@remotion/player";
 import config from "virtual:swr-config";
 import { anchorOf, animate, ASPECTS, BLENDS, FONT_ROLES, FONTS, FPS_CHOICES, THEME_IDS, MASK_PROPS, MASK_SHAPES, beatFrames, durationFrames, formatFrame, itemSpan, keyAt, snapPoints, valueAt, withKey, type Animatable, type AudioItem, type FontRole, type Item, type OverlayItem, type Project, type SnapPoint, type TextStyle, type Track, type VideoItem } from "@splicewright/core";
 import { mediaBox, SplicewrightProject, type Props } from "@splicewright/render";
-import { addMarker, addText, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, pipEntries, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
+import { addMarker, addText, copy, cut, detachAudio, duplicate, findItem, freezeFrame, gradeWith, historyMenu, itemsAfter, KEYS, lookEntries, loopRange, markerAroundSelection, markerNear, nudge, openMenu, paste, pipEntries, rangeFromSelection, replaceWith, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, upload, videoUnder } from "./edit.ts";
 import { app, dnd, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
+import { mapSamplePoint, multiplyMatrix, sampledRgb } from "./sample-coordinates.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 
 // Spec §7.3 panels: media bin, player, inspector, timeline.
@@ -191,6 +192,8 @@ function Preview({ p }: { p: Project }) {
   const looping = app.use((s) => s.looping);
   const live = app.use((s) => s.live);
   const sizes = app.use((s) => s.sizes);
+  const luts = app.use((s) => s.luts);
+  const sampling = app.use((s) => s.sampling);
   const shown = useMemo(() => {
     let out = p;
     if (useProxies && proxies.length) {
@@ -211,12 +214,43 @@ function Preview({ p }: { p: Project }) {
     r?.addEventListener("seeked", (e) => playhead.set({ frame: e.detail.frame }));
     r?.addEventListener("pause", () => app.get().looping && app.set({ looping: false }));
   }, []);
+  // The eyedropper belongs to one item; a different selection (or none) ends it.
+  const selected = app.use((s) => s.selection);
+  useEffect(() => {
+    if (sampling && !(selected.length === 1 && selected[0] === sampling)) app.set({ sampling: null });
+  }, [sampling, selected]);
+  const sampleLookColor = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!sampling || !p) return;
+    const wrapper = e.currentTarget.querySelector<HTMLElement>(`[data-look-item-id="${CSS.escape(sampling)}"]`);
+    const canvas = wrapper?.matches("canvas") ? wrapper as HTMLCanvasElement : wrapper?.querySelector("canvas");
+    if (!wrapper || !canvas || !canvas.width || !canvas.height) return say("Wait for the selected media frame, then click its visible picture.");
+    const hit = document.elementFromPoint(e.clientX, e.clientY);
+    if (!hit || !wrapper.contains(hit)) return say("Click a visible part of the selected picture.");
+    let transform = { a: 1, b: 0, c: 0, d: 1 };
+    for (let el: HTMLElement | null = canvas; el && el !== e.currentTarget; el = el.parentElement) {
+      const css = getComputedStyle(el);
+      if (css.transform !== "none") { const m = new DOMMatrix(css.transform); transform = multiplyMatrix({ a: m.a, b: m.b, c: m.c, d: m.d }, transform); }
+    }
+    const computed = getComputedStyle(canvas), rect = canvas.getBoundingClientRect();
+    const pixel = mapSamplePoint({ point: { x: e.clientX, y: e.clientY }, rect, canvas: { width: canvas.width, height: canvas.height, clientWidth: canvas.clientWidth, clientHeight: canvas.clientHeight }, fit: computed.objectFit === "cover" ? "cover" : "contain", transform });
+    if (!pixel) return;
+    let rgba: Uint8Array | Uint8ClampedArray, rgb: [number, number, number] | null;
+    const gl = canvas.getContext("webgl2");
+    if (gl) { rgba = new Uint8Array(4); gl.readPixels(pixel.x, canvas.height - pixel.y - 1, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, rgba); rgb = sampledRgb(rgba, true); }
+    else { const ctx = canvas.getContext("2d"); if (!ctx) return say("The selected media canvas cannot be sampled."); rgba = ctx.getImageData(pixel.x, pixel.y, 1, 1).data; rgb = sampledRgb(rgba, false); }
+    if (!rgb) return say("That source pixel is fully transparent; choose a visible source pixel.");
+    const color = `#${rgb.map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+    const found = findItem(p, sampling);
+    if (found && "key" in found.item && found.item.key?.kind === "chroma") op("setProps", { itemId: sampling, patch: { key: { ...found.item.key, color } } });
+    app.set({ sampling: null });
+  };
   return (
-    <div className="preview">
+    <div className={`preview ${sampling ? "sampling" : ""}`} onClick={sampleLookColor}>
+      {sampling && <div className="badge" style={{ position: "absolute", zIndex: 50, left: 8, top: 8 }}>Click the selected picture to sample its graded color (key and mask bypassed) · Esc to cancel</div>}
       <Player
         ref={ref}
         component={Composition}
-        inputProps={{ project: shown, duck, sizes, words }}
+        inputProps={{ project: shown, duck, sizes, words, luts, sampleItemId: sampling ?? undefined }}
         durationInFrames={total}
         inFrame={range?.[0]}
         outFrame={range ? Math.min(total - 1, range[1] - 1) : undefined}
@@ -486,25 +520,29 @@ function MediaBin({ p }: { p: Project }) {
         <button onClick={() => input.current!.click()} title={`Import files into raw/ (or drop them here or on the timeline) (${KEYS.import})`}>
           Import…
         </button>
-        <input ref={input} type="file" multiple hidden accept="video/*,audio/*,image/*" onChange={(e) => (upload([...e.currentTarget.files!]), (e.currentTarget.value = ""))} />
+        <input ref={input} type="file" multiple hidden accept="video/*,audio/*,image/*,.cube" onChange={(e) => (upload([...e.currentTarget.files!]), (e.currentTarget.value = ""))} />
       </h3>
       {Object.values(p.assets).map((a) => (
         <div
           key={a.id}
           data-asset={a.id}
           className={`asset ${reveal === a.id ? "reveal" : ""}`}
-          draggable
-          onDragStart={(e) => (e.dataTransfer.setData("application/x-splicewright-asset", a.id), (dnd.assetId = a.id))}
+          draggable={a.kind !== "lut"}
+          onDragStart={(e) => { if (a.kind === "lut") return; e.dataTransfer.setData("application/x-splicewright-asset", a.id); dnd.assetId = a.id; }}
           onDragEnd={() => (dnd.assetId = null)}
           onContextMenu={(e) =>
             openMenu(e, [
-              { label: "Insert at playhead", run: () => op("insertItem", { assetId: a.id, at: playhead.get().frame }) },
-              { label: "Replace selected clip", run: () => replaceWith(a.id), disabled: app.get().selection.length !== 1 },
+              ...(a.kind === "lut"
+                ? []
+                : [
+                    { label: "Insert at playhead", run: () => op("insertItem", { assetId: a.id, at: playhead.get().frame }) },
+                    { label: "Replace selected clip", run: () => replaceWith(a.id), disabled: app.get().selection.length !== 1 },
+                  ]),
             ])
           }
-          title={`${a.id} — drag onto the timeline`}
+          title={a.kind === "lut" ? `${a.id} — choose this LUT in the Color inspector` : `${a.id} — drag onto the timeline`}
         >
-          {a.kind === "audio" ? <div className="thumb audio">♪</div> : <img className="thumb" src={`/api/thumb?asset=${a.id}&t=0`} alt="" draggable={false} />}
+          {a.kind === "lut" ? <div className="thumb audio">LUT</div> : a.kind === "audio" ? <div className="thumb audio">♪</div> : <img className="thumb" src={`/api/thumb?asset=${a.id}&t=0`} alt="" draggable={false} />}
           <span>{a.path.split("/").pop()}</span>
           {ingesting[a.id] && <em className="badge">{ingesting[a.id]}…</em>}
         </div>
@@ -802,6 +840,12 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
     if (v === null) delete next[k];
     set({ transform: Object.keys(next).length ? next : null });
   };
+  const setGrade = (k: string, v: unknown) => {
+    const next = { ...item.grade } as Record<string, unknown>;
+    if (v === null) delete next[k]; else next[k] = v;
+    return set({ grade: Object.keys(next).length ? next : null });
+  };
+  const lumaKey = item.key?.kind === "luma" ? item.key : null;
   return (
     <>
       <label className="field">
@@ -867,6 +911,25 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
           patch={(v) => (keyed(k) ? keyPatch(k, v) : { effects: prune({ ...item.effects, [k]: v }, EFFECT_ZERO) })}
         />
       ))}
+      <h4>color</h4>
+      {(["exposure", "temperature", "tint", "vibrance", "shadows", "highlights"] as const).map((k) => {
+        const [min, max, step] = { exposure: [-5, 5, 0.05], temperature: [-1, 1, 0.01], tint: [-1, 1, 0.01], vibrance: [-1, 1, 0.01], shadows: [-1, 1, 0.01], highlights: [-1, 1, 0.01] }[k];
+        return <Slider key={k} itemId={item.id} label={k} min={min} max={max} step={step} zero={0} value={item.grade?.[k] ?? 0} patch={(v) => ({ grade: gradeWith(item.grade, k, v) })} />;
+      })}
+      {(["inBlack", "inWhite", "gamma", "outBlack", "outWhite"] as const).map((k) => {
+        const levels = { inBlack: 0, inWhite: 1, gamma: 1, outBlack: 0, outWhite: 1, ...item.grade?.levels };
+        const range = k === "gamma" ? { min: 0.01, max: 10, step: 0.01, zero: 1 } : { min: 0, max: 1, step: 0.005, zero: k === "inWhite" || k === "outWhite" ? 1 : 0 };
+        if (k === "inBlack") range.max = Math.min(1, levels.inWhite - 0.01);
+        if (k === "inWhite") range.min = Math.max(0, levels.inBlack + 0.01);
+        return <Slider key={k} itemId={item.id} label={`levels ${k}`} {...range} value={levels[k]} patch={(v) => ({ grade: { ...item.grade, levels: { ...levels, [k]: v } } })} />;
+      })}
+      <CurveEditor key={item.id} itemId={item.id} grade={item.grade} onCommit={(curves) => setGrade("curves", curves)} />
+      <label className="field"><span>LUT</span><select value={item.grade?.lut?.assetId ?? ""} onChange={(e) => setGrade("lut", e.target.value ? { assetId: e.target.value, strength: item.grade?.lut?.strength ?? 1 } : null)}><option value="">None</option>{Object.values(p.assets).filter((a) => a.kind === "lut").map((a) => <option key={a.id} value={a.id}>{a.path}</option>)}</select></label>
+      {item.grade?.lut && <Slider itemId={item.id} label="LUT strength" min={0} max={1} step={0.01} zero={1} value={item.grade.lut.strength ?? 1} patch={(v) => ({ grade: { ...item.grade, lut: { ...item.grade!.lut!, strength: v } } })} />}
+      <h4>key</h4>
+      <label className="field"><span>type</span><select value={item.key?.kind ?? ""} onChange={(e) => set({ key: e.target.value === "chroma" ? { kind: "chroma", color: "#00ff00", similarity: 0.18, smoothness: 0.08 } : e.target.value === "luma" ? { kind: "luma", low: 0.1, high: 0.9 } : null })}><option value="">Off</option><option value="chroma">Chroma</option><option value="luma">Luma</option></select></label>
+      {item.key?.kind === "chroma" && <><Field label="key color" value={item.key.color} onCommit={(v) => set({ key: { ...item.key!, color: v } })} /><button onClick={() => { player.ref?.pause(); app.set({ sampling: item.id }); }}>Eyedropper · click preview</button><Slider itemId={item.id} label="similarity" min={0} max={1} step={0.01} zero={0.45} value={item.key.similarity} patch={(v) => ({ key: { ...item.key!, similarity: v } })} /><Slider itemId={item.id} label="smoothness" min={0} max={1} step={0.01} zero={0.08} value={item.key.smoothness} patch={(v) => ({ key: { ...item.key!, smoothness: v } })} /><Slider itemId={item.id} label="spill" min={0} max={1} step={0.01} zero={0} value={item.key.spill ?? 0} patch={(v) => ({ key: { ...item.key!, spill: v } })} /></>}
+      {lumaKey && <><Slider itemId={item.id} label="luma low" min={0} max={Math.max(0, lumaKey.high - 0.001)} step={0.001} zero={0} value={lumaKey.low} patch={(v) => ({ key: { ...lumaKey, low: Math.min(v, lumaKey.high - 0.001) } })} /><Slider itemId={item.id} label="luma high" min={Math.min(1, lumaKey.low + 0.001)} max={1} step={0.001} zero={1} value={lumaKey.high} patch={(v) => ({ key: { ...lumaKey, high: Math.max(v, lumaKey.low + 0.001) } })} /><label className="field"><span>invert</span><input type="checkbox" checked={lumaKey.invert ?? false} onChange={(e) => set({ key: { ...lumaKey, invert: e.target.checked } })} /></label></>}
       <h4>
         crop
         <button className={cropping ? "on" : ""} onClick={() => app.set({ cropping: !cropping, masking: false })} title="crop handles on the preview (Shift+C)">
@@ -878,6 +941,57 @@ function VideoFields({ p, item, fps, still, set }: { p: Project; item: VideoItem
       ))}
       <MaskFields p={p} item={item} set={set} />
     </>
+  );
+}
+
+const CURVE_IDENTITY: [number, number][] = [[0, 0], [1, 1]];
+type CurveMap = NonNullable<VideoItem["grade"]>["curves"];
+
+function CurveEditor({ itemId, grade, onCommit }: { itemId: string; grade: VideoItem["grade"]; onCommit: (curves: CurveMap) => Promise<unknown> | void }) {
+  const [channel, setChannel] = React.useState<"all" | "r" | "g" | "b">("all");
+  const [draft, setDraft] = React.useState<[number, number][] | null>(null);
+  const [dragging, setDragging] = React.useState<number | null>(null);
+  const curves = grade?.curves ?? {};
+  const points = draft ?? curves[channel] ?? CURVE_IDENTITY;
+  const encode = (next: [number, number][]) => ({ ...curves, [channel]: next });
+  const preview = (next: [number, number][]) => {
+    setDraft(next);
+    app.set({ live: { itemId, patch: { grade: { ...grade, curves: encode(next) } } } });
+  };
+  const commit = (next: [number, number][]) => {
+    setDraft(next);
+    void Promise.resolve(onCommit(encode(next))).finally(() => { app.set({ live: null }); setDraft(null); });
+  };
+  const at = (e: React.PointerEvent<SVGSVGElement>): [number, number] => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    return [Math.min(1, Math.max(0, (e.clientX - rect.left - rect.width / 12) / (rect.width * 5 / 6))), Math.min(1, Math.max(0, 1 - (e.clientY - rect.top - rect.height / 12) / (rect.height * 5 / 6)))];
+  };
+  const move = (index: number, x: number, y: number) => points.map(([px, py], i) => {
+    if (i !== index) return [px, py] as [number, number];
+    const minX = i === 0 ? 0 : points[i - 1][0] + 0.01, maxX = i === points.length - 1 ? 1 : points[i + 1][0] - 0.01;
+    return [i === 0 || i === points.length - 1 ? px : Math.min(maxX, Math.max(minX, x)), y] as [number, number];
+  });
+  const add = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (e.target instanceof SVGCircleElement || points.length >= 16) return;
+    const [x, y] = at(e as unknown as React.PointerEvent<SVGSVGElement>);
+    const next = [...points, [x, y] as [number, number]].sort((a, b) => a[0] - b[0]);
+    for (let i = 1; i < next.length; i++) if (next[i][0] - next[i - 1][0] < 0.02) return;
+    commit(next);
+  };
+  const coords = (p: [number, number]) => `${20 + p[0] * 200},${220 - p[1] * 200}`;
+  return (
+    <div className="curve-editor">
+      <label className="field"><span>curve</span><select value={channel} onChange={(e) => { setChannel(e.target.value as typeof channel); setDraft(null); }}><option value="all">master</option><option value="r">red</option><option value="g">green</option><option value="b">blue</option></select></label>
+      <div className="curve-tools"><span>click to add · drag to edit · double-click a point to remove</span><button onClick={() => commit(CURVE_IDENTITY)}>Reset</button></div>
+      <svg className="curve-graph" viewBox="0 0 240 240" role="img" aria-label={`${channel} tone curve`} onClick={add}
+        onPointerMove={(e) => { if (dragging !== null) { const [x, y] = at(e); preview(move(dragging, x, y)); } }}
+        onPointerUp={() => { if (dragging !== null) { setDragging(null); commit(points); } }} onPointerCancel={() => { setDragging(null); setDraft(null); app.set({ live: null }); }}>
+        <rect x="20" y="20" width="200" height="200" className="curve-grid" />
+        <line x1="20" y1="220" x2="220" y2="20" className="curve-reference" />
+        <polyline points={points.map(coords).join(" ")} className="curve-line" />
+        {points.map((point, i) => <circle key={i} cx={20 + point[0] * 200} cy={220 - point[1] * 200} r="5" className="curve-point" onPointerDown={(e) => { e.stopPropagation(); (e.currentTarget as SVGCircleElement).setPointerCapture(e.pointerId); setDragging(i); }} onDoubleClick={(e) => { e.stopPropagation(); if (points.length > 2 && i > 0 && i < points.length - 1) commit(points.filter((_, j) => i !== j)); }} />)}
+      </svg>
+    </div>
   );
 }
 
@@ -1069,6 +1183,7 @@ const SHUTTLE = [1, 2, 4, 8];
 
 function onKey(e: KeyboardEvent) {
   const el = e.target as HTMLElement;
+  if (app.get().sampling && e.key === "Escape") { e.preventDefault(); app.set({ sampling: null }); return; }
   if (el.closest("input, textarea, select")) return;
   const s = app.get();
   const p = s.project;

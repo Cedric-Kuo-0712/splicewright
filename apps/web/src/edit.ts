@@ -347,11 +347,19 @@ export async function freezeFrame(frame: number, sec = 2) {
 
 /** Swap the selected video or audio clip's media for `assetId`, keeping its place, length (as far as
  * the new media reaches), props, and anything anchored to it. */
+/** A grade with scalar `k` set to `v`; a neutral 0 unsets it, and an emptied grade becomes null (the item leaves the canvas path). */
+export function gradeWith(grade: VideoItem["grade"], k: string, v: number) {
+  const next: Record<string, unknown> = { ...grade, [k]: v };
+  if (v === 0) delete next[k];
+  return Object.keys(next).length ? next : null;
+}
+
 export function replaceWith(assetId: string) {
   const { project: p, selection, durations } = app.get();
   const f = selection.length === 1 ? findItem(p!, selection[0]) : null;
   const a = p!.assets[assetId];
   if (!f || !("assetId" in f.item)) return say("select one video or audio clip to replace", true);
+  if (a.kind === "lut") return say(`${a.id} is a LUT; choose it in the Color inspector`, true);
   if ((a.kind === "audio") !== (f.track.kind === "audio")) return say(`${a.id} is ${a.kind}; ${f.item.id} is on a ${f.track.kind} track`, true);
   if (f.track.locked) return say(`${f.track.name} is locked`, true);
   const it = f.item;
@@ -665,8 +673,10 @@ export async function upload(files: File[]): Promise<string[]> {
 /** Files dropped on the timeline: import, then place them one after another from `at`. No `trackId`
  * means a new track per kind (the drop row under the tracks). */
 export async function dropFiles(files: File[], at: number, trackId?: string) {
-  const ids = await upload(files);
+  const uploaded = await upload(files);
   const { project: p, durations } = app.get();
+  // LUTs are imported but never placed: insertItem would reject the whole batch.
+  const ids = uploaded.filter((id) => p?.assets[id]?.kind !== "lut");
   if (!ids.length || !p) return;
   const fps = p.meta.fps;
   const target = p.tracks.find((t) => t.id === trackId);

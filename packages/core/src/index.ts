@@ -1,4 +1,5 @@
 export * from "./schema.ts";
+export { parseCube } from "./lut.ts";
 export { ASPECTS, FPS_CHOICES } from "./presets.ts";
 export { FONT_PAIRS, FONTS, type Font } from "./fonts.ts";
 export { badFont, captionWords, type Word, builtinTheme, isTheme, textCss, themeOf, THEME_IDS } from "./themes.ts";

@@ -1,10 +1,10 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { beatFrames, type AudioItem } from "@splicewright/core";
-import { cacheDir, load, readAssets, run, writeAtomic } from "@splicewright/core/node";
+import { cacheDir, init, load, readAssets, run, writeAtomic } from "@splicewright/core/node";
 import { ingest, peek, stamp, TRANSCRIPT_FORMAT } from "../src/index.ts";
 
 const example = join(import.meta.dirname, "../../../examples/basic");
@@ -18,6 +18,17 @@ function project() {
 }
 
 describe("ingest", () => {
+  it("does not send LUT assets to ffprobe", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swr-lut-ingest-"));
+    init(dir, { title: "lut only", fps: 30, width: 320, height: 180 });
+    writeFileSync(join(dir, "identity.cube"), `LUT_3D_SIZE 2\n${Array.from({ length: 8 }, (_, i) => `${i & 1} ${(i >> 1) & 1} ${(i >> 2) & 1}`).join("\n")}\n`);
+    expect(run(dir, "importAsset", { path: "identity.cube" })).not.toHaveProperty("error");
+    const result = await ingest(dir);
+    expect(result.errors).toBeUndefined();
+    expect(result.steps.probe).toMatchObject({ ran: 0, skipped: 1, failed: 0 });
+    expect(readAssets(dir).a_identity).toBeUndefined();
+  });
+
   it("probes, builds ffmpeg caches, and skips unchanged assets", async () => {
     const dir = project();
     const only = ["proxy", "thumbs", "waveform"] as const;

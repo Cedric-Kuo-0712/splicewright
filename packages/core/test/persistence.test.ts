@@ -76,6 +76,19 @@ it("undo and redo step one op at a time with fresh revisions; a new op clears re
   expect(redo(dir)).toMatchObject({ error: { code: "nothing_to_redo" } });
 });
 
+it("persists Sticker props and restores them through undo and redo", () => {
+  const dir = project();
+  expect(run(dir, "importAsset", { path: "raw/loop.gif" })).not.toHaveProperty("error");
+  expect(run(dir, "insertItem", { component: "Sticker", props: { src: "raw/loop.gif", fit: "cover" }, at: 12, duration: 60 })).not.toHaveProperty("error");
+  const sticker = () => load(dir).tracks.find((t) => t.kind === "overlay")?.items[0];
+  expect(sticker()).toMatchObject({ component: "Sticker", start: 12, duration: 60, props: { src: "raw/loop.gif", fit: "cover" } });
+  expect(undo(dir)).not.toHaveProperty("error");
+  expect(sticker()).toBeUndefined();
+  expect(redo(dir)).not.toHaveProperty("error");
+  expect(sticker()).toMatchObject({ component: "Sticker", props: { src: "raw/loop.gif", fit: "cover" } });
+  expect(run(dir, "removeAsset", { assetId: "a_loop" })).toMatchObject({ error: { code: "invalid" } });
+});
+
 it("undo with a stale baseRevision is refused; undone ids stay taken", () => {
   const dir = project();
   const mine = run(dir, "addMarker", { label: "mine", start: 0 });

@@ -96,7 +96,8 @@ export function bundleProject(dir: string): Promise<string> {
 async function prepare(dir: string) {
   const project = load(dir);
   const ctx = loadCtx(dir);
-  const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(readAssets(dir)), words: captionWords(project, ctx), luts: lutsOf(dir, project) };
+  const probes = readAssets(dir);
+  const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(probes), animated: Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : [])), words: captionWords(project, ctx), luts: lutsOf(dir, project) };
   const serveUrl = await bundleProject(dir);
   // Canvas effects need a WebGL2 context in Remotion's headless Chromium. Keep the legacy render
   // defaults for projects that do not opt into the per-pixel path.

@@ -21,6 +21,7 @@ export function Preview({ p }: { p: Project }) {
   const looping = app.use((s) => s.looping);
   const live = app.use((s) => s.live);
   const sizes = app.use((s) => s.sizes);
+  const animated = app.use((s) => s.animated);
   const luts = app.use((s) => s.luts);
   const sampling = app.use((s) => s.sampling);
   const shown = useMemo(() => {
@@ -79,7 +80,7 @@ export function Preview({ p }: { p: Project }) {
       <Player
         ref={ref}
         component={Composition}
-        inputProps={{ project: shown, duck, sizes, words, luts, sampleItemId: sampling ?? undefined }}
+        inputProps={{ project: shown, duck, sizes, animated, words, luts, sampleItemId: sampling ?? undefined }}
         durationInFrames={total}
         inFrame={range?.[0]}
         outFrame={range ? Math.min(total - 1, range[1] - 1) : undefined}

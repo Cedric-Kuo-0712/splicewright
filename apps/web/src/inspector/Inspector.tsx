@@ -6,6 +6,7 @@ import { Field, PropsField } from "./fields.tsx";
 import { TextFields, CaptionStyleFields, ThemeField } from "./text.tsx";
 import { LoudnessFields, BeatFields, AudioVolume } from "./audio.tsx";
 import { VideoFields, MaskFields } from "./video.tsx";
+import { StickerFields } from "./sticker.tsx";
 
 
 function StyleActions() {
@@ -99,9 +100,9 @@ export function Inspector({ p }: { p: Project }) {
       {t.kind === "video" && "assetId" in item && <VideoFields p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as VideoItem} fps={fps} still={p.assets[item.assetId]?.kind === "image"} set={set} />}
       {"component" in item && <MaskFields p={p} item={(live?.itemId === item.id ? { ...item, ...live.patch } : item) as OverlayItem} set={set} />}
       {"component" in item && item.component === "Text" && <TextFields p={p} item={item} set={set} />}
+      {"component" in item && item.component === "Sticker" && <StickerFields p={p} item={item} set={set} />}
       {"component" in item && <details className="advanced"><summary>Advanced · raw props</summary><PropsField value={item.props} onCommit={(props) => set({ props })} /></details>}
       </fieldset>
     </div>
   );
 }
-

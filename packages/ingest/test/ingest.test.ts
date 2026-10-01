@@ -10,6 +10,7 @@ import { ingest, peek, stamp, TRANSCRIPT_FORMAT } from "../src/index.ts";
 const example = join(import.meta.dirname, "../../../examples/basic");
 const venv = join(import.meta.dirname, "../../../ingest/.venv/bin/python");
 const hasLibrosa = spawnSync(process.env.SPLICEWRIGHT_PYTHON ?? (existsSync(venv) ? venv : "python3"), ["-c", "import librosa"]).status === 0;
+const hasMagick = spawnSync("magick", ["-version"], { stdio: "ignore" }).status === 0;
 
 function project() {
   const dir = join(mkdtempSync(join(tmpdir(), "swr-ingest-")), "p");
@@ -18,6 +19,25 @@ function project() {
 }
 
 describe("ingest", () => {
+  it.skipIf(!hasMagick)("marks only multi-frame GIF and WebP images animated at probe time", async () => {
+    const dir = project();
+    for (const [name, args] of [
+      ["animated.gif", ["-delay", "10", "-size", "2x2", "xc:red", "-delay", "10", "-size", "2x2", "xc:blue", "-loop", "0"]],
+      ["still.gif", ["-size", "2x2", "xc:red"]],
+      ["animated.webp", ["-delay", "10", "-size", "2x2", "xc:red", "-delay", "10", "-size", "2x2", "xc:blue", "-loop", "0"]],
+      ["still.webp", ["-size", "2x2", "xc:red"]],
+    ] as const) execFileSync("magick", [...args, join(dir, name)]);
+    for (const name of ["animated.gif", "still.gif", "animated.webp", "still.webp"]) expect(run(dir, "importAsset", { path: name })).not.toHaveProperty("error");
+    const result = await ingest(dir, { only: [] });
+    expect(result.errors).toBeUndefined();
+    const probes = readAssets(dir);
+    expect(probes.a_animated).toMatchObject({ kind: "image", animated: true });
+    expect(probes.a_still).toMatchObject({ kind: "image" });
+    expect(probes.a_still.animated).toBeUndefined();
+    expect(probes.a_animated_2).toMatchObject({ kind: "image", animated: true });
+    expect(probes.a_still_2.animated).toBeUndefined();
+  });
+
   it("does not send LUT assets to ffprobe", async () => {
     const dir = mkdtempSync(join(tmpdir(), "swr-lut-ingest-"));
     init(dir, { title: "lut only", fps: 30, width: 320, height: 180 });

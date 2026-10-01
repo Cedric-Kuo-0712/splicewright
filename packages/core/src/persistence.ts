@@ -72,6 +72,8 @@ export interface Probe {
   duration?: number;
   width?: number;
   height?: number;
+  /** True when ffprobe found multiple decoded image frames (GIF/animated WebP/PNG). */
+  animated?: boolean;
   fps?: number;
   /** Display-matrix rotation as ffprobe reports it. */
   rotation?: number;

@@ -101,7 +101,8 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     const ctx = loadCtx(dir);
     // A 65³ LUT is ~4 MB of JSON; the editor gets its version here and fetches the table from /api/lut when that changes.
     const lutVersions = Object.fromEntries(Object.entries(lutsOf(dir, project)).map(([id, lut]) => [id, lutVersion(lut)!]));
-    return { project, duck: duckRanges(project, ctx), words: captionWords(project, ctx), proxies, durations, sizes: sizesOf(probes), loudness: ctx.loudness ?? {}, lutVersions };
+    const animated = Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : []));
+    return { project, duck: duckRanges(project, ctx), words: captionWords(project, ctx), proxies, durations, sizes: sizesOf(probes), animated, loudness: ctx.loudness ?? {}, lutVersions };
   };
   const result = (res: ServerResponse, r: ReturnType<typeof run>) =>
     "error" in r ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, { revision: r.project.revision, summary: r.changes.summary, ...snapshot() });

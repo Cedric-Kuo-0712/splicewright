@@ -39,6 +39,8 @@ export interface State {
   durations: Record<string, number>;
   /** Coded pixel sizes per asset, for crop and the transform box. */
   sizes: Record<string, [number, number]>;
+  /** Probe-marked animated images for frame-accurate Player playback. */
+  animated: Record<string, boolean>;
   luts: NonNullable<RenderProps["luts"]>;
   /** Integrated LUFS per asset from the `loudness` ingest step; silent or unmeasured assets are absent. */
   loudness: Record<string, number>;
@@ -82,12 +84,12 @@ const hash = new URLSearchParams(location.hash.slice(1));
 const num = (v: string | null) => (v === null || v === "" || isNaN(Number(v)) ? null : Number(v));
 
 export const app = store<State>({
-  project: null, empty: false, recent: [], duck: {}, words: {}, proxies: [], durations: {}, sizes: {}, loudness: {}, luts: {}, useProxies: true, selection: [], sampling: null, gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
+  project: null, empty: false, recent: [], duck: {}, words: {}, proxies: [], durations: {}, sizes: {}, animated: {}, loudness: {}, luts: {}, useProxies: true, selection: [], sampling: null, gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
   io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, cropping: false, masking: false, ingesting: {}, uploads: [], reveal: null,
 });
 export const playhead = store({ frame: 0 });
 
-type Snapshot = Pick<State, "project" | "duck" | "words" | "proxies" | "durations" | "sizes" | "loudness"> & { lutVersions: Record<string, string> };
+type Snapshot = Pick<State, "project" | "duck" | "words" | "proxies" | "durations" | "sizes" | "animated" | "loudness"> & { lutVersions: Record<string, string> };
 const lutCache = new Map<string, { version: string; lut: State["luts"][string] }>();
 let latest = 0;
 
@@ -101,7 +103,7 @@ const take = (s: Snapshot) => {
     app.set(({ gap }) => {
       // Drop a gap selection that an undo, redo, or another writer filled.
       const t = gap && s.project?.tracks.find((t) => t.id === gap.trackId);
-      return { project: s.project, duck: s.duck, words: s.words, proxies: s.proxies, durations: s.durations, sizes: s.sizes, loudness: s.loudness, luts, gap: t && gapAt(t, gap.at) ? gap : null };
+      return { project: s.project, duck: s.duck, words: s.words, proxies: s.proxies, durations: s.durations, sizes: s.sizes, animated: s.animated, loudness: s.loudness, luts, gap: t && gapAt(t, gap.at) ? gap : null };
     });
   };
   const stale = Object.entries(s.lutVersions).filter(([id, version]) => lutCache.get(id)?.version !== version);

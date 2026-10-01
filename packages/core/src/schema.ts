@@ -231,6 +231,9 @@ export const CaptionItem = z.discriminatedUnion("mode", [
 /** Ties an item to a video item's source time; the item's start/duration are then derived. */
 export const Anchor = z.object({ itemId: Id, sourceStart: Seconds, sourceEnd: Seconds });
 
+/** Built-in Sticker overlay props; src is a project-relative imported image path. */
+export const StickerProps = z.object({ src: z.string().min(1), fit: z.enum(["contain", "cover"]).optional() });
+
 export const OverlayItem = z.object({
   ...itemBase,
   component: z.string().min(1),
@@ -282,6 +285,7 @@ export type TextStyle = z.infer<typeof TextStyle>;
 export type Theme = z.infer<typeof Theme>;
 export type Asset = z.infer<typeof Asset>;
 export type Anchor = z.infer<typeof Anchor>;
+export type StickerProps = z.infer<typeof StickerProps>;
 export type VideoItem = z.infer<typeof VideoItem>;
 export type AudioItem = z.infer<typeof AudioItem>;
 export type CaptionItem = z.infer<typeof CaptionItem>;

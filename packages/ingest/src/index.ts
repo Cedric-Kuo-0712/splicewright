@@ -118,7 +118,7 @@ export async function peek(dir: string, assetId: string, { from = 0, to, n = 12 
 // ---------- probe ----------
 
 export async function probe(file: string, kind: Asset["kind"]): Promise<Omit<Probe, "path" | "fingerprint">> {
-  const info = JSON.parse(await exec("ffprobe", ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file]));
+  const info = JSON.parse(await exec("ffprobe", ["-v", "error", ...(kind === "image" ? ["-count_frames"] : []), "-print_format", "json", "-show_format", "-show_streams", file]));
   const v = info.streams.find((s: any) => s.codec_type === "video");
   const [num, den] = String(v?.avg_frame_rate ?? "0/1").split("/").map(Number);
   const rotation = v?.side_data_list?.find((d: any) => "rotation" in d)?.rotation ?? (v?.tags?.rotate ? Number(v.tags.rotate) : undefined);
@@ -127,6 +127,7 @@ export async function probe(file: string, kind: Asset["kind"]): Promise<Omit<Pro
     kind,
     ...(kind !== "image" && Number.isFinite(duration) && { duration }),
     ...(v && { width: v.width, height: v.height }),
+    ...(kind === "image" && Number(v?.nb_read_frames ?? v?.nb_frames ?? 0) > 1 && { animated: true }),
     ...(kind === "video" && den && num && { fps: +(num / den).toFixed(3) }),
     ...(rotation && { rotation }),
     audio: info.streams.some((s: any) => s.codec_type === "audio"),

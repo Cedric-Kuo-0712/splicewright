@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ANIMATABLE, Ease, FontRole, MASK_PROPS, TextStyle, Theme, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type OverlayItem, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
+import { ANIMATABLE, Ease, FontRole, MASK_PROPS, StickerProps, TextStyle, Theme, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type OverlayItem, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
 import { keyAt, withKey } from "./keyframes.ts";
 import { beatFrames, snap, snapPoints, snapSpan } from "./timing.ts";
 import { badFont, isTheme, THEME_IDS } from "./themes.ts";
@@ -218,6 +218,8 @@ export const ops: Record<string, OpDef<any>> = {
         if (ctx.fingerprint!(same.path)) return `already imported as ${same.id} (same content as ${same.path})`;
         const from = same.path;
         same.path = a.path;
+        for (const t of p.tracks) if (t.kind === "overlay") for (const item of t.items)
+          if (item.component === "Sticker" && item.props.src === from) item.props.src = a.path;
         return `re-pointed ${same.id} from ${from} (missing) to ${a.path}`;
       }
       const file = a.path.split(/[/\\]/).pop()!;
@@ -243,7 +245,7 @@ export const ops: Record<string, OpDef<any>> = {
     z.object({ assetId: Id }),
     (p, a) => {
       if (!p.assets[a.assetId]) fail("not_found", `no asset ${a.assetId}`);
-      const users = p.tracks.flatMap((t): (VideoItem | AudioItem | CaptionItem | OverlayItem)[] => t.items).filter((i) => ("assetId" in i && i.assetId === a.assetId) || ("grade" in i && i.grade?.lut?.assetId === a.assetId));
+      const users = p.tracks.flatMap((t): (VideoItem | AudioItem | CaptionItem | OverlayItem)[] => t.items).filter((i) => ("assetId" in i && i.assetId === a.assetId) || ("grade" in i && i.grade?.lut?.assetId === a.assetId) || ("component" in i && i.component === "Sticker" && i.props.src === p.assets[a.assetId].path));
       if (users.length) fail("invalid", `${a.assetId} is used by ${users.map((i) => i.id).join(", ")}; delete those first`);
       const { path } = p.assets[a.assetId];
       delete p.assets[a.assetId];
@@ -285,6 +287,11 @@ export const ops: Record<string, OpDef<any>> = {
         kind = "overlay";
         const duration = a.duration ?? fail("invalid", "duration required");
         if (a.component === "Text") checkText(a.props ?? {});
+        if (a.component === "Sticker") {
+          const sticker = StickerProps.safeParse(a.props ?? {});
+          if (!sticker.success || !Object.values(p.assets).some((asset) => asset.kind === "image" && asset.path === sticker.data.src))
+            fail("invalid", "Sticker src must reference an imported image; fit must be contain or cover");
+        }
         item = { id: newId(p, "i"), start: a.at, duration, component: a.component, props: a.props ?? {} };
       } else {
         kind = "caption";
@@ -492,6 +499,11 @@ export const ops: Record<string, OpDef<any>> = {
       if (!Object.keys(v.keyframes).length) delete v.keyframes;
     }
     if (t.kind === "overlay" && (item as OverlayItem).component === "Text") checkText((item as OverlayItem).props);
+    if (t.kind === "overlay" && (item as OverlayItem).component === "Sticker") {
+      const sticker = StickerProps.safeParse((item as OverlayItem).props);
+      if (!sticker.success || !Object.values(p.assets).some((asset) => asset.kind === "image" && asset.path === sticker.data.src))
+        fail("invalid", "Sticker src must reference an imported image; fit must be contain or cover");
+    }
     return `updated ${item.id}: ${Object.keys(a.patch).join(", ")}`;
   }),
 

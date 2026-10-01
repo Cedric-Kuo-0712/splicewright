@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame, useRemotionEnvironment, createEffect, type EffectsProp, type EffectDefinition } from "remotion";
+import { AbsoluteFill, AnimatedImage, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame, useRemotionEnvironment, useVideoConfig, createEffect, type EffectsProp, type EffectDefinition } from "remotion";
 import { Video as CanvasVideo } from "@remotion/media";
 import { colorKey } from "@remotion/effects/color-key";
 import { exposure } from "@remotion/effects/exposure";
@@ -22,6 +22,8 @@ export interface Props extends Record<string, unknown> {
   duck?: Record<string, Ranges>;
   /** Coded [width, height] per asset, from sizesOf(); crop needs them to find the picture inside its box. */
   sizes?: Record<string, [number, number]>;
+  /** Probe-marked animated image assets (GIF, animated WebP/PNG). */
+  animated?: Record<string, boolean>;
   /** From captionWords(); transcript words per anchored caption on a highlight: "word" track. */
   words?: Record<string, Word[]>;
   luts?: Record<string, GradeLut>;
@@ -46,6 +48,12 @@ export const Text: React.FC<{ text: string; style?: React.CSSProperties }> = ({ 
 export const Image: React.FC<{ src: string; fit?: "contain" | "cover"; style?: React.CSSProperties }> = ({ src, fit = "contain", style }) => (
   <Img src={staticFile(src)} style={{ width: "100%", height: "100%", objectFit: fit, ...style }} />
 );
+
+/** Built-in still or animated image overlay; the containing item Sequence bounds playback. */
+export const Sticker: React.FC<{ src: string; fit?: "contain" | "cover" }> = ({ src, fit = "contain" }) => {
+  const { width, height } = useVideoConfig();
+  return <AnimatedImage src={staticFile(src)} width={width} height={height} fit={fit} style={{ width: "100%", height: "100%" }} />;
+};
 
 /** Default caption look, ported from video-cut's CaptionOverlay. Captions sharing a frame stack. */
 export interface CaptionProps {
@@ -358,7 +366,7 @@ const CanvasVideoPath: React.FC<{
   );
 };
 
-const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; muted?: boolean; from: number; inc?: Transition; out?: Transition; luts: Record<string, GradeLut>; sampleItemId?: string }> = ({ p, item: raw, size, muted, from, inc, out, luts, sampleItemId }) => {
+const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; animated?: boolean; muted?: boolean; from: number; inc?: Transition; out?: Transition; luts: Record<string, GradeLut>; sampleItemId?: string }> = ({ p, item: raw, size, animated, muted, from, inc, out, luts, sampleItemId }) => {
   const asset = p.assets[raw.assetId];
   const f = from + useCurrentFrame();
   const item = animate(p, raw, f);
@@ -378,12 +386,15 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; mu
     clipPath: cropPath(box, item.crop),
   };
   const trimBefore = Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps);
+  const animatedFrom = Math.round(item.start - from - item.sourceIn * p.meta.fps);
   const volume = (v: number) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain;
   // A missing .cube must not take the whole preview down, but a render keeps failing on it (lookEffects throws) rather than writing an ungraded clip.
   const { isRendering } = useRemotionEnvironment();
   const lutMissing = !!raw.grade?.lut && !luts[raw.grade.lut.assetId];
   const media = lutMissing && !isRendering ? (
     <div style={lookOffStyle}>look off: LUT {raw.grade!.lut!.assetId} unavailable ({raw.label ?? raw.id})</div>
+  ) : asset.kind === "image" && animated ? (
+    <div data-look-item-id={raw.id} style={{ display: "contents" }}><AnimatedImage src={staticFile(asset.path)} from={animatedFrom} fit={item.fit ?? "contain"} style={style} effects={(raw.grade || raw.key) ? lookEffects(raw.id, raw.grade, raw.key, luts, sampleItemId === raw.id) : undefined} /></div>
   ) : asset.kind === "image" && (raw.grade || raw.key) ? (
     <div data-look-item-id={raw.id} style={{ display: "contents" }}><Img src={staticFile(asset.path)} style={style} effects={lookEffects(raw.id, raw.grade, raw.key, luts, sampleItemId === raw.id)} /></div>
   ) : asset.kind === "image" ? (
@@ -434,15 +445,15 @@ const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges }
   return <Audio src={staticFile(p.assets[item.assetId].path)} trimBefore={Math.round(item.sourceIn * p.meta.fps)} volume={volume} muted={t.muted} />;
 };
 
-export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, words = {}, luts = {}, sampleItemId, components }) => {
-  const registry: Record<string, React.ComponentType<any>> = { Text, Image, CaptionLayer, ...components };
+export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, animated = {}, words = {}, luts = {}, sampleItemId, components }) => {
+  const registry: Record<string, React.ComponentType<any>> = { Text, Image, Sticker, CaptionLayer, ...components };
   const component = (name: string, where: string) => {
     const C = registry[name];
     if (!C) throw new Error(`unknown component "${name}" on ${where}; register it in splicewright.config.ts`);
     return C;
   };
   const body = (t: Track, item: Item, from: number, inc?: Transition, out?: Transition) => {
-    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} muted={t.muted} from={from} inc={inc} out={out} luts={luts} sampleItemId={sampleItemId} />;
+    if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} animated={animated[(item as VideoItem).assetId]} muted={t.muted} from={from} inc={inc} out={out} luts={luts} sampleItemId={sampleItemId} />;
     const C = component((item as { component: string }).component, item.id);
     const { mask } = item as OverlayItem;
     let props = (item as { props: Record<string, unknown> }).props;

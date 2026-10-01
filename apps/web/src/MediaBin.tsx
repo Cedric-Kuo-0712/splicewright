@@ -1,6 +1,6 @@
 import React, { useEffect } from "react";
 import { type Project } from "@splicewright/core";
-import { KEYS, openMenu, replaceWith, upload } from "./edit.ts";
+import { addSticker, KEYS, openMenu, replaceWith, upload } from "./edit.ts";
 import { app, dnd, op, playhead } from "./store.ts";
 
 
@@ -45,6 +45,7 @@ export function MediaBin({ p }: { p: Project }) {
                 ? []
                 : [
                     { label: "Insert at playhead", run: () => op("insertItem", { assetId: a.id, at: playhead.get().frame }) },
+                    ...(a.kind === "image" ? [{ label: "Add as Sticker at playhead", run: () => addSticker(a.id, playhead.get().frame) }] : []),
                     { label: "Replace selected clip", run: () => replaceWith(a.id), disabled: app.get().selection.length !== 1 },
                     "-" as const,
                   ]),

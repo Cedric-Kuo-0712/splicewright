@@ -652,6 +652,7 @@ composition or bakes a file that both sides play.
 - **S1 Stickers and GIF.** Built-in overlay component `Sticker { src, fit }` over Remotion's `<AnimatedImage>`
   (public in `remotion` 4.0.520; GIF, animated WebP/PNG), looping over the item. `.gif`/`.webp` import as image
   assets marked animated at probe time. Acceptance: two stills a few frames apart differ on an animated GIF.
+  ✅ done: built-in Sticker UI/render path, animated-image probing, and deterministic GIF progression/loop/item-end test.
 - **R1 Reverse.** `reverse?: boolean` on video items. `@remotion/media` `<Video>` can't play backwards and
   `OffthreadVideo` would seek frame by frame, so ingest bakes a reversed proxy (ffmpeg `reverse` + `areverse`, in
   ~10 s chunks and concatenated, since `reverse` buffers the whole input). `sourceIn` keeps meaning source time

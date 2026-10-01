@@ -161,6 +161,18 @@ describe("ops", () => {
     expect(err(apply(p, "setTrack", { trackId: "t_1", patch: { style: "x" } }, ctx))).toBe("invalid");
   });
 
+  it("validates built-in Sticker props against imported image assets", () => {
+    const p = fixture();
+    p.assets.a_gif = { id: "a_gif", path: "raw/loop.gif", kind: "image" };
+    const added = ok(apply(p, "insertItem", { component: "Sticker", props: { src: "raw/loop.gif", fit: "contain" }, at: 15, duration: 45 }, ctx));
+    expect(item(added, "i_3")).toMatchObject({ component: "Sticker", props: { src: "raw/loop.gif", fit: "contain" }, start: 15, duration: 45 });
+    const changed = ok(apply(added, "setProps", { itemId: "i_3", patch: { props: { src: "raw/loop.gif", fit: "cover" } } }, ctx));
+    expect(item(changed, "i_3").props.fit).toBe("cover");
+    expect(err(apply(added, "setProps", { itemId: "i_3", patch: { props: { src: "raw/missing.gif" } } }, ctx))).toBe("invalid");
+    expect(err(apply(p, "insertItem", { component: "Sticker", props: { src: "raw/missing.gif" }, at: 0, duration: 30 }, ctx))).toBe("invalid");
+    expect(err(apply(added, "removeAsset", { assetId: "a_gif" }, ctx))).toBe("invalid");
+  });
+
   it("slip changes sourceIn only and respects the probed duration", () => {
     const p = ok(apply(fixture(), "slip", { itemId: "i_2", deltaSec: 1 }, ctx));
     expect(item(p, "i_2")).toMatchObject({ start: 90, sourceIn: 6 });

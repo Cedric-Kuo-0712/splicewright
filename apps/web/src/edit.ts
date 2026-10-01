@@ -478,6 +478,16 @@ export async function addText(frame: number) {
   requestAnimationFrame(() => document.querySelector<HTMLInputElement>('.inspector input[name="text"]')?.select());
 }
 
+/** Add a 3 s built-in Sticker overlay for an imported still or animated image. */
+export async function addSticker(assetId: string, frame: number) {
+  const p = app.get().project!;
+  const asset = p.assets[assetId];
+  if (!asset || asset.kind !== "image") return say("choose an imported image to add as a Sticker", true);
+  const id = idMaker(p)("i");
+  if (!(await op("insertItem", { component: "Sticker", props: { src: asset.path, fit: "contain" }, at: frame, duration: 3 * p.meta.fps, ripple: false }))) return;
+  selectItems([id]);
+}
+
 /** Items on `tracks` that start at or after `from` (anchored ones by their current span). */
 export function itemsAfter(p: Project, tracks: Track[], from = 0) {
   return tracks.flatMap((t) => t.items.filter((i) => spanOf(p, i).start >= from).map((i) => i.id));

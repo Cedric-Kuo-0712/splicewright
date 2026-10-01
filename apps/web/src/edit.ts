@@ -345,8 +345,6 @@ export async function freezeFrame(frame: number, sec = 2) {
   return send(ops);
 }
 
-/** Swap the selected video or audio clip's media for `assetId`, keeping its place, length (as far as
- * the new media reaches), props, and anything anchored to it. */
 /** A grade with scalar `k` set to `v`; a neutral 0 unsets it, and an emptied grade becomes null (the item leaves the canvas path). */
 export function gradeWith(grade: VideoItem["grade"], k: string, v: number) {
   const next: Record<string, unknown> = { ...grade, [k]: v };
@@ -354,6 +352,8 @@ export function gradeWith(grade: VideoItem["grade"], k: string, v: number) {
   return Object.keys(next).length ? next : null;
 }
 
+/** Swap the selected video or audio clip's media for `assetId`, keeping its place, length (as far as
+ * the new media reaches), props, and anything anchored to it. */
 export function replaceWith(assetId: string) {
   const { project: p, selection, durations } = app.get();
   const f = selection.length === 1 ? findItem(p!, selection[0]) : null;

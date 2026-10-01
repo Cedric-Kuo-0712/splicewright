@@ -1,0 +1,35 @@
+import React from 'react';
+import {interpolate, useCurrentFrame, useVideoConfig} from 'remotion';
+import {SketchPath} from 'splicewright/animation';
+
+export interface LocationTagProps {
+  title: string;
+  subtitle?: string;
+  durationInFrames: number;
+  seed?: number;
+  ink?: string;
+  paper?: string;
+}
+
+// A starting point for a wide video. Adapt box/font sizes for portrait delivery.
+export function LocationTag({title, subtitle = '', durationInFrames, seed = 42,
+  ink = '#29443a', paper = '#f6eddc'}: LocationTagProps) {
+  if (!Number.isInteger(durationInFrames) || durationInFrames < 1)
+    throw new Error('LocationTag needs a positive integer durationInFrames matching its overlay item');
+  const frame = useCurrentFrame();
+  const {fps, width, height} = useVideoConfig();
+  const ramp = Math.max(1, Math.min(Math.round(fps * .25), Math.floor(durationInFrames / 3)));
+  const enter = durationInFrames < 3 ? 1 : interpolate(frame, [0, ramp], [0, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+  const exit = durationInFrames < 3 ? 1 : interpolate(frame, [durationInFrames-ramp-1, durationInFrames-1], [1, 0], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+  return <div style={{position:'absolute',left:width*.05,bottom:height*.12,
+    width:width*.36,aspectRatio:'500 / 120',color:ink,opacity:enter*exit,transform:`translateY(${(1-enter)*12}px)`}}>
+    <svg viewBox="0 0 500 120" width="100%" style={{position:'absolute',inset:0}}>
+      <SketchPath d="M12 12 H488 V108 H12 Z" seed={seed} fill={paper}
+        stroke={ink} strokeWidth={2} roughness={1.2} progress={enter}/>
+    </svg>
+    <div style={{position:'relative',padding:'6% 8%',fontFamily:'inherit'}}>
+      <div style={{fontSize:width*.019,fontWeight:700,overflowWrap:'anywhere'}}>{title}</div>
+      {subtitle && <div style={{fontSize:width*.01,marginTop:6}}>{subtitle}</div>}
+    </div>
+  </div>;
+}

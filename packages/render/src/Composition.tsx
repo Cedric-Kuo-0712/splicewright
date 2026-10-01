@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame, createEffect, type EffectsProp, type EffectDefinition } from "remotion";
+import { AbsoluteFill, Audio, Img, OffthreadVideo, Sequence, staticFile, useCurrentFrame, useRemotionEnvironment, createEffect, type EffectsProp, type EffectDefinition } from "remotion";
 import { Video as CanvasVideo } from "@remotion/media";
 import { colorKey } from "@remotion/effects/color-key";
 import { exposure } from "@remotion/effects/exposure";
@@ -7,8 +7,7 @@ import { whiteBalance } from "@remotion/effects/white-balance";
 import { vibrance } from "@remotion/effects/vibrance";
 import { levels } from "@remotion/effects/levels";
 import { shadowsHighlights } from "@remotion/effects/shadows-highlights";
-import type { Lut } from "cube-lut.js/dist/types.js";
-import { gradeEffect } from "./grade-effect.ts";
+import { gradeEffect, type GradeLut } from "./grade-effect.ts";
 import { lumaKey } from "./luma-key.ts";
 import "./fonts.ts";
 import { animate, itemSpan, sourceAt, textCss, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem, type Word, type FontRole, type TextStyle } from "@splicewright/core";
@@ -25,7 +24,7 @@ export interface Props extends Record<string, unknown> {
   sizes?: Record<string, [number, number]>;
   /** From captionWords(); transcript words per anchored caption on a highlight: "word" track. */
   words?: Record<string, Word[]>;
-  luts?: Record<string, Lut>;
+  luts?: Record<string, GradeLut>;
   sampleItemId?: string;
   /** Carried through so the Node side can read config presets via selectComposition(). */
   presets?: Config["presets"];
@@ -300,7 +299,7 @@ const samplingCanvasEffect = createEffect<{}, null>({
   cleanup: () => {},
 } satisfies EffectDefinition<{}, null>);
 
-export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: VideoItem["key"], luts: Record<string, Lut>, sample: boolean): EffectsProp {
+export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: VideoItem["key"], luts: Record<string, GradeLut>, sample: boolean): EffectsProp {
   if (grade?.lut && !luts[grade.lut.assetId]) throw new Error(`Look item ${itemId} references unavailable LUT asset ${grade.lut.assetId}`);
   const effects: EffectsProp = [
     ...(grade?.exposure !== undefined ? [exposure({ stops: grade.exposure })] : []),
@@ -308,7 +307,8 @@ export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: 
     ...(grade?.vibrance !== undefined ? [vibrance({ amount: grade.vibrance })] : []),
     ...(grade?.shadows !== undefined || grade?.highlights !== undefined ? [shadowsHighlights({ shadows: grade.shadows, highlights: grade.highlights })] : []),
     ...(grade?.levels ? [levels({ blackPoint: grade.levels.inBlack, whitePoint: grade.levels.inWhite, gamma: grade.levels.gamma })] : []),
-    ...(grade ? [gradeEffect({ curves: grade.curves ?? {}, lut: grade.lut ? luts[grade.lut.assetId] : undefined, strength: grade.lut?.strength ?? 1, outBlack: grade.levels?.outBlack, outWhite: grade.levels?.outWhite })] : []),
+    // The shader only does curves, a LUT and the output levels; skip it (and its WebGL2 context) for the built-in effects alone.
+    ...(grade && (Object.keys(grade.curves ?? {}).length || grade.lut || (grade.levels && (grade.levels.outBlack > 0 || grade.levels.outWhite < 1))) ? [gradeEffect({ curves: grade.curves ?? {}, lut: grade.lut ? luts[grade.lut.assetId] : undefined, strength: grade.lut?.strength ?? 1, outBlack: grade.levels?.outBlack, outWhite: grade.levels?.outWhite })] : []),
     ...(!sample && keyLook?.kind === "chroma" ? [colorKey({ keyColor: keyLook.color, similarity: keyLook.similarity, smoothness: keyLook.smoothness, spillSuppression: keyLook.spill })] : []),
     ...(!sample && keyLook?.kind === "luma" ? [lumaKey({ low: keyLook.low, high: keyLook.high, invert: keyLook.invert })] : []),
   ];
@@ -316,6 +316,8 @@ export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: 
   // even when a key-only item bypasses its key and has no persistent grading fields.
   return sample && effects.length === 0 ? [samplingCanvasEffect({})] : effects;
 }
+
+const lookOffStyle: React.CSSProperties = { position: "absolute", top: 8, right: 8, zIndex: 10, padding: "4px 8px", color: "#fff", background: "#9b1c1c", borderRadius: 4, font: "12px sans-serif" };
 
 const CanvasVideoPath: React.FC<{
   itemName: string;
@@ -328,7 +330,7 @@ const CanvasVideoPath: React.FC<{
   style: React.CSSProperties;
   keyLook?: NonNullable<VideoItem["key"]>;
   grade?: VideoItem["grade"];
-  luts: Record<string, Lut>;
+  luts: Record<string, GradeLut>;
   itemId: string;
   sample: boolean;
 }> = ({ itemName, src, trimBefore, speed, volume, muted, fit, style, keyLook, grade, luts, itemId, sample }) => {
@@ -336,7 +338,7 @@ const CanvasVideoPath: React.FC<{
   return (
     <div data-look-item-id={itemId} style={{ display: "contents" }}>
       {decodeError ? (
-        <div style={{ position: "absolute", top: 8, right: 8, zIndex: 10, padding: "4px 8px", color: "#fff", background: "#9b1c1c", borderRadius: 4, font: "12px sans-serif" }}>look off: can&apos;t decode ({itemName})</div>
+        <div style={lookOffStyle}>look off: can&apos;t decode ({itemName})</div>
       ) : (
         <CanvasVideo
           src={src}
@@ -356,7 +358,7 @@ const CanvasVideoPath: React.FC<{
   );
 };
 
-const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; muted?: boolean; from: number; inc?: Transition; out?: Transition; luts: Record<string, Lut>; sampleItemId?: string }> = ({ p, item: raw, size, muted, from, inc, out, luts, sampleItemId }) => {
+const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; muted?: boolean; from: number; inc?: Transition; out?: Transition; luts: Record<string, GradeLut>; sampleItemId?: string }> = ({ p, item: raw, size, muted, from, inc, out, luts, sampleItemId }) => {
   const asset = p.assets[raw.assetId];
   const f = from + useCurrentFrame();
   const item = animate(p, raw, f);
@@ -377,7 +379,12 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; mu
   };
   const trimBefore = Math.round((item.sourceIn - ((item.start - from) * speed) / p.meta.fps) * p.meta.fps);
   const volume = (v: number) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain;
-  const media = asset.kind === "image" && (raw.grade || raw.key) ? (
+  // A missing .cube must not take the whole preview down, but a render keeps failing on it (lookEffects throws) rather than writing an ungraded clip.
+  const { isRendering } = useRemotionEnvironment();
+  const lutMissing = !!raw.grade?.lut && !luts[raw.grade.lut.assetId];
+  const media = lutMissing && !isRendering ? (
+    <div style={lookOffStyle}>look off: LUT {raw.grade!.lut!.assetId} unavailable ({raw.label ?? raw.id})</div>
+  ) : asset.kind === "image" && (raw.grade || raw.key) ? (
     <div data-look-item-id={raw.id} style={{ display: "contents" }}><Img src={staticFile(asset.path)} style={style} effects={lookEffects(raw.id, raw.grade, raw.key, luts, sampleItemId === raw.id)} /></div>
   ) : asset.kind === "image" ? (
     <Img src={staticFile(asset.path)} style={style} />

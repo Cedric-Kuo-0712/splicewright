@@ -14,9 +14,9 @@ async function setup(assets: Record<string, { id: string; path: string; kind: st
     status: 200,
     json: async () => {
       if (url.startsWith("/api/import")) return { assetId: new URL(url, "http://x").searchParams.get("name") === "look.cube" ? "a_look" : "a_clip", summary: "ok" };
-      if (url === "/api/project") return { empty: false, recent: [], project, duck: {}, words: {}, proxies: [], durations: { a_clip: 2 }, sizes: {}, loudness: {}, luts: {} };
+      if (url === "/api/project") return { empty: false, recent: [], project, duck: {}, words: {}, proxies: [], durations: { a_clip: 2 }, sizes: {}, loudness: {}, lutVersions: {} };
       posted.push(JSON.parse(init.body));
-      return { revision: 1, summary: "ok", project, duck: {}, words: {}, proxies: [], durations: {}, sizes: {}, loudness: {}, luts: {} };
+      return { revision: 1, summary: "ok", project, duck: {}, words: {}, proxies: [], durations: {}, sizes: {}, loudness: {}, lutVersions: {} };
     },
   })));
   return { ...edit, store, posted };

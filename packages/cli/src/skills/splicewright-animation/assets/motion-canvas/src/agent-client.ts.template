@@ -1,0 +1,57 @@
+import {RendererResult, RendererState, Vector2, type Plugin, type Project, type Renderer} from '@motion-canvas/core';
+
+export function agentClient(): Plugin {
+  let project: Project | undefined, renderer: Renderer | undefined, running: string | undefined;
+  return {
+    name:'splicewright-agent',
+    project(value) { project=value; },
+    renderer(value) {
+      renderer=value;
+      // Tell the bridge this tab can render; again after a reconnect, which is a new socket.
+      const hello=()=>import.meta.hot?.send('splicewright:hello',{});
+      hello();import.meta.hot?.on('vite:ws:connect',hello);
+      renderer.onFinished.subscribe(result=>{
+        if (!running) return;
+        import.meta.hot?.send('splicewright:done',{id:running,
+          state:result===RendererResult.Success?'complete':result===RendererResult.Aborted?'aborted':'failed'});
+        running=undefined;
+      });
+      import.meta.hot?.on('splicewright:request', async (request: {id:string;action:string;expires:number;fps:number;width:number;height:number})=>{
+        if (!project || !renderer) return;
+        if (request.action==='status') {
+          import.meta.hot?.send('splicewright:response',{id:request.id,ready:true,running:running??null});
+          return;
+        }
+        if (request.action!=='render') {
+          import.meta.hot?.send('splicewright:response',{id:request.id,error:'unknown action'});
+          return;
+        }
+        if (running) {
+          import.meta.hot?.send('splicewright:response',{id:request.id,error:'render already running'});
+          return;
+        }
+        // The bridge stopped tracking this request at `expires`; a frozen tab must not start it afterwards.
+        if (Date.now()>request.expires) {
+          import.meta.hot?.send('splicewright:response',{id:request.id,error:'request expired'});
+          return;
+        }
+        // render() silently returns when the renderer is busy (e.g. a render started from the editor UI),
+        // and onFinished would then credit that other render to this job.
+        if (renderer.onStateChanged.current!==RendererState.Initial) {
+          import.meta.hot?.send('splicewright:response',{id:request.id,error:'the Motion Canvas renderer is busy'});
+          return;
+        }
+        running=request.id;
+        import.meta.hot?.send('splicewright:response',{id:request.id,accepted:true});
+        try {
+          // `size` of the project's settings is the live Vector2 of its meta field; assigning x/y would resize the project itself.
+          const settings={...project.meta.getFullRenderingSettings(),size:new Vector2(request.width,request.height)};
+          await renderer.render({...settings,name:project.name,fps:request.fps});
+        } catch (error) {
+          import.meta.hot?.send('splicewright:done',{id:request.id,state:'failed',error:String(error)});
+          running=undefined;
+        }
+      });
+    },
+  };
+}

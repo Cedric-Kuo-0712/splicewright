@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +25,19 @@ it("lutsOf returns only used LUTs and skips missing or invalid ones instead of t
     const luts = lutsOf(dir, p);
     expect(Object.keys(luts)).toEqual(["ok.cube"]);
     expect(luts["ok.cube"].size).toBe(2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it("lutsOf stamps each LUT with the SHA-256 of its text, and a rewritten file gets a new one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "luts-digest-"));
+  try {
+    const p = project(dir, { "a.cube": identity2 }, ["a.cube"]);
+    expect(lutsOf(dir, p)["a.cube"].digest).toBe(createHash("sha256").update(identity2).digest("hex"));
+    const changed = identity2.replace("1 1 1", "1 1 0.999999"); // a difference far below any visible step
+    writeFileSync(join(dir, "raw", "a.cube"), changed + " "); // new size, so the stat stamp moves too
+    expect(lutsOf(dir, p)["a.cube"].digest).toBe(createHash("sha256").update(changed + " ").digest("hex"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

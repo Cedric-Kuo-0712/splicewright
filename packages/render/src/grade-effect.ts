@@ -3,12 +3,17 @@ import type { Lut } from "cube-lut.js/dist/types.js";
 
 export type GradeGpuParams = {
   curves: { all?: [number, number][]; r?: [number, number][]; g?: [number, number][]; b?: [number, number][] };
-  lut?: Lut;
+  lut?: GradeLut;
   strength: number;
   outBlack?: number;
   outWhite?: number;
 };
-type State = { gl: WebGL2RenderingContext; program: WebGLProgram; source: WebGLTexture; curves: WebGLTexture; lut: WebGLTexture; vao: WebGLVertexArrayObject; uploaded?: Lut };
+type State = { gl: WebGL2RenderingContext; program: WebGLProgram; source: WebGLTexture; curves: WebGLTexture; lut: WebGLTexture; vao: WebGLVertexArrayObject; floatLinear: boolean; uploaded?: Lut };
+/** A parsed LUT with the SHA-256 (hex) of its .cube text, computed once where it is parsed (`lutsOf`). */
+export type GradeLut = Lut & { digest: string };
+/** Remotion reuses the previous effect, params included, while this key is unchanged, so it must tell two
+ * tables apart for certain; the digest does that without stringifying a 65³ table (~4 MB) per call. */
+export const gradeKey = (p: GradeGpuParams) => JSON.stringify({ ...p, lut: p.lut?.digest });
 const vertex = `#version 300 es\nconst vec2 p[3]=vec2[3](vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.)); out vec2 uv; void main(){ gl_Position=vec4(p[gl_VertexID],0.,1.); uv=(p[gl_VertexID]+1.)*.5; }`;
 const fragment = `#version 300 es
 precision highp float; precision highp sampler3D; in vec2 uv; out vec4 color;
@@ -46,17 +51,17 @@ export function curveTexture(points: GradeGpuParams["curves"]) {
   return data;
 }
 function definition(): EffectDefinition<GradeGpuParams, State> {
-  return { type: "splicewright-grade", label: "Grade curves and LUT", documentationLink: null, backend: "webgl2", calculateKey: (p) => JSON.stringify(p), schema: {}, validateParams: () => {},
+  return { type: "splicewright-grade", label: "Grade curves and LUT", documentationLink: null, backend: "webgl2", calculateKey: gradeKey, schema: {}, validateParams: () => {},
     setup(target) {
       const gl = target.getContext("webgl2", { premultipliedAlpha: true, alpha: true, preserveDrawingBuffer: true })!;
       if (!gl) throw new Error("WebGL2 required for curves and LUT");
-      if (!gl.getExtension("OES_texture_float_linear")) throw new Error("WebGL float texture filtering unavailable for 3D LUT");
+      const floatLinear = !!gl.getExtension("OES_texture_float_linear"); // only a LUT needs it; curves alone work without
       const program = gl.createProgram()!; gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, vertex)); gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragment)); gl.linkProgram(program);
       if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program) ?? "look shader link failed");
       const tex = () => { const t = gl.createTexture()!; gl.bindTexture(gl.TEXTURE_2D, t); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); return t; };
       const source = tex(), curves = tex(), lut = gl.createTexture()!, vao = gl.createVertexArray()!; gl.bindVertexArray(vao);
       gl.bindTexture(gl.TEXTURE_3D, lut); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
-      return { gl, program, source, curves, lut, vao };
+      return { gl, program, source, curves, lut, vao, floatLinear };
     },
     apply({ source, target, state, params, width, height, flipSourceY }) {
       const { gl } = state; gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, width, height); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
@@ -65,6 +70,7 @@ function definition(): EffectDefinition<GradeGpuParams, State> {
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, state.curves); gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, curveTexture(params.curves));
       gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_3D, state.lut);
       const data = params.lut?.data;
+      if (data && !state.floatLinear) throw new Error("WebGL float texture filtering unavailable for 3D LUT");
       if (data && state.uploaded !== params.lut) { const rgba = new Float32Array(data.length * 4); data.forEach((v, i) => { rgba[i*4]=v[0]; rgba[i*4+1]=v[1]; rgba[i*4+2]=v[2]; rgba[i*4+3]=1; }); gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA32F, params.lut!.size, params.lut!.size, params.lut!.size, 0, gl.RGBA, gl.FLOAT, rgba); state.uploaded = params.lut; }
       gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
       gl.useProgram(state.program); gl.uniform1i(gl.getUniformLocation(state.program,"uSource"),0); gl.uniform1i(gl.getUniformLocation(state.program,"uCurves"),1); gl.uniform1i(gl.getUniformLocation(state.program,"uLut"),2); gl.uniform1i(gl.getUniformLocation(state.program,"useLut"),data ? 1 : 0); gl.uniform1f(gl.getUniformLocation(state.program,"strength"),params.strength); gl.uniform1f(gl.getUniformLocation(state.program,"outBlack"),params.outBlack ?? 0); gl.uniform1f(gl.getUniformLocation(state.program,"outWhite"),params.outWhite ?? 1); gl.uniform3fv(gl.getUniformLocation(state.program,"dmin"),params.lut?.domain.min ?? [0,0,0]); gl.uniform3fv(gl.getUniformLocation(state.program,"dmax"),params.lut?.domain.max ?? [1,1,1]); gl.bindVertexArray(state.vao); gl.drawArrays(gl.TRIANGLES,0,3); gl.bindVertexArray(null);

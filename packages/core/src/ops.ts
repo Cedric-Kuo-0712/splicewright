@@ -271,6 +271,7 @@ export const ops: Record<string, OpDef<any>> = {
       } else if (a.component !== undefined) {
         kind = "overlay";
         const duration = a.duration ?? fail("invalid", "duration required");
+        if (a.component === "Text") checkText(a.props ?? {});
         item = { id: newId(p, "i"), start: a.at, duration, component: a.component, props: a.props ?? {} };
       } else {
         kind = "caption";

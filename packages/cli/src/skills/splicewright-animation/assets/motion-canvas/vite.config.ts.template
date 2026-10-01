@@ -1,0 +1,7 @@
+import {defineConfig} from 'vite';
+import pluginModule from '@motion-canvas/vite-plugin';
+import {agentBridge} from './agent-bridge';
+
+// Motion Canvas 3.17.2's plugin is a CommonJS default export in a native ESM config.
+const motionCanvas = (pluginModule as unknown as {default: typeof pluginModule}).default;
+export default defineConfig({plugins:[motionCanvas(), agentBridge()],server:{host:'127.0.0.1',port:9000,strictPort:true}});

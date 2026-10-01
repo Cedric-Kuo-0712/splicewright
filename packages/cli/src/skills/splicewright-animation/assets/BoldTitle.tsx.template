@@ -1,0 +1,47 @@
+import React from 'react';
+import {interpolate, useCurrentFrame, useVideoConfig} from 'remotion';
+
+export interface BoldTitleProps {
+  lines: string[];
+  durationInFrames: number;
+  fontFamily?: string;
+  fontWeight?: number;
+  fontSize?: number;
+  color?: string;
+  accent?: string;
+  outline?: string;
+}
+
+// Editable starting point: choose explicit line breaks and verify actual text fits.
+// Built-in fonts are loaded by Splicewright; custom font loading belongs in shared setup.
+export function BoldTitle({lines, durationInFrames, fontFamily = 'Noto Sans TC Variable',
+  fontWeight = 900, fontSize, color = '#ffffff', accent = '#ffdf37',
+  outline = '#161525'}: BoldTitleProps) {
+  if (!Number.isInteger(durationInFrames) || durationInFrames < 1)
+    throw new Error('BoldTitle needs positive integer durationInFrames matching its overlay item');
+  if (!Array.isArray(lines) || lines.length < 1 || lines.length > 3 || lines.some(line => typeof line !== 'string' || !line.trim()))
+    throw new Error('BoldTitle needs 1–3 non-empty lines');
+  const frame = useCurrentFrame();
+  const {fps, width, height} = useVideoConfig();
+  const size = fontSize ?? Math.min(width * .13, height * .18);
+  if (!Number.isFinite(size) || size <= 0) throw new Error('BoldTitle needs a positive finite fontSize');
+  const ramp = Math.max(1, Math.min(Math.round(fps * .3), Math.floor(durationInFrames / 3)));
+  const stagger = Math.floor(ramp / lines.length);
+  const exit = durationInFrames < 3 ? 1 : interpolate(frame,
+    [durationInFrames - ramp - 1, durationInFrames - 1], [1, 0],
+    {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+  return <div style={{position:'absolute', inset:'8%', display:'flex', flexDirection:'column',
+    alignItems:'center', justifyContent:'center', gap:size*.08, opacity:exit,
+    fontFamily, fontWeight, fontSize:size, lineHeight:1.12, textAlign:'center'}}>
+    {lines.map((line, i) => {
+      const enter = durationInFrames < 3 ? 1 : interpolate(frame,
+        [i * stagger, i * stagger + ramp], [0, 1],
+        {extrapolateLeft:'clamp', extrapolateRight:'clamp'});
+      const eased = 1 - Math.pow(1 - enter, 3);
+      return <div key={i} style={{color:i === lines.length - 1 ? accent : color,
+        whiteSpace:'pre', opacity:enter, transform:`translateY(${(1-eased)*size*.35}px) scale(${.85+.15*eased})`,
+        WebkitTextStroke:`${size*.018}px ${outline}`, paintOrder:'stroke fill',
+        textShadow:`0 ${size*.045}px 0 ${outline}`}}>{line}</div>;
+    })}
+  </div>;
+}

@@ -1,0 +1,5 @@
+import {makeProject} from '@motion-canvas/core';
+import scene from './scene?scene';
+import {agentClient} from './agent-client';
+
+export default makeProject({name:'TravelScene',scenes:[scene],plugins:[agentClient()]});

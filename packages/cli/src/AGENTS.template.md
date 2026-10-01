@@ -43,6 +43,9 @@ Op names below are the `splicewright_<op>` tools.
 Rules: one intent per `batch` (one undo step each); re-read on a conflict, never force; don't undo the human's
 steps (pass your last write's revision as `baseRevision` to undo); ask before deleting footage-heavy sections or changing the format.
 
+## Agent animation skills
+For graphics and overlays, read `.agents/skills/splicewright-animation/SKILL.md`; for art direction, read `.agents/skills/splicewright-animation-style/SKILL.md`. Follow the Brief and visual references, preserve confirmed styles, and ask when a broad direction is materially ambiguous. For one small reversible overlay with no direction, use a restrained look from the current theme. Record the chosen style in Notes.
+
 ## Type
 
 Pick a theme, then set roles. `setMeta { theme }` (one undo step) restyles every role-bound text at once.

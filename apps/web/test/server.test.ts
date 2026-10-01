@@ -16,6 +16,18 @@ let server: Awaited<ReturnType<typeof open>>;
 beforeAll(async () => void (server = await open(dir, { port: 5199 })));
 afterAll(() => server.close());
 
+it("resolves agent animation helpers in an external project's preview", async () => {
+  const file = join(dir, "components", "AnimationProbe.tsx");
+  writeFileSync(file, [
+    'import { SketchPath, MorphPath, Lottie, Arrow } from "splicewright/animation";',
+    'export const AnimationProbe = () => <svg><SketchPath d="M0 0 L10 10" /></svg>;',
+    'export const helpers = [SketchPath, MorphPath, Lottie, Arrow];',
+  ].join("\n"));
+  const response = await fetch(`http://127.0.0.1:5199/@fs/${file}`);
+  expect(response.status).toBe(200);
+  expect(await response.text()).toContain("packages/render/src/animation.tsx");
+});
+
 /** Raw request, so the path reaches the server without client-side dot-segment normalisation. */
 const get = (path: string, headers: Record<string, string> = {}) =>
   new Promise<{ status: number; headers: Record<string, unknown>; length: number }>((ok, fail) =>

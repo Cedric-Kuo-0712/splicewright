@@ -87,13 +87,36 @@ export const app = store<State>({
 });
 export const playhead = store({ frame: 0 });
 
-type Snapshot = Pick<State, "project" | "duck" | "words" | "proxies" | "durations" | "sizes" | "loudness" | "luts">;
-const take = ({ project, duck, words, proxies, durations, sizes, loudness, luts }: Snapshot) =>
-  app.set(({ gap }) => {
-    // Drop a gap selection that an undo, redo, or another writer filled.
-    const t = gap && project?.tracks.find((t) => t.id === gap.trackId);
-    return { project, duck, words, proxies, durations, sizes, loudness, luts, gap: t && gapAt(t, gap.at) ? gap : null };
-  });
+type Snapshot = Pick<State, "project" | "duck" | "words" | "proxies" | "durations" | "sizes" | "loudness"> & { lutVersions: Record<string, string> };
+const lutCache = new Map<string, { version: string; lut: State["luts"][string] }>();
+let latest = 0;
+
+/** The server sends each LUT's version, not its table (a 65³ one is ~4 MB of JSON). Only a LUT this page
+ * lacks or has an older version of is fetched, so an unchanged one keeps its object, and so its GPU upload. */
+const take = (s: Snapshot) => {
+  const n = ++latest;
+  const apply = () => {
+    for (const id of lutCache.keys()) if (!(id in s.lutVersions)) lutCache.delete(id);
+    const luts = Object.fromEntries([...lutCache].filter(([id]) => id in s.lutVersions).map(([id, e]) => [id, e.lut]));
+    app.set(({ gap }) => {
+      // Drop a gap selection that an undo, redo, or another writer filled.
+      const t = gap && s.project?.tracks.find((t) => t.id === gap.trackId);
+      return { project: s.project, duck: s.duck, words: s.words, proxies: s.proxies, durations: s.durations, sizes: s.sizes, loudness: s.loudness, luts, gap: t && gapAt(t, gap.at) ? gap : null };
+    });
+  };
+  const stale = Object.entries(s.lutVersions).filter(([id, version]) => lutCache.get(id)?.version !== version);
+  if (!stale.length) return apply();
+  return Promise.all(stale.map(async ([id, version]) => {
+    try {
+      const res = await fetch(`/api/lut?asset=${encodeURIComponent(id)}&v=${encodeURIComponent(version)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      lutCache.set(id, { version, lut: await res.json() });
+    } catch (e) {
+      lutCache.delete(id); // never keep an older table under the new version; the preview names the missing LUT
+      if (n === latest) fail(`LUT ${id}: ${(e as Error).message}`);
+    }
+  })).then(() => { if (n === latest) apply(); }); // a newer snapshot supersedes this one
+};
 
 async function call(path: string, body?: unknown) {
   const res = await fetch(path, body === undefined ? undefined : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -103,7 +126,7 @@ async function call(path: string, body?: unknown) {
 export async function refresh() {
   const { data } = await call("/api/project");
   app.set({ empty: !!data.empty, recent: data.recent ?? [] });
-  if (!data.empty) take(data);
+  if (!data.empty) await take(data);
 }
 
 const fail = (text: string) => app.set({ message: { text, error: true } });
@@ -132,7 +155,7 @@ export async function op(name: string, args: unknown) {
   const { status, data } = await call("/api/op", { op: name, args, baseRevision: base });
   if (status === 409) await refresh();
   if (data.error) return app.set({ message: { text: `${name}: ${data.error.message}`, error: true } }), false;
-  take(data);
+  await take(data);
   app.set({ message: { text: data.summary } });
   return true;
 }
@@ -142,7 +165,7 @@ export async function history(which: "undo" | "redo", steps = 1) {
   const { status, data } = await call(`/api/${which}`, { steps, baseRevision: app.get().project?.revision });
   if (status === 409) await refresh();
   if (data.error) return app.set({ message: { text: data.error.message, error: true } });
-  take(data);
+  await take(data);
   app.set({ message: { text: data.summary } });
 }
 

@@ -49,16 +49,16 @@ const frameArg = (base: z.ZodNumber) =>
 const Patch = z.record(z.string(), z.unknown()); // null value = unset the field
 const KINDS = ["video", "audio", "caption", "overlay"] as const;
 
-const EXT_KIND: Record<string, "video" | "audio" | "image"> = {
+const EXT_KIND: Record<string, "video" | "audio" | "image" | "lut"> = {
   mp4: "video", mov: "video", m4v: "video", mkv: "video", webm: "video", avi: "video",
   mp3: "audio", wav: "audio", m4a: "audio", aac: "audio", flac: "audio", ogg: "audio",
-  jpg: "image", jpeg: "image", png: "image", webp: "image", gif: "image",
+  jpg: "image", jpeg: "image", png: "image", webp: "image", gif: "image", cube: "lut",
 };
 /** Phone photos Chrome can't decode, so neither the editor nor the render can show them. */
 export const HEIF = /\.hei[cf]$/i;
 
 const ITEM_PROPS: Record<TrackKind, string[]> = {
-  video: ["volume", "fit", "transform", "effects", "key", "crop", "mask", "blend", "keyframes", "fadeIn", "fadeOut", "transition", "speed", "label", "note"],
+  video: ["volume", "fit", "transform", "effects", "grade", "key", "crop", "mask", "blend", "keyframes", "fadeIn", "fadeOut", "transition", "speed", "label", "note"],
   audio: ["volume", "fadeIn", "fadeOut", "label", "note"],
   caption: ["label", "note"],
   overlay: ["props", "mask", "blend", "label", "note"],
@@ -206,7 +206,7 @@ function checkText(props: Record<string, unknown>) {
 export const ops: Record<string, OpDef<any>> = {
   importAsset: def(
     "Register a media file (path relative to the project root). Idempotent by path and by content fingerprint; a probed asset whose file moved is re-pointed to the new path.",
-    z.object({ path: z.string().min(1), kind: z.enum(["video", "audio", "image"]).optional() }),
+    z.object({ path: z.string().min(1), kind: z.enum(["video", "audio", "image", "lut"]).optional() }),
     (p, a, ctx) => {
       if (/^([/\\]|[a-zA-Z]:)/.test(a.path) || a.path.split(/[/\\]/).includes(".."))
         fail("invalid", `asset path must be relative to the project root and inside it: ${a.path}`);
@@ -224,6 +224,12 @@ export const ops: Record<string, OpDef<any>> = {
       const ext = file.includes(".") ? file.split(".").pop()!.toLowerCase() : "";
       if (HEIF.test(file)) fail("invalid", `browsers can't show .${ext}; import it with \`splicewright import\` or the editor, which convert it to JPEG`);
       const kind = a.kind ?? EXT_KIND[ext] ?? fail("invalid", `unknown media type ".${ext}"; pass kind`);
+      if (ext === "cube" && kind !== "lut") fail("invalid", ".cube files must be imported as LUT assets");
+      if (kind === "lut" && ext !== "cube") fail("invalid", "LUT assets must be .cube files");
+      if (kind === "lut") {
+        if (!ctx.validateLut) fail("invalid", "cannot validate .cube LUT without a project file reader");
+        try { ctx.validateLut(a.path); } catch (e) { fail("invalid", `invalid .cube LUT ${a.path}: ${(e as Error).message}`); }
+      }
       const base = "a_" + (file.replace(/\.[^.]*$/, "").toLowerCase().replace(/[^a-z0-9]/g, "") || "asset");
       let id = base;
       for (let n = 2; p.assets[id]; n++) id = `${base}_${n}`;
@@ -254,6 +260,7 @@ export const ops: Record<string, OpDef<any>> = {
       let item: Item;
       if (a.assetId !== undefined) {
         const asset = p.assets[a.assetId] ?? fail("not_found", `asset ${a.assetId} not found`);
+        if (asset.kind === "lut") fail("invalid", "LUT assets cannot be inserted on a track");
         kind = asset.kind === "audio" ? "audio" : "video";
         const sourceIn = a.sourceIn ?? 0;
         const len = asset.kind === "image" ? undefined : ctx.assetDurations?.[asset.id];
@@ -460,10 +467,11 @@ export const ops: Record<string, OpDef<any>> = {
   ),
 
   setProps: def(
-    'Patch item fields: volume, fit, transform, effects {brightness, contrast, saturation, hue, blur, grayscale, sepia, invert}, key {kind: chroma, color, similarity, smoothness, spill}, crop {top, right, bottom, left} (fractions), mask {shape: rect|ellipse|diamond|star|polygon, x, y, w, h (fractions of the fitted picture box, x,y = top-left, w,h > 0), radius (rect only, 0..0.5 of min(w,h)), points [[x,y],...] (polygon only, >= 3, fractions of the mask box), feather (px, 0..200), invert} (video and overlay; drawn after crop), blend (video and overlay: normal|multiply|screen|overlay|darken|lighten|difference), keyframes (whole map; use setKeyframe to key one value), fadeIn, fadeOut, transition {kind: dissolve|dip|wipe|slide|push|zoom, duration, direction (left|right|up|down: side the incoming picture enters from, default left; wipe/slide/push)}, speed (video; speed here keeps duration, so the source range scales; setSpeed keeps the source range); volume, fadeIn, fadeOut (audio); props (overlay; a Text overlay takes text, role title|subtitle|emphasis|handwritten (default title), textStyle {font (a built-in font name), weight, size px, color, tracking em, lineHeight, upper, align, stroke {color,width}, shadow {color,blur,y}, box {color,radius,pad}} over the theme role, style raw CSS); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
+    'Patch item fields: volume, fit, transform, effects {brightness, contrast, saturation, hue, blur, grayscale, sepia, invert}, grade {exposure, temperature, tint, vibrance, shadows, highlights, levels, curves, lut}, key {kind: chroma|luma, color, similarity, smoothness, spill, low, high, invert}, crop {top, right, bottom, left} (fractions), mask {shape: rect|ellipse|diamond|star|polygon, x, y, w, h (fractions of the fitted picture box, x,y = top-left, w,h > 0), radius (rect only, 0..0.5 of min(w,h)), points [[x,y],...] (polygon only, >= 3, fractions of the mask box), feather (px, 0..200), invert} (video and overlay; drawn after crop), blend (video and overlay: normal|multiply|screen|overlay|darken|lighten|difference), keyframes (whole map; use setKeyframe to key one value), fadeIn, fadeOut, transition {kind: dissolve|dip|wipe|slide|push|zoom, duration, direction (left|right|up|down: side the incoming picture enters from, default left; wipe/slide/push)}, speed (video; speed here keeps duration, so the source range scales; setSpeed keeps the source range); volume, fadeIn, fadeOut (audio); props (overlay; a Text overlay takes text, role title|subtitle|emphasis|handwritten (default title), textStyle {font (a built-in font name), weight, size px, color, tracking em, lineHeight, upper, align, stroke {color,width}, shadow {color,blur,y}, box {color,radius,pad}} over the theme role, style raw CSS); label, note (all). null unsets.',z.object({ itemId: Id, patch: Patch }), (p, a) => {
     const { track: t, item } = locate(p, a.itemId);
     patch(item as Record<string, unknown>, a.patch, ITEM_PROPS[t.kind], `${t.kind} item ${item.id}`);
     const v = item as VideoItem;
+    if (v.grade?.lut && p.assets[v.grade.lut.assetId]?.kind !== "lut") fail("invalid", `grade LUT ${v.grade.lut.assetId} must reference an imported .cube LUT asset`);
     if (a.patch.mask === null && v.keyframes) {
       // keys of a removed mask would override the geometry of the next one
       for (const k of Object.keys(MASK_PROPS)) delete v.keyframes[k as keyof typeof MASK_PROPS];

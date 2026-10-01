@@ -437,6 +437,7 @@ export function Timeline() {
                         {live?.mode === "slip" && <SlipEnds p={p} item={shown as Item & { assetId: string; sourceIn: number }} />}
                         {"sourceIn" in item && !t.locked && !live && <FadeHandles item={item} ppf={ppf} />}
                         {"keyframes" in shown && shown.keyframes && <KeyMarks p={p} item={shown as VideoItem | AudioItem} ppf={ppf} />}
+                        {t.kind === "video" && "assetId" in shown && ((shown as VideoItem).grade || (shown as VideoItem).key) && <span className="badge" title="Color or key look applied">✦ look</span>}
                         <span className="name">
                           {"text" in item ? item.text : "component" in item ? item.component : (item.label ?? p.assets[item.assetId]?.path)}
                           {"speed" in item && item.speed ? ` · ${item.speed}×` : ""}

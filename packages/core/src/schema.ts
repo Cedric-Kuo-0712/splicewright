@@ -51,6 +51,28 @@ export const ChromaKey = z.object({
   smoothness: z.number().min(0).max(1),
   spill: z.number().min(0).max(1).optional(),
 });
+export const LumaKey = z.object({
+  kind: z.literal("luma"),
+  low: z.number().min(0).max(1),
+  high: z.number().min(0).max(1),
+  invert: z.boolean().optional(),
+}).refine((k) => k.low < k.high, { message: "luma key low must be less than high" });
+export const Key = z.discriminatedUnion("kind", [ChromaKey, LumaKey]);
+
+const Curve = z.array(z.tuple([z.number().min(0).max(1), z.number().min(0).max(1)])).min(2).max(16)
+  .refine((points) => points.every((p, i) => !i || p[0] > points[i - 1][0]), { message: "curve x values must strictly increase" });
+export const Grade = z.object({
+  exposure: z.number().min(-5).max(5).optional(),
+  temperature: z.number().min(-1).max(1).optional(),
+  tint: z.number().min(-1).max(1).optional(),
+  vibrance: z.number().min(-1).max(1).optional(),
+  shadows: z.number().min(-1).max(1).optional(),
+  highlights: z.number().min(-1).max(1).optional(),
+  levels: z.object({ inBlack: z.number().min(0).max(1), inWhite: z.number().min(0).max(1), gamma: z.number().min(0.01).max(10), outBlack: z.number().min(0).max(1), outWhite: z.number().min(0).max(1) })
+    .refine((v) => v.inBlack < v.inWhite && v.outBlack <= v.outWhite, { message: "levels black points must be below white points" }).optional(),
+  curves: z.object({ all: Curve.optional(), r: Curve.optional(), g: Curve.optional(), b: Curve.optional() }).optional(),
+  lut: z.object({ assetId: Id, strength: z.number().min(0).max(1).optional() }).optional(),
+});
 
 /** Fractions of the picture cut from each side, in the picture's own orientation. */
 export const Crop = z
@@ -115,7 +137,7 @@ export const Keyframes = z
 export const Asset = z.object({
   id: Id,
   path: z.string().min(1),
-  kind: z.enum(["video", "audio", "image"]),
+  kind: z.enum(["video", "audio", "image", "lut"]),
   rotation: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]).optional(),
 });
 
@@ -127,7 +149,8 @@ export const VideoItem = z.object({
   fit: z.enum(["contain", "cover"]).optional(),
   transform: Transform.optional(),
   effects: Effects.optional(),
-  key: ChromaKey.optional(),
+  grade: Grade.optional(),
+  key: Key.optional(),
   crop: Crop.optional(),
   mask: Mask.optional(),
   blend: z.enum(BLENDS).optional(),
@@ -275,6 +298,8 @@ export interface Ctx {
   fingerprint?: (path: string) => string | undefined;
   /** Integrated loudness in LUFS from the `loudness` ingest step, by asset id. */
   loudness?: Record<string, number>;
+  /** Validate a project-relative LUT when registering it. */
+  validateLut?: (path: string) => void;
 }
 
 export interface BeatAnalysis {

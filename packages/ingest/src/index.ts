@@ -252,9 +252,10 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
   const run = limiter(opts.jobs ?? Math.max(1, availableParallelism() - 2));
   const steps = new Set(opts.only ?? STEPS);
   const project = load(dir);
-  const assets = Object.values(project.assets).filter((a) => !opts.assets || opts.assets.includes(a.id));
+  const assets = Object.values(project.assets).filter((a) => a.kind !== "lut" && (!opts.assets || opts.assets.includes(a.id)));
   const cache: Record<string, Entry> = readAssets(dir);
   const tally = Object.fromEntries(["probe", ...steps].map((s) => [s, { ran: 0, cached: 0, skipped: 0, failed: 0 } as Tally]));
+  tally.probe.skipped += Object.values(project.assets).filter((a) => a.kind === "lut" && (!opts.assets || opts.assets.includes(a.id))).length;
   const errors: string[] = [];
   const fail = (step: string, id: string, e: unknown) => (tally[step].failed++, errors.push(`${step} ${id}: ${(e as Error).message ?? e}`));
   /** Ids whose entry this run changed. */

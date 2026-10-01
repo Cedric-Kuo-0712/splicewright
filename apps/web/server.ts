@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream, type ReadStream, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, watch } from "node:fs";
+import { createReadStream, createWriteStream, type ReadStream, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, watch } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
@@ -7,7 +7,7 @@ import react from "@vitejs/plugin-react";
 import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { addRecent, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo } from "@splicewright/core/node";
-import { ASPECTS, captionWords, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
+import { ASPECTS, captionWords, FPS_CHOICES, parseCube, sourceAt, type Project } from "@splicewright/core";
 import { displayable, ffmpeg, ingest, limiter, thumb, waveform } from "@splicewright/ingest";
 import { duckRanges } from "@splicewright/render/node";
 
@@ -15,6 +15,19 @@ import { duckRanges } from "@splicewright/render/node";
 // option) plus a small API. Every mutation goes through core ops with the client's baseRevision.
 
 const here = dirname(fileURLToPath(import.meta.url));
+const lutCache = new Map<string, { stamp: string; value: ReturnType<typeof parseCube> }>();
+function lutsOf(dir: string, project: Project) {
+  const root = realpathSync(dir);
+  return Object.fromEntries(Object.values(project.assets).filter((a) => a.kind === "lut").map((a) => {
+    const path = realpathSync(resolve(dir, a.path));
+    if (!path.startsWith(root + sep)) throw new Error(`LUT asset path escapes project directory: ${a.path}`);
+    const stat = statSync(path), stamp = `${stat.size}:${stat.mtimeMs}`;
+    const cacheKey = `${dir}:${a.id}`;
+    let cached = lutCache.get(cacheKey);
+    if (!cached || cached.stamp !== stamp) { cached = { stamp, value: parseCube(readFileSync(path, "utf8")) }; lutCache.set(cacheKey, cached); }
+    return [a.id, cached.value];
+  }));
+}
 
 function send(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -100,7 +113,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     const probes = readAssets(dir);
     const durations = Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.duration ? [[id, a.duration]] : [])));
     const ctx = loadCtx(dir);
-    return { project, duck: duckRanges(project, ctx), words: captionWords(project, ctx), proxies, durations, sizes: sizesOf(probes), loudness: ctx.loudness ?? {} };
+    return { project, duck: duckRanges(project, ctx), words: captionWords(project, ctx), proxies, durations, sizes: sizesOf(probes), loudness: ctx.loudness ?? {}, luts: lutsOf(dir, project) };
   };
   const result = (res: ServerResponse, r: ReturnType<typeof run>) =>
     "error" in r ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, { revision: r.project.revision, summary: r.changes.summary, ...snapshot() });
@@ -168,8 +181,10 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             const asset = Object.values(r.project.assets).find((a) => a.path === path) ?? r.project.assets[/as (\S+)/.exec(r.changes.summary)![1]];
             if (asset.path !== path) unlinkSync(join(dir, path));
             await queue;
-            await ingest(dir, { assets: [asset.id], only: [] }); // probe now, so the answer carries the duration
-            background(asset.id);
+            if (asset.kind !== "lut") {
+              await ingest(dir, { assets: [asset.id], only: [] }); // probe now, so the answer carries the duration
+              background(asset.id);
+            }
             return send(res, 200, { assetId: asset.id, summary: r.changes.summary, ...snapshot() });
           }
           if (route === "POST /api/freeze") {

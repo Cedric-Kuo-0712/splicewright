@@ -491,6 +491,25 @@ describe("ops", () => {
     img = ok(apply(img, "insertItem", { assetId: "a_photo", at: 150, duration: 30 }, ctx));
     expect(err(apply(img, "detachAudio", { itemId: "i_3" }, ctx))).toBe("invalid");
   });
+
+  it("imports LUT assets separately, validates look references and luma thresholds", () => {
+    const p = fixture();
+    const lutCtx = { ...ctx, validateLut: () => {} };
+    const withLut = ok(apply(p, "importAsset", { path: "raw/film.cube" }, lutCtx));
+    expect(withLut.assets.a_film?.kind).toBe("lut");
+    expect(err(apply(p, "importAsset", { path: "raw/other.cube", kind: "image" }, lutCtx))).toBe("invalid");
+    expect(err(apply(p, "importAsset", { path: "raw/other.png", kind: "lut" }, lutCtx))).toBe("invalid");
+    expect(err(apply(withLut, "insertItem", { assetId: "a_film", at: 0, duration: 30 }, lutCtx))).toBe("invalid");
+    const invalidTrackProject = structuredClone(p);
+    invalidTrackProject.assets.a_film = { id: "a_film", path: "raw/film.cube", kind: "lut" };
+    (invalidTrackProject.tracks[0].items[0] as { assetId: string }).assetId = "a_film";
+    expect(validate(invalidTrackProject)).toContain("i_1: LUT assets cannot be placed on a track");
+    const looked = ok(apply(withLut, "setProps", { itemId: "i_1", patch: { grade: { exposure: 1.5, lut: { assetId: "a_film", strength: 0.5 } } } }, lutCtx));
+    expect(item(looked, "i_1").grade?.exposure).toBe(1.5);
+    expect(err(apply(withLut, "setProps", { itemId: "i_1", patch: { grade: { lut: { assetId: "missing" } } } }, lutCtx))).toBe("invalid");
+    expect(err(apply(p, "setProps", { itemId: "i_1", patch: { key: { kind: "luma", low: 0.5, high: 0.5 } } }, ctx))).toBe("invalid");
+    expect(err(apply(p, "setProps", { itemId: "i_1", patch: { grade: { curves: { r: [[0,0],[0,1],[1,1]] } } } }, ctx))).toBe("invalid");
+  });
 });
 
 describe("text themes", () => {

@@ -21,6 +21,10 @@ it("keeps a '#' inside a quoted TITLE and still strips trailing comments", () =>
   const lut = parseCube(cube2('TITLE "Film #1"\nDOMAIN_MIN 0 0 0 # lower bound'));
   expect(lut.title).toBe("Film #1");
   expect(lut.domain.min).toEqual([0, 0, 0]);
+  // a comment may follow the title itself, and may contain quotes
+  expect(parseCube(cube2('TITLE "Film #1" # my comment')).title).toBe("Film #1");
+  expect(parseCube(cube2('TITLE "Film"   # say "hi"')).title).toBe("Film");
+  expect(() => parseCube(cube2('TITLE "Film" junk'))).toThrow("unrecognized");
 });
 
 it("reads LUT_3D_INPUT_RANGE as the domain of every channel, and not alongside DOMAIN_*", () => {

@@ -2,15 +2,15 @@ import type { Lut } from "cube-lut.js/dist/types.js";
 
 // cube-lut.js 1.0.2's published ESM imports `./validate` without `.js`, which Node ESM rejects.
 // Keep its Lut shape and strict .cube directives while parsing here so CLI/MCP import works in Node.
-const TITLE = /^TITLE\s+"(.*)"$/;
+const TITLE = /^TITLE\s+"(.*?)"\s*(?:#.*)?$/; // lazy: a trailing comment may itself contain quotes
 function parse(text: string): Lut {
   const lut: Lut = { type: "3D", size: 0, domain: { min: [0, 0, 0], max: [1, 1, 1] }, data: [] };
   let sizeSeen = false, minSeen = false, maxSeen = false;
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.replace(/#.*/, "").trim();
     if (!line) continue;
-    // The raw line first: a quoted title may contain '#', which starts a comment everywhere else.
-    const title = TITLE.exec(raw.trim()) ?? TITLE.exec(line);
+    // The raw line: a quoted title may contain '#', which starts a comment everywhere else.
+    const title = TITLE.exec(raw.trim());
     if (title) { lut.title = title[1]; continue; }
     const range = /^LUT_[13]D_INPUT_RANGE\s+([^\s]+)\s+([^\s]+)$/.exec(line);
     if (range) {

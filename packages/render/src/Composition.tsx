@@ -7,8 +7,7 @@ import { whiteBalance } from "@remotion/effects/white-balance";
 import { vibrance } from "@remotion/effects/vibrance";
 import { levels } from "@remotion/effects/levels";
 import { shadowsHighlights } from "@remotion/effects/shadows-highlights";
-import type { Lut } from "cube-lut.js/dist/types.js";
-import { gradeEffect } from "./grade-effect.ts";
+import { gradeEffect, type GradeLut } from "./grade-effect.ts";
 import { lumaKey } from "./luma-key.ts";
 import "./fonts.ts";
 import { animate, itemSpan, sourceAt, textCss, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem, type Word, type FontRole, type TextStyle } from "@splicewright/core";
@@ -25,7 +24,7 @@ export interface Props extends Record<string, unknown> {
   sizes?: Record<string, [number, number]>;
   /** From captionWords(); transcript words per anchored caption on a highlight: "word" track. */
   words?: Record<string, Word[]>;
-  luts?: Record<string, Lut>;
+  luts?: Record<string, GradeLut>;
   sampleItemId?: string;
   /** Carried through so the Node side can read config presets via selectComposition(). */
   presets?: Config["presets"];
@@ -300,7 +299,7 @@ const samplingCanvasEffect = createEffect<{}, null>({
   cleanup: () => {},
 } satisfies EffectDefinition<{}, null>);
 
-export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: VideoItem["key"], luts: Record<string, Lut>, sample: boolean): EffectsProp {
+export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: VideoItem["key"], luts: Record<string, GradeLut>, sample: boolean): EffectsProp {
   if (grade?.lut && !luts[grade.lut.assetId]) throw new Error(`Look item ${itemId} references unavailable LUT asset ${grade.lut.assetId}`);
   const effects: EffectsProp = [
     ...(grade?.exposure !== undefined ? [exposure({ stops: grade.exposure })] : []),
@@ -331,7 +330,7 @@ const CanvasVideoPath: React.FC<{
   style: React.CSSProperties;
   keyLook?: NonNullable<VideoItem["key"]>;
   grade?: VideoItem["grade"];
-  luts: Record<string, Lut>;
+  luts: Record<string, GradeLut>;
   itemId: string;
   sample: boolean;
 }> = ({ itemName, src, trimBefore, speed, volume, muted, fit, style, keyLook, grade, luts, itemId, sample }) => {
@@ -359,7 +358,7 @@ const CanvasVideoPath: React.FC<{
   );
 };
 
-const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; muted?: boolean; from: number; inc?: Transition; out?: Transition; luts: Record<string, Lut>; sampleItemId?: string }> = ({ p, item: raw, size, muted, from, inc, out, luts, sampleItemId }) => {
+const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; muted?: boolean; from: number; inc?: Transition; out?: Transition; luts: Record<string, GradeLut>; sampleItemId?: string }> = ({ p, item: raw, size, muted, from, inc, out, luts, sampleItemId }) => {
   const asset = p.assets[raw.assetId];
   const f = from + useCurrentFrame();
   const item = animate(p, raw, f);

@@ -1,4 +1,4 @@
-import {RendererResult, type Plugin, type Project, type Renderer} from '@motion-canvas/core';
+import {RendererResult, Vector2, type Plugin, type Project, type Renderer} from '@motion-canvas/core';
 
 export function agentClient(): Plugin {
   let project: Project | undefined, renderer: Renderer | undefined, running: string | undefined;
@@ -33,9 +33,8 @@ export function agentClient(): Plugin {
         running=request.id;
         import.meta.hot?.send('splicewright:response',{id:request.id,accepted:true});
         try {
-          const settings=project.meta.getFullRenderingSettings();
-          settings.size.x=request.width;
-          settings.size.y=request.height;
+          // `size` of the project's settings is the live Vector2 of its meta field; assigning x/y would resize the project itself.
+          const settings={...project.meta.getFullRenderingSettings(),size:new Vector2(request.width,request.height)};
           await renderer.render({...settings,name:project.name,fps:request.fps});
         } catch (error) {
           import.meta.hot?.send('splicewright:done',{id:request.id,state:'failed',error:String(error)});

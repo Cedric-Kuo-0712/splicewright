@@ -6,38 +6,50 @@ import type {Plugin, WebSocketClient} from 'vite';
 export function agentBridge(): Plugin {
   return {name:'splicewright-agent-bridge',configureServer(server) {
     const pending=new Map<string,{resolve:(value:Record<string,unknown>)=>void;timer:ReturnType<typeof setTimeout>}>();
-    const jobs=new Set<string>();
-    const expired=new Set<string>(); // render requests that timed out; the browser may still accept them late
-    // Browser tabs that announced themselves, oldest first. Only the newest live one is asked, so two open
-    // tabs cannot both start the same render.
+    // The one render handed to a browser and not yet finished. Motion Canvas writes frames to a fixed
+    // output/<project>/<frame>.png, so two renders, even from different tabs, would overwrite each other:
+    // ownership lives here, not in a tab's own `running`.
+    let active:{id:string;client:WebSocketClient;accepted:boolean;until:number}|undefined;
+    const record=(id:string,data:Record<string,unknown>)=>{
+      mkdirSync('.agent-render',{recursive:true});
+      writeFileSync(`.agent-render/${id}.json`,JSON.stringify({id,...data})+'\n');
+    };
+    // ponytail: a tab that never answers blocks new renders for 30 s; if it accepts after that, the render is untracked.
+    const busy=()=>{
+      if (!active) return false;
+      if (!server.ws.clients.has(active.client)) {record(active.id,{state:'failed',error:'the renderer tab closed'});active=undefined;return false;}
+      if (!active.accepted && Date.now()>active.until) {record(active.id,{state:'unconfirmed',error:'the renderer never accepted this render'});active=undefined;return false;}
+      return true;
+    };
+    // Browser tabs that announced themselves, oldest first. Only the newest live one is asked, so a request
+    // is never broadcast to every tab.
     const renderers=new Set<WebSocketClient>();
     server.ws.on('splicewright:hello',(_data,client)=>{renderers.delete(client);renderers.add(client);});
     const ask=(action:string,params:Record<string,unknown>={})=>new Promise<Record<string,unknown>>((resolve)=>{
       const client=[...renderers].reverse().find(c=>server.ws.clients.has(c));
       if (!client) return resolve({error:'no connected renderer; open the project in a browser'});
       const id=randomUUID();
+      if (action==='render') {active={id,client,accepted:false,until:Date.now()+30000};record(id,{state:'awaiting-acceptance'});}
       const timer=setTimeout(()=>{
         pending.delete(id);
-        if (action==='render') expired.add(id);
-        resolve({id,error:action==='render'?`the renderer did not answer in time; the render may still have started, see .agent-render/${id}.json`:'the renderer did not answer in time'});
+        resolve({id,error:action==='render'?`the renderer did not answer in time; the render may still start, see .agent-render/${id}.json`:'the renderer did not answer in time'});
       },2000);
       pending.set(id,{resolve,timer});
       client.send('splicewright:request',{id,action,...params});
     });
-    const track=(id:string)=>{
-      jobs.add(id);mkdirSync('.agent-render',{recursive:true});
-      writeFileSync(`.agent-render/${id}.json`,JSON.stringify({id,state:'running'})+'\n');
-    };
     server.ws.on('splicewright:response',(data:{id:string;accepted?:boolean;error?:string})=>{
+      if (active?.id===data.id) { // also after the 2 s window: the browser may accept late
+        if (data.accepted) {active.accepted=true;record(data.id,{state:'running'});}
+        else {record(data.id,{state:'rejected',error:data.error});active=undefined;}
+      }
       const request=pending.get(data.id);
-      if (!request) {if (data.accepted && expired.delete(data.id)) track(data.id);return;}
+      if (!request) return;
       clearTimeout(request.timer);pending.delete(data.id);
-      if (data.accepted) track(data.id);
       request.resolve({...data});
     });
     server.ws.on('splicewright:done',(data:{id:string;state:string;error?:string})=>{
-      if (!jobs.delete(data.id)) return;
-      writeFileSync(`.agent-render/${data.id}.json`,JSON.stringify(data)+'\n');
+      if (data.id!==active?.id) return;
+      active=undefined;record(data.id,data);
       server.config.logger.info(`Animation ${data.id}: ${data.state}`);
     });
     server.httpServer?.on('close',()=>{
@@ -66,6 +78,7 @@ export function agentBridge(): Plugin {
           return reply(400,{error:'provide only fps, width and height'});
         if (![data.fps,data.width,data.height].every(value=>Number.isInteger(value) && Number(value)>0) || Number(data.fps)>120 || Number(data.width)>8192 || Number(data.height)>8192)
           return reply(400,{error:'positive integer fps <=120 and dimensions <=8192 required'});
+        if (busy()) return reply(409,{error:'a render is already running; wait for it to finish',id:active?.id});
         const result=await ask('render',data);return reply(result.error?503:202,result);
       } catch (error) { return reply(400,{error:String(error)}); }
     });

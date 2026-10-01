@@ -3,25 +3,17 @@ import type { Lut } from "cube-lut.js/dist/types.js";
 
 export type GradeGpuParams = {
   curves: { all?: [number, number][]; r?: [number, number][]; g?: [number, number][]; b?: [number, number][] };
-  lut?: Lut;
+  lut?: GradeLut;
   strength: number;
   outBlack?: number;
   outWhite?: number;
 };
 type State = { gl: WebGL2RenderingContext; program: WebGLProgram; source: WebGLTexture; curves: WebGLTexture; lut: WebGLTexture; vao: WebGLVertexArrayObject; floatLinear: boolean; uploaded?: Lut };
-const lutDigests = new WeakMap<Lut, string>();
-/** Content digest of a LUT, computed once per parsed object: a 65³ table is ~4 MB of JSON, too much to
- * stringify whenever Remotion asks for the key. 32-bit FNV-1a, so a collision needs two LUTs of the same size and domain. */
-function lutDigest(lut: Lut) {
-  let digest = lutDigests.get(lut);
-  if (digest === undefined) {
-    let h = 2166136261;
-    for (const v of lut.data) for (const c of v) h = Math.imul(h ^ Math.round(c * 1e6), 16777619);
-    lutDigests.set(lut, digest = `${lut.size}:${lut.domain.min}:${lut.domain.max}:${h >>> 0}`);
-  }
-  return digest;
-}
-export const gradeKey = (p: GradeGpuParams) => JSON.stringify({ ...p, lut: p.lut && lutDigest(p.lut) });
+/** A parsed LUT with the SHA-256 (hex) of its .cube text, computed once where it is parsed (`lutsOf`). */
+export type GradeLut = Lut & { digest: string };
+/** Remotion reuses the previous effect, params included, while this key is unchanged, so it must tell two
+ * tables apart for certain; the digest does that without stringifying a 65³ table (~4 MB) per call. */
+export const gradeKey = (p: GradeGpuParams) => JSON.stringify({ ...p, lut: p.lut?.digest });
 const vertex = `#version 300 es\nconst vec2 p[3]=vec2[3](vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.)); out vec2 uv; void main(){ gl_Position=vec4(p[gl_VertexID],0.,1.); uv=(p[gl_VertexID]+1.)*.5; }`;
 const fragment = `#version 300 es
 precision highp float; precision highp sampler3D; in vec2 uv; out vec4 color;

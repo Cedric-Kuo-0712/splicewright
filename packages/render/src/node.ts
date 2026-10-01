@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, extname, join, resolve, sep } from "node:path";
@@ -9,20 +10,21 @@ import { load, loadCtx, readAssets, sizesOf } from "@splicewright/core/node";
 import { captionWords, parseCube, type Project } from "@splicewright/core";
 import { ffmpeg, grid, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
+import type { GradeLut } from "./grade-effect.ts";
 import { duckRanges } from "./duck.ts";
 import { projectAliases } from "./aliases.ts";
 
 export { duckRanges };
 
 const here = dirname(fileURLToPath(import.meta.url));
-const lutCache = new Map<string, { stamp: string; value: ReturnType<typeof parseCube> }>();
+const lutCache = new Map<string, { stamp: string; value: GradeLut }>();
 const lutVersions = new WeakMap<object, string>();
 /** Parsed tables of the LUTs some item's grade uses. A missing, escaping or invalid file is left out
  * (lookEffects then names the unavailable asset where it is used) so one bad .cube can't take the
  * editor or an unrelated render down. */
 export function lutsOf(dir: string, project: Project) {
   const used = new Set(project.tracks.flatMap((t) => t.items.flatMap((i) => ("grade" in i && i.grade?.lut ? [i.grade.lut.assetId] : []))));
-  const luts: Record<string, ReturnType<typeof parseCube>> = {};
+  const luts: Record<string, GradeLut> = {};
   for (const a of Object.values(project.assets)) {
     if (a.kind !== "lut" || !used.has(a.id)) continue;
     try {
@@ -31,7 +33,11 @@ export function lutsOf(dir: string, project: Project) {
       const stat = statSync(path), stamp = `${stat.size}:${stat.mtimeMs}`;
       const cacheKey = `${dir}:${a.id}:${a.path}`;
       let cached = lutCache.get(cacheKey);
-      if (!cached || cached.stamp !== stamp) { cached = { stamp, value: parseCube(readFileSync(path, "utf8")) }; lutCache.set(cacheKey, cached); }
+      if (!cached || cached.stamp !== stamp) {
+        const text = readFileSync(path, "utf8");
+        cached = { stamp, value: { ...parseCube(text), digest: createHash("sha256").update(text).digest("hex") } };
+        lutCache.set(cacheKey, cached);
+      }
       luts[a.id] = cached.value;
       lutVersions.set(cached.value, `${a.path}:${stamp}`);
     } catch { /* unavailable: see above */ }

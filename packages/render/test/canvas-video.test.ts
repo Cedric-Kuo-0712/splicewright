@@ -24,7 +24,7 @@ it("forces an image canvas while sampling a key-only item with no grade", () => 
 });
 
 it("adds the WebGL2 grade shader only for curves, a LUT or output levels", () => {
-  const lut = { type: "3D" as const, size: 2, domain: { min: [0, 0, 0] as [number, number, number], max: [1, 1, 1] as [number, number, number] }, data: Array.from({ length: 8 }, () => [0, 0, 0] as [number, number, number]) };
+  const lut = { type: "3D" as const, size: 2, domain: { min: [0, 0, 0] as [number, number, number], max: [1, 1, 1] as [number, number, number] }, data: Array.from({ length: 8 }, () => [0, 0, 0] as [number, number, number]), digest: "d" };
   const count = (grade: Parameters<typeof lookEffects>[1]) => lookEffects("i", grade, undefined, { l: lut }, false).length;
   expect(count({ exposure: 1, temperature: 0.2 })).toBe(2); // exposure + white balance, no shader
   expect(count({ levels: { inBlack: 0.1, inWhite: 1, gamma: 1, outBlack: 0, outWhite: 1 } })).toBe(1); // levels only
@@ -33,12 +33,15 @@ it("adds the WebGL2 grade shader only for curves, a LUT or output levels", () =>
   expect(count({ lut: { assetId: "l" } })).toBe(1);
 });
 
-it("keys a LUT by content, so equal tables share a key and different ones do not", () => {
-  const table = (v: number) => ({ type: "3D" as const, size: 2, domain: { min: [0, 0, 0] as [number, number, number], max: [1, 1, 1] as [number, number, number] }, data: Array.from({ length: 8 }, () => [v, v, v] as [number, number, number]) });
-  const key = (v: number) => gradeKey({ curves: {}, strength: 1, lut: table(v) });
-  expect(key(0.2)).toBe(key(0.2));
-  expect(key(0.2)).not.toBe(key(0.3));
-  expect(gradeKey({ curves: {}, strength: 1 })).not.toBe(key(0.2));
+it("keys a LUT by its content digest: same digest shares a key, any other does not, and the table is never walked", () => {
+  const table = (digest: string) => ({ type: "3D" as const, size: 2, domain: { min: [0, 0, 0] as [number, number, number], max: [1, 1, 1] as [number, number, number] }, data: Array.from({ length: 8 }, () => [0.2, 0.2, 0.2] as [number, number, number]), digest });
+  const key = (digest: string) => gradeKey({ curves: {}, strength: 1, lut: table(digest) });
+  expect(key("a")).toBe(key("a")); // a different object with the same digest
+  expect(key("a")).not.toBe(key("b"));
+  expect(gradeKey({ curves: {}, strength: 1 })).not.toBe(key("a"));
+  // a table whose values differ by less than the old 1e-6 rounding still keys by its digest alone
+  const near = table("c"); near.data[0] = [0.2 + 1e-9, 0.2, 0.2];
+  expect(gradeKey({ curves: {}, strength: 1, lut: near })).toBe(key("c"));
 });
 
 it("keys synthetic green on the canvas path and reveals the blue track below", { timeout: 300_000 }, async () => {

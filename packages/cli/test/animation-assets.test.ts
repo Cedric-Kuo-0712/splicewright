@@ -102,13 +102,59 @@ it('agent render bridge asks only the newest live tab and tracks a render the br
     const id=a.sent.at(-1).payload.id;
     const [code,timedOut]=await render; // nobody answers within the 2 s window
     out.timeout=[code,timedOut.id===id];
-    hooks['splicewright:response']({id,accepted:true}); // ...then the browser accepts it anyway
     const state=()=>JSON.parse(readFileSync('.agent-render/'+id+'.json','utf8')).state;
+    out.awaiting=state(); // the file the 503 points at already exists
+    hooks['splicewright:response']({id,accepted:true}); // ...then the browser accepts it anyway
     out.late=state();
     hooks['splicewright:done']({id,state:'complete'});
     out.done=state();
     console.log(JSON.stringify(out));
   `;
   expect(JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',probe],{cwd,encoding:'utf8'})))
-    .toEqual({noHello:503,newestOnly:[0,1],newestAnswered:200,fallback:[1,1],timeout:[503,true],late:'running',done:'complete'});
+    .toEqual({noHello:503,newestOnly:[0,1],newestAnswered:200,fallback:[1,1],timeout:[503,true],awaiting:'awaiting-acceptance',late:'running',done:'complete'});
+});
+
+it('agent render bridge runs one render at a time across tabs, and frees it on done, rejection or a closed tab', {timeout:20000}, () => {
+  const cwd=mkdtempSync(join(tmpdir(),'swr-render-bridge-one-'));
+  copyFileSync(join(import.meta.dirname,'../src/skills/splicewright-animation/assets/motion-canvas/agent-bridge.ts.template'),join(cwd,'bridge.ts'));
+  const probe = `
+    import {readFileSync} from 'node:fs';
+    import {agentBridge} from './bridge.ts';
+    const hooks={}, clients=new Set(); let middleware;
+    const tab=()=>({sent:[],send(event,payload){this.sent.push(payload);}});
+    agentBridge().configureServer({
+      ws:{on:(name,fn)=>hooks[name]=fn,clients,send:()=>{}},
+      httpServer:{on:()=>{}},config:{logger:{info:()=>{}}},middlewares:{use:fn=>middleware=fn}
+    });
+    // POST /render; the tab asked (if any) answers at once with \`reply\`; resolves to [status, body, id]
+    async function render(reply,...tabs) {
+      let code,payload;
+      const req={url:'/__splicewright/render',method:'POST',headers:{host:'127.0.0.1:9000'},socket:{remoteAddress:'127.0.0.1'},
+        async *[Symbol.asyncIterator](){yield Buffer.from(JSON.stringify({fps:30,width:1280,height:720}))}};
+      const done=middleware(req,{writeHead(value){code=value},end(data){payload=JSON.parse(data)}},()=>{throw new Error('fell through')});
+      await new Promise(r=>setImmediate(r));
+      const asked=tabs.find(t=>t.sent.length>t.seen);
+      if (asked) {asked.seen=asked.sent.length;hooks['splicewright:response']({id:asked.sent.at(-1).id,...reply});}
+      await done; return [code,payload,asked?asked.sent.at(-1).id:payload.id];
+    }
+    const file=(id)=>JSON.parse(readFileSync('.agent-render/'+id+'.json','utf8')).state;
+    const a=tab(), b=tab(); a.seen=b.seen=0; clients.add(a); clients.add(b);
+    const out={};
+    hooks['splicewright:hello']({},a);
+    const [c1,,id1]=await render({accepted:true},a,b); out.first=[c1,file(id1)];
+    hooks['splicewright:hello']({},b); // another tab becomes the newest while render 1 runs
+    const [c2,body2]=await render({accepted:true},a,b);
+    out.second=[c2,body2.id===id1,b.sent.length]; // refused, names the running job, and b was never asked
+    hooks['splicewright:done']({id:id1,state:'complete'});
+    const [c3,,id3]=await render({error:'render already running'},a,b); // b refuses it
+    out.rejected=[c3,file(id3)];
+    const [c4,,id4]=await render({accepted:true},a,b); // a refusal frees the bridge
+    out.afterRejected=[c4,file(id4)];
+    clients.delete(b); // the tab that owns render 4 closes
+    const [c5,,id5]=await render({accepted:true},a,b);
+    out.afterClosed=[c5,file(id4),file(id5)];
+    console.log(JSON.stringify(out));
+  `;
+  expect(JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',probe],{cwd,encoding:'utf8'})))
+    .toEqual({first:[202,'running'],second:[409,true,0],rejected:[503,'rejected'],afterRejected:[202,'running'],afterClosed:[202,'failed','running']});
 });

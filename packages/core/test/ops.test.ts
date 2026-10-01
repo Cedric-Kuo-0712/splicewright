@@ -36,6 +36,27 @@ describe("ops", () => {
     expect(validate(next, p, ctx)).toEqual([]);
   });
 
+  it("removeAsset drops an unused asset from the list and refuses one in use", () => {
+    const p = fixture();
+    expect(err(apply(p, "removeAsset", { assetId: "a_clip" }, ctx))).toBe("invalid");
+    const next = ok(apply(p, "removeAsset", { assetId: "a_song" }, ctx));
+    expect(next.assets.a_song).toBeUndefined();
+    expect(next.assets.a_clip).toBeDefined();
+    expect(err(apply(next, "removeAsset", { assetId: "a_song" }, ctx))).toBe("not_found");
+  });
+
+  it("a track an op empties is removed; magnetic and deliberately empty tracks stay", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { assetId: "a_song", at: 0, duration: 30 }, ctx));
+    const audio = p.tracks.find((t) => t.kind === "audio")!;
+    p = ok(apply(p, "addTrack", { kind: "overlay" }, ctx));
+    const overlay = p.tracks.at(-1)!.id;
+    p = ok(apply(p, "delete", { itemIds: [audio.items[0].id, "i_1", "i_2"] }, ctx));
+    expect(p.tracks.find((t) => t.id === audio.id)).toBeUndefined();
+    expect(p.tracks.find((t) => t.id === "t_1")?.items).toEqual([]);
+    expect(p.tracks.find((t) => t.id === overlay)).toBeDefined();
+  });
+
   it("importAsset derives readable ids, is idempotent by path, rejects absolute paths", () => {
     let p = createProject({ title: "t", fps: 30, width: 1, height: 1 });
     p = ok(apply(p, "importAsset", { path: "raw/VID_20260627_191257.mp4" }));
@@ -109,7 +130,7 @@ describe("ops", () => {
     expect(items(p, "t_3")).toHaveLength(1);
     p = ok(apply(p, "delete", { itemIds: ["i_1", "i_1"] }, ctx));
     expect(item(p, "i_2").start).toBe(0);
-    expect(items(p, "t_3")).toHaveLength(0);
+    expect(p.tracks.find((t) => t.id === "t_3")).toBeUndefined(); // emptied caption track is removed
   });
 
   it("closeGap shifts later items left to meet the previous one", () => {
@@ -222,7 +243,7 @@ describe("ops", () => {
     const after = ok(r);
     expect(item(after, "i_3")).toMatchObject({ start: 100, duration: 30 });
     expect(item(after, "i_3").anchor).toBeUndefined();
-    expect(after.tracks.find((t) => t.kind === "caption")!.items).toHaveLength(0);
+    expect(after.tracks.find((t) => t.kind === "caption")).toBeUndefined(); // emptied caption track is removed
   });
 
   it("editCaption with empty text hides; markers add and remove", () => {

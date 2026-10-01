@@ -15,6 +15,7 @@ type Entry = Probe & { done?: Partial<Record<Step, string>> };
 
 /** Shape of ingest/transcribe.py's output; bump when it changes so cached transcripts re-run (2: word timestamps). */
 export const TRANSCRIPT_FORMAT = 2;
+const IMAGE_PROBE_FORMAT = 1;
 /** What a step records as done: the content fingerprint, plus the format version for transcripts. */
 export const stamp = (fingerprint: string, step: Step) => (step === "transcript" ? `${fingerprint}#t${TRANSCRIPT_FORMAT}` : fingerprint);
 
@@ -135,6 +136,7 @@ export async function probe(file: string, kind: Asset["kind"]): Promise<Omit<Pro
     ...(kind !== "image" && Number.isFinite(duration) && { duration }),
     ...(v && { width: v.width, height: v.height }),
     ...(kind === "image" && Number(v?.nb_read_frames ?? v?.nb_frames ?? 0) > 1 && { animated: true }),
+    ...(kind === "image" && { imageProbeVersion: IMAGE_PROBE_FORMAT }),
     ...(kind === "video" && den && num && { fps: +(num / den).toFixed(3) }),
     ...(rotation && { rotation }),
     audio: info.streams.some((s: any) => s.codec_type === "audio"),
@@ -285,7 +287,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
       const src = join(dir, a.path);
       const fp = fingerprint(src);
       if (!fp) return fail("probe", a.id, new Error(`${a.path} not found`));
-      if (cache[a.id]?.fingerprint === fp && cache[a.id].path === a.path) {
+      if (cache[a.id]?.fingerprint === fp && cache[a.id].path === a.path && (a.kind !== "image" || cache[a.id].imageProbeVersion === IMAGE_PROBE_FORMAT)) {
         tally.probe.cached++;
         return ready.push(cache[a.id]);
       }

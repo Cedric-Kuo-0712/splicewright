@@ -19,6 +19,24 @@ function project() {
 }
 
 describe("ingest", () => {
+  it("upgrades legacy image probes once without losing completed ingest steps", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swr-image-probe-upgrade-"));
+    init(dir, { title: "legacy animation", fps: 30, width: 32, height: 18 });
+    execFileSync("ffmpeg", ["-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=16x16:r=2:d=1", "-loop", "0", join(dir, "loop.gif")]);
+    expect(run(dir, "importAsset", { path: "loop.gif" })).not.toHaveProperty("error");
+    expect((await ingest(dir, { only: [] })).errors).toBeUndefined();
+    const cached = readAssets(dir);
+    delete cached.a_loop.animated;
+    delete cached.a_loop.imageProbeVersion;
+    writeAtomic(cacheDir(dir, "assets.json"), { ...cached, a_loop: { ...cached.a_loop, done: { proxy: cached.a_loop.fingerprint } } });
+    const upgraded = await ingest(dir, { only: [] });
+    expect(upgraded.errors).toBeUndefined();
+    expect(upgraded.steps.probe.ran).toBe(1);
+    expect(readAssets(dir).a_loop.animated).toBe(true);
+    expect(JSON.parse(readFileSync(cacheDir(dir, "assets.json"), "utf8")).a_loop.done.proxy).toBe(cached.a_loop.fingerprint);
+    expect((await ingest(dir, { only: [] })).steps.probe.cached).toBe(1);
+  });
+
   it.skipIf(!hasMagick)("marks only multi-frame GIF and WebP images animated at probe time", async () => {
     const dir = project();
     for (const [name, args] of [

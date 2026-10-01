@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { animate, apply, badFont, builtinTheme, createProject, itemSpan, textCss, THEME_IDS, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
+import { animate, apply, badFont, builtinTheme, captionWords, createProject, itemSpan, textCss, THEME_IDS, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
 
 const ctx: Ctx = {
   assetDurations: { a_clip: 10, a_song: 60 },
@@ -538,6 +538,16 @@ describe("text themes", () => {
     expect(textCss(ok(apply(p, "setMeta", { theme: null }, ctx)), "title", undefined, "Hi")).toEqual({}); // no theme: today's look
   });
 
+  it("captionWords reads each asset's transcript once however many captions share it", () => {
+    const base = withText();
+    const caption = (id: string, sourceStart: number) => ({ id, start: 0, duration: 30, mode: "anchored" as const, itemId: "i_1", sourceStart, sourceEnd: sourceStart + 1, text: "w" });
+    const p = { ...base, tracks: [...base.tracks, { id: "t_9", kind: "caption" as const, name: "C", highlight: "word" as const, items: [caption("c_1", 0), caption("c_2", 6)] }] } as Project;
+    let reads = 0;
+    const words = captionWords(p, { transcript: () => (reads++, [{ start: 0, end: 7, text: "x", words: [{ start: 0.5, end: 0.9, text: "a" }, { start: 6.2, end: 6.6, text: "b" }] }]) });
+    expect(reads).toBe(1);
+    expect(words).toEqual({ c_1: [{ start: 0.5, end: 0.9, text: "a" }], c_2: [{ start: 6.2, end: 6.6, text: "b" }] });
+  });
+
   it("builds every built-in theme with all four roles and known fonts", () => {
     for (const id of THEME_IDS) {
       const t = builtinTheme(id, 1080)!;
@@ -550,6 +560,11 @@ describe("text themes", () => {
     expect(err(apply(p, "setProps", { itemId: "i_3", patch: { props: { text: "x", textStyle: { font: "Comic Sans" } } } }, ctx))).toBe("invalid");
     expect(err(apply(p, "setProps", { itemId: "i_3", patch: { props: { text: "x", role: "huge" } } }, ctx))).toBe("invalid");
     expect(err(apply(p, "setTrack", { trackId: "t_3", patch: { textStyle: { font: "Comic Sans" } } }, ctx))).toBe("invalid");
+    // the same checks apply when the Text overlay is created, not only when it is patched
+    const insert = (props: Record<string, unknown>) => err(apply(fixture(), "insertItem", { component: "Text", at: 0, duration: 30, props }, ctx));
+    expect(insert({ text: "x", textStyle: { font: "Comic Sans" } })).toBe("invalid");
+    expect(insert({ text: "x", role: "huge" })).toBe("invalid");
+    expect(insert({ text: "x", role: "title", textStyle: { font: "Anton" } })).toBe("ok");
     const mine = { mine: { name: "mine", roles: { title: { font: "Anton" } } } };
     const q = ok(apply(ok(apply(p, "setMeta", { themes: mine }, ctx)), "setMeta", { theme: "mine" }, ctx));
     expect(err(apply(q, "setMeta", { themes: null }, ctx))).toBe("invalid");

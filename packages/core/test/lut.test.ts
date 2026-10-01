@@ -17,6 +17,19 @@ it("rejects 1D, oversized, incomplete, and non-finite LUTs", () => {
   expect(() => parseCube(cube2().replace("0 0 0", "NaN 0 0"))).toThrow("unrecognized");
 });
 
+it("keeps a '#' inside a quoted TITLE and still strips trailing comments", () => {
+  const lut = parseCube(cube2('TITLE "Film #1"\nDOMAIN_MIN 0 0 0 # lower bound'));
+  expect(lut.title).toBe("Film #1");
+  expect(lut.domain.min).toEqual([0, 0, 0]);
+});
+
+it("reads LUT_3D_INPUT_RANGE as the domain of every channel, and not alongside DOMAIN_*", () => {
+  const lut = parseCube(cube2("LUT_3D_INPUT_RANGE 0.1 0.9"));
+  expect(lut.domain.min).toEqual([0.1, 0.1, 0.1]);
+  expect(lut.domain.max).toEqual([0.9, 0.9, 0.9]);
+  expect(() => parseCube(cube2("LUT_3D_INPUT_RANGE 0 1\nDOMAIN_MIN 0 0 0"))).toThrow("duplicate");
+});
+
 it("rejects malformed domain ordering", () => {
   expect(() => parseCube(cube2("DOMAIN_MIN 0.9 0.2 0.3\nDOMAIN_MAX 0.1 0.8 0.7"))).toThrow("DOMAIN_MIN must be below");
 });

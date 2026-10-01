@@ -87,12 +87,16 @@ export type Word = { start: number; end: number; text: string };
 /** Transcript words (source seconds) inside each anchored caption on a `highlight: "word"` track, by caption id. Free captions have none. */
 export function captionWords(p: Project, ctx: Ctx): Record<string, Word[]> {
   const out: Record<string, Word[]> = {};
+  const items = videoItems(p);
+  // ctx.transcript reads a JSON file per call; many captions share one asset.
+  const transcripts = new Map<string, ReturnType<NonNullable<Ctx["transcript"]>>>();
+  const transcript = (id: string) => (transcripts.has(id) ? transcripts.get(id) : transcripts.set(id, ctx.transcript?.(id)).get(id));
   for (const t of p.tracks) {
     if (t.kind !== "caption" || t.highlight !== "word") continue;
     for (const c of t.items) {
       if (c.mode !== "anchored") continue;
-      const asset = videoItems(p).get(c.itemId)?.assetId;
-      const words = !asset ? undefined : ctx.transcript?.(asset)?.flatMap((s) => s.words ?? []).filter((w) => w.start >= c.sourceStart - 0.05 && w.end <= c.sourceEnd + 0.05);
+      const asset = items.get(c.itemId)?.assetId;
+      const words = !asset ? undefined : transcript(asset)?.flatMap((s) => s.words ?? []).filter((w) => w.start >= c.sourceStart - 0.05 && w.end <= c.sourceEnd + 0.05);
       if (words?.length) out[c.id] = words;
     }
   }

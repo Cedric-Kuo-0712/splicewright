@@ -47,7 +47,8 @@ def prepare(engine: str, target: Path, install: bool) -> list[str]:
         else:
             if not shutil.which('pkg-config'):
                 raise ValueError('Manim needs pkg-config and native Cairo/Pango; install these for your OS, then retry --install')
-            subprocess.run(['pkg-config', '--exists', 'cairo', 'pangocairo'], check=True)
+            if subprocess.run(['pkg-config', '--exists', 'cairo', 'pangocairo']).returncode:
+                raise ValueError('Manim needs native Cairo and Pango, and pkg-config cannot find them; install these for your OS, then retry --install')
             env = target / '.venv'
             if env.is_symlink():
                 raise ValueError('refusing symlink .venv')

@@ -261,7 +261,7 @@ export function applyLutPreset(dir: string, itemId: string, presetId: string, ba
     const attribution = Buffer.from(`${JSON.stringify({
       presetId: preset.id,
       name: preset.name,
-      author: preset.author,
+      credit: preset.credit,
       license: preset.license,
       source: preset.source,
       sourcePath: preset.sourcePath,

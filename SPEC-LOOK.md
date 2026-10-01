@@ -11,7 +11,7 @@ is core op/schema → render → UI → MCP/CLI). This file covers how a video *
 | F | Built-in fonts + agent font guide | — | font still test: Latin and CJK render in the font, not the fallback | ✅ done (merged 9a5a746) |
 | L1 | Text styles and themes | F | one `setMeta { theme }` restyles every role-bound text in one undo step | ✅ done (merged 65092a6; user fonts from `raw/` not built) |
 | L0 | Canvas video path (spike) | — | a color-key still matches between Player and render; existing still tests unchanged | ✅ done (UI verified by user) |
-| L2 | Color: grade, curves, LUT | L0 | our LUT within 2/255 of ffmpeg `lut3d` on a test image | 🟡 implemented; UI manual check pending |
+| L2 | Color: grade, curves, LUT | L0 | our LUT within 2/255 of ffmpeg `lut3d` on a test image | 🟡 implemented, including shared built-in presets; UI manual check pending |
 | L3 | Keying: chroma, luma | L2 | keyed green shows the track below; the red subject survives | 🟡 implemented; UI manual check pending |
 | L4 | Beauty: smooth, whiten | L0 (+ `faces` ingest for face-only) | detail drops inside the face box, not outside | planned |
 
@@ -156,11 +156,18 @@ grade?: {
 - LUT: parse the `cube-lut.js` `.cube` shape; 3D only (a 1D `.cube` is an import error), size 2..65,
   `DOMAIN_MIN/MAX` honoured. Upload as a WebGL2 3D float texture with linear filtering (trilinear sampling),
   mix with the input by `strength`. Parsed tables are cached per asset in the bundle, not per frame.
+  LUTs are limited to 65³; the built-in film presets are resampled to 65³ (build-record.json holds the error
+  versus the full-resolution Hald PNG).
+- Built-in creative SDR presets are shared across project UIs and agent tools. Listing presets copies nothing;
+  applying one copies only its `.cube` plus MIT license and source attribution into that project, then assigns it
+  to the selected item's grade in one undo step. The project remains portable without the Splicewright install.
+  Presets have no declared input transfer/gamut; the UI describes them as creative looks with input profile
+  unspecified. Film source PNGs have embedded sRGB profiles, but that is not a LUT color-space contract.
 - Grade, curves and LUT strength are static in L2. Look keyframes and their ◇ controls are deferred.
 - Not included: adjustment layers (a grade on a track that applies to everything below). Apply a look to many
   items with one `batch` of `setProps`.
-- UI: inspector Color section (static sliders with live preview; editable curves; LUT dropdown
-  of `lut` assets + strength). The item gets a small "look" badge on the timeline.
+- UI: inspector Color section (static sliders with live preview; editable curves; grouped built-in presets,
+  project `lut` assets and LUT strength). The item gets a small "look" badge on the timeline.
 - Acceptance: a generated test image (ffmpeg `testsrc2`) through a test `.cube` (e.g. a channel swap and a
   warm grade): our render vs `ffmpeg -vf lut3d=file=…:interp=trilinear`, mean absolute difference ≤ 2/255.
   Strength 0 is identical to no LUT. A curve through (0,0),(1,1) is identical to none.

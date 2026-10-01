@@ -3,8 +3,8 @@ import { join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { find, findFillers, getItem, getRange, getSummary, ops, type OpResult } from "@splicewright/core";
-import { load, loadCtx, redo, run, undo } from "@splicewright/core/node";
+import { find, findFillers, getItem, getRange, getSummary, LUT_PRESETS, ops, type OpResult } from "@splicewright/core";
+import { applyLutPreset, load, loadCtx, redo, run, undo } from "@splicewright/core/node";
 import { ingest, peek, STEPS } from "@splicewright/ingest";
 import { renderStatus, startRender, still, storyboard } from "@splicewright/render/node";
 
@@ -31,13 +31,27 @@ Look before cutting, cheapest first: find (transcripts, labels, notes) → inspe
 
 Assets must be ingested before insertItem can default a duration and before detectBeats or addCaptionsFromTranscript; ingest is cached, so re-running is cheap.
 
-Edit only through splicewright_* tools, never by writing project.json or touching raw/. Put multi-step changes in splicewright_batch: atomic, one revision, one undo step. Pass the baseRevision you last read; on a conflict error the human changed something, so re-read instead of retrying. Undo is shared with the human: only undo your own last step, and pass the revision that step returned as baseRevision so a newer human edit is never the one undone. Frame args also take { near } to snap to edges, markers or beats.
+Edit only through splicewright_* tools, never by writing project.json or directly modifying raw/. Select built-in looks with list_lut_presets and apply_lut_preset; that tool copies only the selected LUT and its notices into the project. Put multi-step changes in splicewright_batch: atomic, one revision, one undo step. Pass the baseRevision you last read; on a conflict error the human changed something, so re-read instead of retrying. Undo is shared with the human: only undo your own last step, and pass the revision that step returned as baseRevision so a newer human edit is never the one undone. Frame args also take { near } to snap to edges, markers or beats.
 
 Check the result with storyboard over the changed range; render with preset draft for a quick full check. Record decisions worth keeping across sessions in AGENTS.md under Notes.`;
 
 export function createServer(dir: string): McpServer {
   const server = new McpServer({ name: "splicewright", version: "0.0.0" }, { instructions: INSTRUCTIONS });
   const baseRevision = z.number().int().optional().describe("Revision this edit is based on; stale writes are rejected. Omit for latest.");
+
+  server.registerTool(
+    "list_lut_presets",
+    { description: "List shipped creative SDR LUT presets. Input profile is unspecified; presets copy into the project only when applied." },
+    async () => json({ presets: LUT_PRESETS }),
+  );
+  server.registerTool(
+    "apply_lut_preset",
+    {
+      description: "Copy one built-in LUT into this project's raw/ and assign it to a video item in one undoable step.",
+      inputSchema: { itemId: z.string().min(1), presetId: z.string().min(1), baseRevision },
+    },
+    async ({ itemId, presetId, baseRevision: revision }) => writeResult(applyLutPreset(dir, itemId, presetId, revision)),
+  );
 
   for (const [name, op] of Object.entries(ops)) {
     // The shape only; core re-validates the full schema (including refinements) on every call.

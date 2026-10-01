@@ -160,6 +160,16 @@ export async function op(name: string, args: unknown) {
   return true;
 }
 
+export async function applyLutPreset(itemId: string, presetId: string) {
+  const baseRevision = app.get().project?.revision;
+  const { status, data } = await call("/api/lut-presets/apply", { itemId, presetId, baseRevision });
+  if (status === 409) await refresh();
+  if (data.error) return app.set({ message: { text: `apply LUT preset: ${data.error.message}`, error: true } }), false;
+  await take(data);
+  app.set({ message: { text: data.summary } });
+  return true;
+}
+
 /** Undo/redo from the revision on screen, so an agent step that landed unseen is never the one undone. */
 export async function history(which: "undo" | "redo", steps = 1) {
   const { status, data } = await call(`/api/${which}`, { steps, baseRevision: app.get().project?.revision });

@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import { apply, createProject, type OpResult } from "./ops.ts";
 import type { Ctx, Project } from "./schema.ts";
 import { validate } from "./validate.ts";
 import { parseCube } from "./lut.ts";
+import { LUT_PRESETS } from "./lut-presets.ts";
 
 // Spec §6. The only Node-dependent part of core.
 
@@ -155,6 +158,171 @@ export function run(dir: string, op: string, args: unknown, baseRevision?: numbe
   push(dir, "undo", { op, args, project: before, summary: r.changes.summary });
   rmSync(cacheDir(dir, "history", "redo"), { recursive: true, force: true });
   return r;
+}
+
+/** Copy one registry-owned built-in LUT into raw/ and assign it in one project history step. */
+export function applyLutPreset(dir: string, itemId: string, presetId: string, baseRevision?: number): OpResult {
+  const before = load(dir);
+  if (baseRevision !== undefined && baseRevision !== before.revision)
+    return { error: { code: "conflict", message: `project is at revision ${before.revision}; preset was based on ${baseRevision}` } };
+  const preset = LUT_PRESETS.find((entry) => entry.id === presetId);
+  if (!preset) return { error: { code: "invalid", message: `unknown LUT preset: ${presetId}` } };
+  const track = before.tracks.find((t) => t.kind === "video" && t.items.some((i) => i.id === itemId));
+  const item = track?.kind === "video" ? track.items.find((i) => i.id === itemId) : undefined;
+  if (!item) return { error: { code: "not_found", message: `video item ${itemId} not found` } };
+
+  const createdFiles: string[] = [];
+  const rollback = () => createdFiles.forEach((file) => rmSync(file, { force: true }));
+  let committedProject: Project | undefined;
+  const libraryRoot = dirname(fileURLToPath(import.meta.url));
+  const source = resolve(libraryRoot, "../assets", preset.file);
+  try {
+    if (!existsSync(source)) return { error: { code: "not_found", message: `built-in LUT file missing: ${presetId}` } };
+    const bundled = readFileSync(source);
+    const sourceBlob = createHash("sha1").update(`blob ${bundled.length}\0`).update(bundled).digest("hex");
+    const bytes = preset.format === "hald-rgb8-to-cube-gzip65" ? gunzipSync(bundled) : bundled;
+    const sha = createHash("sha256").update(bytes).digest("hex");
+    const assetId = `a_lut_${sha}`;
+    const relativePath = `raw/luts/${preset.id}-${sha.slice(0, 16)}.cube`;
+    const destination = resolve(dir, relativePath);
+    if (!destination.startsWith(resolve(dir) + sep)) return { error: { code: "invalid", message: "built-in LUT destination escapes project root" } };
+    if (sourceBlob !== preset.sourceGitBlobSha1 && preset.format === "cube")
+      return { error: { code: "invalid", message: `built-in LUT source checksum mismatch: ${presetId}` } };
+    if (preset.format === "hald-rgb8-to-cube-gzip65") {
+      const recordPath = resolve(libraryRoot, "../assets/luts/film/build-record.json");
+      const record = JSON.parse(readFileSync(recordPath, "utf8")) as { results: { source_git_blob_sha1: string; compressed_sha256: string; cube_sha256: string }[] };
+      const entry = record.results.find((candidate) => candidate.source_git_blob_sha1 === preset.sourceGitBlobSha1);
+      if (!entry || createHash("sha256").update(bundled).digest("hex") !== entry.compressed_sha256 || sha !== entry.cube_sha256)
+        return { error: { code: "invalid", message: `built-in LUT provenance checksum mismatch: ${presetId}` } };
+    }
+    parseCube(bytes.toString("utf8"));
+    const existingAsset = before.assets[assetId];
+    if (existingAsset && (existingAsset.path !== relativePath || existingAsset.kind !== "lut"))
+      return { error: { code: "conflict", message: `LUT asset id collision: ${assetId}` } };
+    const root = realpathSync(dir);
+    const rawDirectory = resolve(dir, "raw"), lutDirectory = dirname(destination);
+    for (const directory of [rawDirectory, lutDirectory]) {
+      if (!existsSync(directory)) mkdirSync(directory);
+      else if (lstatSync(directory).isSymbolicLink() || !realpathSync(directory).startsWith(root + sep))
+        return { error: { code: "invalid", message: "project raw directory escapes project root" } };
+    }
+    const parent = realpathSync(lutDirectory);
+    if (!parent.startsWith(root + sep)) return { error: { code: "invalid", message: "project raw directory escapes project root" } };
+    const targetExists = existsSync(destination);
+    if (targetExists) {
+      if (lstatSync(destination).isSymbolicLink() || !realpathSync(destination).startsWith(root + sep))
+        return { error: { code: "invalid", message: `project LUT destination escapes project root: ${relativePath}` } };
+      if (createHash("sha256").update(readFileSync(destination)).digest("hex") !== sha)
+        return { error: { code: "conflict", message: `project LUT path contains different data: ${relativePath}` } };
+    }
+    if (existingAsset && !targetExists)
+      return { error: { code: "not_found", message: `project LUT asset is missing: ${relativePath}` } };
+
+    if (!targetExists) {
+      const temp = `${destination}.tmp-${process.pid}`;
+      try {
+        writeFileSync(temp, bytes, { flag: "wx" });
+        renameSync(temp, destination);
+        createdFiles.push(destination);
+      } catch (error) {
+        rmSync(temp, { force: true });
+        throw error;
+      }
+    }
+    const licenseSource = resolve(libraryRoot, "../assets", preset.licenseFile);
+    const licenseName = preset.format === "cube" ? "stripedpurple-MIT.txt" : "t3mujinpack-MIT.txt";
+    const licensePath = `raw/luts/licenses/${licenseName}`;
+    const licenseDestination = resolve(dir, licensePath);
+    mkdirSync(dirname(licenseDestination), { recursive: true });
+    const licenseParent = realpathSync(dirname(licenseDestination));
+    if (!licenseParent.startsWith(root + sep)) {
+      rollback();
+      return { error: { code: "invalid", message: "project LUT license directory escapes project root" } };
+    }
+    const licenseBytes = readFileSync(licenseSource);
+    if (existsSync(licenseDestination)) {
+      if (lstatSync(licenseDestination).isSymbolicLink() || !realpathSync(licenseDestination).startsWith(root + sep) || !readFileSync(licenseDestination).equals(licenseBytes)) {
+        rollback();
+        return { error: { code: "conflict", message: `project LUT license file is different: ${licensePath}` } };
+      }
+    } else {
+      const temp = `${licenseDestination}.tmp-${process.pid}`;
+      try {
+        writeFileSync(temp, licenseBytes, { flag: "wx" });
+        renameSync(temp, licenseDestination);
+        createdFiles.push(licenseDestination);
+      } catch (error) {
+        rmSync(temp, { force: true });
+        throw error;
+      }
+    }
+    const attributionPath = `raw/luts/licenses/${preset.id}-attribution.json`;
+    const attributionDestination = resolve(dir, attributionPath);
+    const attribution = Buffer.from(`${JSON.stringify({
+      presetId: preset.id,
+      name: preset.name,
+      author: preset.author,
+      license: preset.license,
+      source: preset.source,
+      sourcePath: preset.sourcePath,
+      sourceCommit: preset.commit,
+      sourceGitBlobSha1: preset.sourceGitBlobSha1,
+      bundledCubeSha256: sha,
+      inputProfile: preset.inputProfile,
+      sourceImageProfile: "sourceImageProfile" in preset ? preset.sourceImageProfile : undefined,
+      format: preset.format,
+      licenseFile: licenseName,
+    }, null, 2)}\n`);
+    if (existsSync(attributionDestination)) {
+      if (lstatSync(attributionDestination).isSymbolicLink() || !realpathSync(attributionDestination).startsWith(root + sep) || !readFileSync(attributionDestination).equals(attribution)) {
+        rollback();
+        return { error: { code: "conflict", message: `project LUT attribution file is different: ${attributionPath}` } };
+      }
+    } else {
+      const temp = `${attributionDestination}.tmp-${process.pid}`;
+      try {
+        writeFileSync(temp, attribution, { flag: "wx" });
+        renameSync(temp, attributionDestination);
+        createdFiles.push(attributionDestination);
+      } catch (error) {
+        rmSync(temp, { force: true });
+        throw error;
+      }
+    }
+    const currentGradeLut = item.grade?.lut;
+    if (existingAsset && currentGradeLut?.assetId === assetId && (currentGradeLut.strength ?? 1) === 1)
+      return { project: before, changes: { summary: `LUT preset ${preset.name} is already applied to ${itemId}` } };
+    const project: Project = structuredClone(before);
+    if (!existingAsset) project.assets[assetId] = { id: assetId, path: relativePath, kind: "lut" };
+    const edited = project.tracks.find((t) => t.kind === "video" && t.items.some((i) => i.id === itemId));
+    const editedItem = edited?.kind === "video" ? edited.items.find((i) => i.id === itemId) : undefined;
+    if (!editedItem) {
+      rollback();
+      return { error: { code: "not_found", message: `video item ${itemId} not found` } };
+    }
+    editedItem.grade = { ...editedItem.grade, lut: { assetId, strength: 1 } };
+    project.revision = before.revision + 1;
+    const ctx = loadCtx(dir);
+    const errors = validate(project, before, ctx);
+    if (errors.length) {
+      rollback();
+      return { error: { code: "invalid", message: errors.join("; ") } };
+    }
+    const committed = commit(dir, project, before.revision, ctx);
+    if ("error" in committed) {
+      rollback();
+      return committed;
+    }
+    committedProject = project;
+    const summary = `applied LUT preset ${preset.name} to ${itemId}`;
+    push(dir, "undo", { op: "applyLutPreset", args: { itemId, presetId }, project: before, summary });
+    rmSync(cacheDir(dir, "history", "redo"), { recursive: true, force: true });
+    return { project, changes: { summary } };
+  } catch (error) {
+    if (committedProject) return { project: committedProject, changes: { summary: `applied LUT preset ${preset.name} to ${itemId}; undo history failed: ${error instanceof Error ? error.message : String(error)}` } };
+    rollback();
+    return { error: { code: "invalid", message: error instanceof Error ? error.message : String(error) } };
+  }
 }
 
 /** Undo the latest step. With `baseRevision`, rejected unless the project is still at it, so a writer

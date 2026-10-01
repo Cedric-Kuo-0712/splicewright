@@ -395,7 +395,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
     analysis: (e) => e.kind === "video",
     thumbs: (e) => e.kind === "video",
     waveform: (e) => e.kind !== "image" && !!e.audio,
-    transcript: (e) => e.kind === "video" && !!e.audio,
+    transcript: (e) => (e.kind === "video" || e.kind === "audio") && !!e.audio,
     beats: (e) => e.kind === "audio",
     loudness: (e) => e.kind !== "image" && !!e.audio,
   };
@@ -502,3 +502,4 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
 }
 
 export { audioFxPath, ensureAudioFx };
+export { listMaterials, prepareMaterials, recordMaterialReview, materialPreview, type ListedMaterial, type MaterialReview, type PrepareStep } from "./materials.ts";

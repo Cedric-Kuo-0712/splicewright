@@ -1,4 +1,4 @@
-import {RendererResult, Vector2, type Plugin, type Project, type Renderer} from '@motion-canvas/core';
+import {RendererResult, RendererState, Vector2, type Plugin, type Project, type Renderer} from '@motion-canvas/core';
 
 export function agentClient(): Plugin {
   let project: Project | undefined, renderer: Renderer | undefined, running: string | undefined;
@@ -16,7 +16,7 @@ export function agentClient(): Plugin {
           state:result===RendererResult.Success?'complete':result===RendererResult.Aborted?'aborted':'failed'});
         running=undefined;
       });
-      import.meta.hot?.on('splicewright:request', async (request: {id:string;action:string;fps:number;width:number;height:number})=>{
+      import.meta.hot?.on('splicewright:request', async (request: {id:string;action:string;expires:number;fps:number;width:number;height:number})=>{
         if (!project || !renderer) return;
         if (request.action==='status') {
           import.meta.hot?.send('splicewright:response',{id:request.id,ready:true,running:running??null});
@@ -28,6 +28,17 @@ export function agentClient(): Plugin {
         }
         if (running) {
           import.meta.hot?.send('splicewright:response',{id:request.id,error:'render already running'});
+          return;
+        }
+        // The bridge stopped tracking this request at `expires`; a frozen tab must not start it afterwards.
+        if (Date.now()>request.expires) {
+          import.meta.hot?.send('splicewright:response',{id:request.id,error:'request expired'});
+          return;
+        }
+        // render() silently returns when the renderer is busy (e.g. a render started from the editor UI),
+        // and onFinished would then credit that other render to this job.
+        if (renderer.onStateChanged.current!==RendererState.Initial) {
+          import.meta.hot?.send('splicewright:response',{id:request.id,error:'the Motion Canvas renderer is busy'});
           return;
         }
         running=request.id;

@@ -44,7 +44,9 @@ acceptance or running gets a 409 carrying that job's ID. If the renderer does no
 answer within 2 s the response is a 503 carrying the job ID; the job file already
 exists as `awaiting-acceptance`, so read `.agent-render/<id>.json` instead of
 sending the render again. States: `awaiting-acceptance`, `running`, then `complete`,
-`failed`, `aborted`, or `rejected`/`unconfirmed` if the browser never took it. Render returns an accepted
+`failed`, `aborted`, or `rejected`/`unconfirmed` if the browser never took it
+(`rejected` also covers a renderer already busy with a render started in the editor UI, and a request
+older than 30 s). Render returns an accepted
 job ID, **not completion**. The bridge records completion in `.agent-render/<id>.json`
 when the native renderer finishes; result `complete`, `failed` or `aborted`.
 Do not poll for completion. Follow the existing runner/notification policy or

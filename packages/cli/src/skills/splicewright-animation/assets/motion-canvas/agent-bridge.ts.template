@@ -29,7 +29,11 @@ export function agentBridge(): Plugin {
       const client=[...renderers].reverse().find(c=>server.ws.clients.has(c));
       if (!client) return resolve({error:'no connected renderer; open the project in a browser'});
       const id=randomUUID();
-      if (action==='render') {active={id,client,accepted:false,until:Date.now()+30000};record(id,{state:'awaiting-acceptance'});}
+      if (action==='render') {
+        const until=Date.now()+30000;
+        active={id,client,accepted:false,until};record(id,{state:'awaiting-acceptance'});
+        params={...params,expires:until}; // the tab refuses it after this, matching busy() below
+      }
       const timer=setTimeout(()=>{
         pending.delete(id);
         resolve({id,error:action==='render'?`the renderer did not answer in time; the render may still start, see .agent-render/${id}.json`:'the renderer did not answer in time'});

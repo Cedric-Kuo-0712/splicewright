@@ -158,3 +158,33 @@ it('agent render bridge runs one render at a time across tabs, and frees it on d
   expect(JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',probe],{cwd,encoding:'utf8'})))
     .toEqual({first:[202,'running'],second:[409,true,0],rejected:[503,'rejected'],afterRejected:[202,'running'],afterClosed:[202,'failed','running']});
 });
+
+it('agent render client refuses a request while the renderer is busy or the request expired, and never credits another render to it', {timeout:20000}, () => {
+  const cwd=mkdtempSync(join(tmpdir(),'swr-render-client-'));
+  const template=readFileSync(join(import.meta.dirname,'../src/skills/splicewright-animation/assets/motion-canvas/src/agent-client.ts.template'),'utf8');
+  writeFileSync(join(cwd,'client.ts'),template.replace(/^import .*@motion-canvas\/core';$/m,"import {RendererResult,RendererState,Vector2} from './core.ts';").replaceAll('import.meta.hot','globalThis.hot'));
+  writeFileSync(join(cwd,'core.ts'),'export const RendererResult={Success:0,Error:1,Aborted:2}; export const RendererState={Initial:0,Working:1,Aborting:2}; export class Vector2{x=0;y=0;constructor(x:number,y:number){this.x=x;this.y=y;}}');
+  const probe = `
+    import {agentClient} from './client.ts';
+    const sent=[], handlers={}; let finished, rendered=0;
+    globalThis.hot={send:(event,data)=>sent.push([event,data]),on:(event,fn)=>handlers[event]=fn};
+    const plugin=agentClient();
+    plugin.project({name:'p',meta:{getFullRenderingSettings:()=>({})}});
+    const renderer={state:0,onFinished:{subscribe:fn=>finished=fn},onStateChanged:{get current(){return renderer.state}},render:async()=>{rendered++}};
+    plugin.renderer(renderer);
+    const ask=async(id,extra={})=>{
+      await handlers['splicewright:request']({id,action:'render',expires:Date.now()+1000,fps:30,width:1280,height:720,...extra});
+      return sent.filter(([event,data])=>event==='splicewright:response'&&data.id===id).map(([,data])=>data.error??(data.accepted?'accepted':'?'));
+    };
+    const out={};
+    renderer.state=1; // a render started from the editor UI
+    out.busy=await ask('a'); finished(0); // ...and finishes
+    out.busyDone=sent.some(([event])=>event==='splicewright:done'); out.busyRendered=rendered;
+    renderer.state=0;
+    out.expired=await ask('b',{expires:Date.now()-1}); out.expiredRendered=rendered;
+    out.ok=await ask('c'); out.okRendered=rendered;
+    console.log(JSON.stringify(out));
+  `;
+  expect(JSON.parse(execFileSync(process.execPath,['--input-type=module','-e',probe],{cwd,encoding:'utf8'})))
+    .toEqual({busy:['the Motion Canvas renderer is busy'],busyDone:false,busyRendered:0,expired:['request expired'],expiredRendered:0,ok:['accepted'],okRendered:1});
+});

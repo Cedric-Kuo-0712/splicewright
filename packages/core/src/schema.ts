@@ -152,8 +152,14 @@ export const Asset = z.object({
 export const AudioFx = z.object({
   eq: z.array(z.object({ hz: z.number().min(20).max(20_000), gain: z.number().min(-24).max(24), q: z.number().positive().max(10).optional() })).min(1).max(16).optional(),
   pan: z.number().min(-1).max(1).optional(),
-  denoise: z.object({ kind: z.enum(["rnnoise", "fft"]), mix: z.number().min(0).max(1).optional() }).optional(),
-}).strict().refine((fx) => !!fx.eq?.length || fx.pan !== undefined || !!fx.denoise, { message: "audioFx needs at least one effect" });
+  denoise: z.object({ kind: z.enum(["rnnoise", "fft"]), mix: z.number().min(0).max(1).optional(), model: z.string().min(1).optional() }).strict().optional(),
+}).strict()
+  .refine((fx) => !!fx.eq?.length || fx.pan !== undefined || !!fx.denoise, { message: "audioFx needs at least one effect" })
+  .refine((fx) => !fx.denoise?.model || fx.denoise.kind === "rnnoise", { message: "denoise.model is only valid for RNNoise" })
+  .refine((fx) => {
+    const model = fx.denoise?.model;
+    return !model || (model.startsWith("raw/") && /\.rnnn$/i.test(model) && !model.includes("\\") && !model.split("/").some((part) => part === "." || part === ".."));
+  }, { message: "RNNoise model must be a project-relative .rnnn file under raw/" });
 export type AudioFx = z.infer<typeof AudioFx>;
 
 export const VideoItem = z.object({

@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { audioFxCachePath, commit, historyList, init, load, loadCtx, rawPath, redo, run, undo, writeAtomic } from "../src/persistence.ts";
+import { audioFxCachePath, audioFxModelFile, audioFxModelFingerprint, commit, historyList, init, load, loadCtx, rawPath, redo, run, undo, writeAtomic } from "../src/persistence.ts";
 
 function project() {
   const dir = mkdtempSync(join(tmpdir(), "swr-"));
@@ -23,6 +23,26 @@ it("validates LUT files inside the project and refuses symlinks that escape it",
   expect(loadCtx(dir).validateLut).toBeDefined();
   expect(() => loadCtx(dir).validateLut!("raw/ok.cube")).not.toThrow();
   expect(() => loadCtx(dir).validateLut!("raw/escape.cube")).toThrow("escapes project directory");
+});
+
+it("validates custom RNNoise models under raw and includes their content in the bake cache key", () => {
+  const dir = project(), outside = mkdtempSync(join(tmpdir(), "swr-model-outside-"));
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  writeFileSync(join(dir, "raw", "clip.wav"), "source bytes");
+  writeFileSync(join(dir, "raw", "voice.rnnn"), "model version one");
+  writeFileSync(join(outside, "escape.rnnn"), "outside model");
+  symlinkSync(join(outside, "escape.rnnn"), join(dir, "raw", "escape.rnnn"));
+  const fx = { denoise: { kind: "rnnoise" as const, model: "raw/voice.rnnn" } };
+  const first = audioFxCachePath(dir, "a_clip", "raw/clip.wav", fx);
+  const fingerprint = audioFxModelFingerprint(dir, fx.denoise.model);
+  expect(audioFxModelFile(dir, fx.denoise.model)).toBe(realpathSync(join(dir, "raw", "voice.rnnn")));
+  writeFileSync(join(dir, "raw", "voice.rnnn"), "model version two");
+  expect(audioFxModelFingerprint(dir, fx.denoise.model)).not.toBe(fingerprint);
+  expect(audioFxCachePath(dir, "a_clip", "raw/clip.wav", fx)).not.toBe(first);
+  expect(() => audioFxModelFile(dir, "raw/../outside.rnnn")).toThrow(/project-relative/);
+  expect(() => audioFxModelFile(dir, "raw/escape.rnnn")).toThrow(/escapes raw/);
+  expect(() => audioFxModelFile(dir, "raw/missing.rnnn")).toThrow(/model is missing/);
+  expect(() => audioFxModelFile(dir, "raw/wrong.bin")).toThrow(/project-relative/);
 });
 
 it("run commits atomically and reads probe + transcript caches", () => {

@@ -161,7 +161,9 @@ describe("ops", () => {
     expect(err(apply(p, "setTrack", { trackId: "t_1", patch: { style: "x" } }, ctx))).toBe("invalid");
     const fx = ok(apply(p, "setProps", { itemId: "i_1", patch: { audioFx: { eq: [{ hz: 1000, gain: -12, q: 1 }], pan: -1, denoise: { kind: "fft", mix: 0.5 } } } }, ctx));
     expect(item(fx, "i_1").audioFx).toEqual({ eq: [{ hz: 1000, gain: -12, q: 1 }], pan: -1, denoise: { kind: "fft", mix: 0.5 } });
-    for (const audioFx of [{}, { pan: 2 }, { eq: [] }, { eq: [{ hz: 0, gain: 0 }] }, { denoise: { kind: "fft", mix: 2 } }, { mystery: true }])
+    const customRnnoise = ok(apply(p, "setProps", { itemId: "i_1", patch: { audioFx: { denoise: { kind: "rnnoise", model: "raw/voice.rnnn" } } } }, ctx));
+    expect(item(customRnnoise, "i_1").audioFx).toEqual({ denoise: { kind: "rnnoise", model: "raw/voice.rnnn" } });
+    for (const audioFx of [{}, { pan: 2 }, { eq: [] }, { eq: [{ hz: 0, gain: 0 }] }, { denoise: { kind: "fft", mix: 2 } }, { denoise: { kind: "fft", model: "raw/voice.rnnn" } }, { denoise: { kind: "rnnoise", model: "../voice.rnnn" } }, { denoise: { kind: "rnnoise", model: "raw/voice.txt" } }, { mystery: true }])
       expect(err(apply(p, "setProps", { itemId: "i_1", patch: { audioFx } }, ctx))).toBe("invalid");
     let still = ok(apply(fixture(), "importAsset", { path: "raw/still.png" }, ctx));
     still = ok(apply(still, "insertItem", { assetId: "a_still", at: 150, duration: 30 }, ctx));

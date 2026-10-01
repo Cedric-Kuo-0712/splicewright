@@ -51,11 +51,12 @@ function AudioFxFields({ item }: { item: AudioItem | VideoItem }) {
       <div className="buttons"><button type="button" disabled={(fx.eq?.length ?? 0) >= 16} onClick={() => change({ eq: [...(fx.eq ?? []), { hz: 1000, gain: -3, q: 1 }] })}>Add EQ band</button></div>
       <label className="field">
         <span>denoise</span>
-        <select value={fx.denoise?.kind ?? ""} onChange={(e) => change({ denoise: e.target.value ? { kind: e.target.value as "fft" | "rnnoise", mix: fx.denoise?.mix ?? 1 } : undefined })}>
+        <select value={fx.denoise?.kind ?? ""} onChange={(e) => change({ denoise: e.target.value ? { kind: e.target.value as "fft" | "rnnoise", mix: fx.denoise?.mix ?? 1, ...(fx.denoise?.model ? { model: fx.denoise.model } : {}) } : undefined })}>
           <option value="">off</option><option value="fft">FFT</option><option value="rnnoise">RNNoise</option>
         </select>
       </label>
       {fx.denoise && <Field label="denoise mix (0–1)" type="number" value={fx.denoise.mix ?? 1} onCommit={(v) => change({ denoise: { ...fx.denoise!, mix: v === null ? 1 : Number(v) } })} />}
+      {fx.denoise?.kind === "rnnoise" && <Field label="RNNoise model (raw/*.rnnn)" value={fx.denoise.model} onCommit={(v) => change({ denoise: { ...fx.denoise!, model: v === null ? undefined : String(v) } })} />}
       {(fx.eq?.length || fx.pan !== undefined || fx.denoise) && <button type="button" onClick={() => setFx(null)}>Reset audio processing</button>}
       {processing && <p className="dim" role="status">processing audio…</p>}
       {error && <p className="error" role="alert">audio processing failed: {error}</p>}

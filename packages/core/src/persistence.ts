@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
 import { apply, createProject, type OpResult } from "./ops.ts";
@@ -17,6 +17,32 @@ interface HistoryEntry { op: string; args: unknown; project: Project; summary?: 
 
 export const cacheDir = (dir: string, ...parts: string[]) => join(dir, ".splicewright", ...parts);
 
+function isInside(root: string, file: string): boolean {
+  const rel = relative(root, file);
+  return !!rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+/** Resolve a user-supplied RNNoise model without allowing traversal or symlinks out of raw/. */
+export function audioFxModelFile(dir: string, modelPath: string): string {
+  if (isAbsolute(modelPath) || modelPath.includes("\\") || normalize(modelPath) !== modelPath || !modelPath.startsWith(`raw${sep}`) || extname(modelPath).toLowerCase() !== ".rnnn")
+    throw new Error("RNNoise model must be a project-relative .rnnn file under raw/");
+  try {
+    const root = realpathSync(dir);
+    const raw = realpathSync(join(root, "raw"));
+    const file = realpathSync(resolve(root, modelPath));
+    if (!isInside(root, raw) || !isInside(raw, file) || !statSync(file).isFile()) throw new Error("RNNoise model path escapes raw/ or is not a file");
+    return file;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`RNNoise model is missing: ${modelPath}`);
+    throw error;
+  }
+}
+
+/** Full content hash so replacing a model at the same path invalidates its derived audio. */
+export function audioFxModelFingerprint(dir: string, modelPath: string): string {
+  return createHash("sha256").update(readFileSync(audioFxModelFile(dir, modelPath))).digest("hex");
+}
+
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${JSON.stringify(k)}:${stableJson(v)}`).join(",")}}`;
@@ -27,7 +53,7 @@ function stableJson(value: unknown): string {
 export function audioFxCachePath(dir: string, assetId: string, sourcePath: string, audioFx: AudioFx, modelStamp?: string): string {
   const source = fingerprint(join(dir, sourcePath));
   if (!source) throw new Error(`audioFx source missing for ${assetId}: ${sourcePath}`);
-  const model = modelStamp ?? (audioFx.denoise?.kind === "rnnoise" ? "model-missing" : "");
+  const model = modelStamp ?? (audioFx.denoise?.kind === "rnnoise" ? audioFxModelFingerprint(dir, audioFx.denoise.model ?? "") : "");
   const hash = createHash("sha256").update(`${source}\n${model}\n${stableJson(audioFx)}`).digest("hex").slice(0, 20);
   return `.splicewright/audio/${assetId.replace(/[^A-Za-z0-9._-]/g, "_")}-${hash}.m4a`;
 }

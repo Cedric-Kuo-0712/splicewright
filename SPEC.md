@@ -637,7 +637,7 @@ Same rules as §13 and SPEC-LOOK.md §1: preview and render run one program, so 
 composition or bakes a file that both sides play.
 
 - **A1 Audio processing (EQ, pan, noise reduction).** `audioFx?: { eq?: { hz: number; gain: number; q?: number }[];
-  pan?: number /* -1..1 */; denoise?: { kind: "rnnoise" | "fft"; mix?: number } }` on audio and video items.
+  pan?: number /* -1..1 */; denoise?: { kind: "rnnoise" | "fft"; mix?: number; model?: `raw/<name>.rnnn` } }` on audio and video items.
   Remotion's `<Audio>` has no EQ or pan, so this is **baked**: ffmpeg `equalizer`, `pan`, `arnndn` (RNNoise;
   ship one model file from `richardpl/arnndn-models`) / `afftdn` (all present in ffmpeg 9.0.1 here) render the whole
   source to `.splicewright/audio/<assetId>-<hash of audioFx>.m4a`, and the item plays that file in both preview
@@ -645,7 +645,7 @@ composition or bakes a file that both sides play.
   missing. Loudness (M9) is measured on the baked file. Later: DeepFilterNet (MIT/Apache) as a better `denoise`
   kind through its `deep-filter` CLI (48 kHz WAV only). Acceptance: a 1 kHz tone + pink noise: `eq` −12 dB at 1 kHz
   lowers the tone by 12 ± 1 dB; `pan: -1` leaves the right channel silent; `denoise` lowers noise-only RMS.
-  **As built (partial, 2026-10-01):** EQ, pan, FFT denoise, baked preview/render selection, per-item baked loudness, and render preflight are implemented and tested. RNNoise processing is wired but requires a redistributable model; the referenced upstream model repository has no model license statement, so the model is not bundled and RNNoise reports a missing-model error.
+  **As built (partial, 2026-10-01):** EQ, pan, FFT denoise, baked preview/render selection, per-item baked loudness, render preflight, and user-supplied RNNoise models are implemented. A custom RNNoise model must be a `.rnnn` file under `raw/`; its content hash invalidates the bake cache. No model is bundled or downloaded. Built-in model distribution remains deferred because the referenced upstream model repository has no model license statement.
 - **E1 Bezier ease.** Keys gain `ease: [x1, y1, x2, y2]` besides `"linear" | "ease"`. Core evaluates it with its own
   cubic-bezier solver (Newton + bisection, ~20 lines), since core does not depend on Remotion. UI: presets
   (ease-in, ease-out, ease-in-out, overshoot) on a key's context menu. Acceptance: the solver matches CSS

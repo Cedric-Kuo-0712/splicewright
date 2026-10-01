@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -60,6 +60,33 @@ it("FFT denoise reduces noise-only RMS and writes no partial artifact after fail
   expect(rmsDb(join(dir, path))).toBeLessThan(rmsDb(join(dir, asset.path)) - 3);
   const dry = await ensureAudioFx(dir, asset.id, asset.path, { denoise: { kind: "fft", mix: 0 } });
   expect(Math.abs(rmsDb(join(dir, dry)) - rmsDb(join(dir, asset.path)))).toBeLessThan(0.5);
-  await expect(ensureAudioFx(dir, asset.id, asset.path, { denoise: { kind: "rnnoise" } })).rejects.toThrow(/RNNoise model is missing/);
-  expect(existsSync(join(dir, audioFxPath(dir, asset.id, asset.path, { denoise: { kind: "rnnoise" } })))).toBe(false);
+  const missing = { denoise: { kind: "rnnoise" as const, model: "raw/missing.rnnn" } };
+  const audioDir = join(dir, ".splicewright", "audio");
+  const before = readdirSync(audioDir);
+  await expect(ensureAudioFx(dir, asset.id, asset.path, missing)).rejects.toThrow(/RNNoise model is missing/);
+  expect(readdirSync(audioDir)).toEqual(before);
+});
+
+it("rejects an incompatible custom RNNoise model without falling back to FFT", async () => {
+  const { dir, asset } = await fixture("anoisesrc=color=pink:sample_rate=48000:duration=1:amplitude=0.1:seed=42");
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  writeFileSync(join(dir, "raw", "invalid.rnnn"), "not an RNNoise model");
+  const fx = { denoise: { kind: "rnnoise" as const, model: "raw/invalid.rnnn" } };
+  await expect(ensureAudioFx(dir, asset.id, asset.path, fx)).rejects.toThrow(/incompatible with ffmpeg arnndn/);
+  expect(existsSync(join(dir, audioFxPath(dir, asset.id, asset.path, fx)))).toBe(false);
+});
+
+const upstreamModel = process.env.SWR_RNNOISE_MODEL;
+it.skipIf(!upstreamModel)("bakes a user-supplied RNNoise model through ffmpeg arnndn", async () => {
+  let { dir, asset } = await fixture("anoisesrc=color=pink:sample_rate=48000:duration=1:amplitude=0.1:seed=42");
+  const specialDir = `${dir}-model:a,b'c`;
+  renameSync(dir, specialDir);
+  dirs[dirs.indexOf(dir)] = specialDir;
+  dir = specialDir;
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  const { copyFileSync } = await import("node:fs");
+  copyFileSync(upstreamModel!, join(dir, "raw", "user.rnnn"));
+  const path = await ensureAudioFx(dir, asset.id, asset.path, { denoise: { kind: "rnnoise", model: "raw/user.rnnn" } });
+  expect(existsSync(join(dir, path))).toBe(true);
+  expect(existsSync(join(tmpdir(), "splicewright-audiofx-models"))).toBe(true);
 });

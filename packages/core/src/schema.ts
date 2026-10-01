@@ -124,8 +124,16 @@ export type Animatable = (typeof ANIMATABLE)[number];
  * Per prop, keys sorted by `t` in source seconds, so split, trim, slip and speed keep them on the
  * same content. `ease` shapes the segment leaving a key (default linear); values hold past the ends.
  */
+/** `"linear"`, `"ease"` (smoothstep) or a CSS-style cubic-bezier `[x1, y1, x2, y2]`; y may leave [0, 1] to overshoot. */
+export const Ease = z.union([
+  z.enum(["linear", "ease"]),
+  z.tuple([z.number().min(0).max(1), z.number(), z.number().min(0).max(1), z.number()]),
+]);
+
+export type Ease = z.infer<typeof Ease>;
+
 export const Keyframes = z
-  .partialRecord(z.enum(ANIMATABLE), z.array(z.object({ t: Seconds.min(0), v: z.number(), ease: z.enum(["linear", "ease"]).optional() })).min(1))
+  .partialRecord(z.enum(ANIMATABLE), z.array(z.object({ t: Seconds.min(0), v: z.number(), ease: Ease.optional() })).min(1))
   .superRefine((kf, ctx) => {
     for (const [k, keys] of Object.entries(kf) as [Animatable, { t: number; v: number }[]][])
       keys.forEach((key, i) => {

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ANIMATABLE, FontRole, MASK_PROPS, TextStyle, Theme, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type OverlayItem, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
+import { ANIMATABLE, Ease, FontRole, MASK_PROPS, TextStyle, Theme, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type OverlayItem, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
 import { keyAt, withKey } from "./keyframes.ts";
 import { beatFrames, snap, snapPoints, snapSpan } from "./timing.ts";
 import { badFont, isTheme, THEME_IDS } from "./themes.ts";
@@ -500,7 +500,7 @@ export const ops: Record<string, OpDef<any>> = {
 
   setKeyframe: def(
     `Key a video item's ${ANIMATABLE.join(", ")} (an audio item's volume only, for manual ducking) to \`value\` at timeline frame \`at\` (inside the item), replacing a key on that frame; value null removes it. Once a prop has keys they override its plain value; removing the last key restores it. Mask props (maskX, maskY, maskW, maskH, maskFeather) need a mask set first. Keys ride with the source, so split, trim, slip and speed keep them on the same content.`,
-    z.object({ itemId: Id, prop: z.enum(ANIMATABLE), at: z.number().int(), value: z.number().nullable(), ease: z.enum(["linear", "ease"]).optional() }),
+    z.object({ itemId: Id, prop: z.enum(ANIMATABLE), at: z.number().int(), value: z.number().nullable(), ease: Ease.optional() }),
     (p, a) => {
       const { track: t, item } = locate(p, a.itemId);
       const v = item as VideoItem;

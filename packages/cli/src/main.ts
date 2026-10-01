@@ -15,7 +15,7 @@ import { migrateVideoCut } from "./migrate.ts";
 const USAGE = `usage: splicewright <command>
   init [--title T] [--fps 30] [--size 1920x1080 | --preset 16:9|9:16|1:1|4:5] [--refresh-agents]
   import <paths...> [--no-ingest]
-  ingest [--only proxy,reverse,analysis,thumbs,waveform,transcript,beats] [--jobs N]
+  ingest [--only proxy,reverse,analysis,thumbs,waveform,transcript,beats,loudness,audioFx] [--jobs N]
   status
   lint
   op <opName> '<json args>' [--base <revision>]

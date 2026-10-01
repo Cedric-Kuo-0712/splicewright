@@ -56,8 +56,8 @@ needs the canvas path in L0.
   Sans TC against plain monospace; with the loader removed it fails (0 pixels differ), so it guards the loader.
 - Only Noto Sans TC and Noto Serif TC have CJK glyphs. TikTok Sans has none.
 - Adding a font: an OFL font with a Fontsource package → one import line + one `FONTS` entry.
-- Not built: user fonts from `raw/`. Planned in L1 as asset kind `font`, loaded with the `FontFace` API +
-  `delayRender`/`continueRender` (Remotion's documented path for local fonts).
+- User fonts from `raw/` are implemented as asset kind `font`, loaded with the `FontFace` API +
+  `delayRender`/`continueRender`; source fingerprints invalidate the loaded face when its file changes.
 
 ## 3. L1 — Text styles and themes
 

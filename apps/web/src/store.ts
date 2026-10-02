@@ -6,7 +6,7 @@ import type { Props as RenderProps, Ranges } from "@splicewright/render";
 // Two stores (§7.3): project state changes per op; the frame ticks at playback rate and only the
 // playhead and timecode subscribe to it.
 
-function store<T>(initial: T) {
+function store<T>(initial: T, display: (state: T) => T = (state) => state) {
   let value = initial;
   const subs = new Set<() => void>();
   return {
@@ -18,7 +18,7 @@ function store<T>(initial: T) {
     use<S>(select: (v: T) => S): S {
       return useSyncExternalStore(
         (f) => (subs.add(f), () => subs.delete(f)),
-        () => select(value),
+        () => select(display(value)),
       );
     },
   };
@@ -26,6 +26,10 @@ function store<T>(initial: T) {
 
 export interface State {
   project: Project | null;
+  review: { id: string; label: string; summary: string; beforeRevision: number; afterRevision: number; status: "pending" | "kept" | "dismissed" | "reverted" } | null;
+  reviewProject: Project | null;
+  reviewMedia: (Omit<Snapshot, "project" | "lutVersions"> & { luts: State["luts"] }) | null;
+  reviewView: "before" | "after" | null;
   /** The server's folder has no project.json yet: show the New project form. */
   empty: boolean;
   /** Projects the server will switch to (~/.splicewright/recent.json), minus the open one. */
@@ -114,9 +118,9 @@ const hash = new URLSearchParams(location.hash.slice(1));
 const num = (v: string | null) => (v === null || v === "" || isNaN(Number(v)) ? null : Number(v));
 
 export const app = store<State>({
-  project: null, empty: false, recent: [], duck: {}, words: {}, proxies: [], reverseProxies: [], durations: {}, frameRates: {}, sizes: {}, animated: {}, fontVersions: {}, loudness: {}, audioFx: {}, reverseAudioFx: {}, audioFxProcessing: [], audioFxErrors: {}, audioFxLoudness: {}, luts: {}, useProxies: true, selection: [], sampling: null, gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
+  project: null, review: null, reviewProject: null, reviewMedia: null, reviewView: null, empty: false, recent: [], duck: {}, words: {}, proxies: [], reverseProxies: [], durations: {}, frameRates: {}, sizes: {}, animated: {}, fontVersions: {}, loudness: {}, audioFx: {}, reverseAudioFx: {}, audioFxProcessing: [], audioFxErrors: {}, audioFxLoudness: {}, luts: {}, useProxies: true, selection: [], sampling: null, gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
   io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, cropping: false, masking: false, ingesting: {}, uploads: [], reveal: null, exports: [], audioMeter: { status: "unmeasured", peakDb: null, clipping: false },
-});
+}, (state) => state.reviewMedia ? { ...state, ...state.reviewMedia } : state);
 export const playhead = store({ frame: 0 });
 
 type Snapshot = Pick<State, "project" | "duck" | "words" | "proxies" | "reverseProxies" | "durations" | "frameRates" | "sizes" | "animated" | "fontVersions" | "loudness" | "audioFx" | "reverseAudioFx" | "audioFxProcessing" | "audioFxErrors" | "audioFxLoudness"> & { lutVersions: Record<string, string> };
@@ -207,6 +211,64 @@ export async function refresh() {
   const { data } = await call("/api/project");
   app.set({ empty: !!data.empty, recent: data.recent ?? [] });
   if (!data.empty) await Promise.all([take(data), refreshExports()]);
+  if (!data.empty) await refreshEditReview();
+}
+
+let reviewRequest = 0;
+let reviewRefresh = 0;
+
+export async function refreshEditReview() {
+  const request = ++reviewRefresh;
+  try {
+    const res = await fetch("/api/edit-review");
+    if (request !== reviewRefresh) return;
+    if (!res.ok) { ++reviewRequest; return app.set({ review: null, reviewProject: null, reviewMedia: null, reviewView: null }); }
+    const data = await res.json();
+    if (request !== reviewRefresh) return;
+    if (app.get().review?.id === data.id) return app.set({ review: data });
+    ++reviewRequest;
+    app.set({ review: data, reviewProject: null, reviewMedia: null, reviewView: null });
+  } catch { /* Project load remains usable if no review endpoint is available. */ }
+}
+
+export async function showEditReview(view: "before" | "after" | null) {
+  const request = ++reviewRequest;
+  if (!view) return app.set({ reviewProject: null, reviewMedia: null, reviewView: null, selection: [], gap: null, editing: null, live: null, slip: null, sampling: null, cropping: false, masking: false });
+  const id = app.get().review?.id;
+  const { data } = await call(`/api/edit-review?view=${view}&id=${encodeURIComponent(id ?? "")}`);
+  if (data.error) return fail(data.error.message);
+  const luts: State["luts"] = {};
+  try {
+    await Promise.all(Object.entries(data.lutVersions as Record<string, string>).map(async ([asset, version]) => {
+      const cached = lutCache.get(asset);
+      if (cached?.version === version) { luts[asset] = cached.lut; return; }
+      const response = await fetch(`/api/lut?asset=${encodeURIComponent(asset)}&view=${view}&id=${encodeURIComponent(id ?? "")}`);
+      if (!response.ok) throw new Error(`Cannot load snapshot LUT ${asset}`);
+      luts[asset] = await response.json();
+    }));
+  } catch (error) { return fail((error as Error).message); }
+  if (request !== reviewRequest || app.get().review?.id !== id) return; // A newer agent round superseded this request.
+  const { project: shown, lutVersions: _, review: __, ...media } = data;
+  app.set({ reviewProject: shown, reviewMedia: { ...media, luts }, reviewView: view, selection: [], gap: null, editing: null, live: null, slip: null, sampling: null, cropping: false, masking: false });
+  seek(playhead.get().frame);
+}
+
+export async function editReviewStatus(status: "kept" | "dismissed") {
+  const id = app.get().review?.id;
+  if (!id) return;
+  const { data } = await call("/api/edit-review/status", { id, status });
+  if (data.error) return fail(data.error.message);
+  app.set(({ review }) => ({ review: review ? { ...review, status } : null }));
+}
+
+export async function revertEditReview() {
+  const { review, project } = app.get();
+  if (!review || !project) return;
+  const { status, data } = await call("/api/edit-review/revert", { id: review.id, baseRevision: project.revision });
+  if (status === 409) await refresh();
+  if (data.error) return fail(data.error.message);
+  await take(data);
+  app.set({ reviewProject: null, reviewMedia: null, reviewView: null, review: { ...review, status: "reverted" }, message: { text: data.summary } });
 }
 
 const fail = (text: string) => app.set({ message: { text, error: true } });
@@ -231,6 +293,7 @@ export async function switchProject(path: string) {
 
 /** Runs a core op against the revision on screen. A conflict means someone else (an agent) wrote first. */
 export async function op(name: string, args: unknown) {
+  if (app.get().reviewProject) { fail("Snapshot preview is read-only. Switch to Current to edit."); return false; }
   const base = app.get().project?.revision;
   const { status, data } = await call("/api/op", { op: name, args, baseRevision: base });
   if (status === 409) await refresh();
@@ -241,6 +304,7 @@ export async function op(name: string, args: unknown) {
 }
 
 export async function applyLutPreset(itemId: string, presetId: string, at?: number) {
+  if (app.get().reviewProject) { fail("Snapshot preview is read-only. Switch to Current to edit."); return false; }
   const baseRevision = app.get().project?.revision;
   const { status, data } = await call("/api/lut-presets/apply", { itemId, presetId, baseRevision, at });
   if (status === 409) await refresh();
@@ -252,6 +316,7 @@ export async function applyLutPreset(itemId: string, presetId: string, at?: numb
 
 /** Undo/redo from the revision on screen, so an agent step that landed unseen is never the one undone. */
 export async function history(which: "undo" | "redo", steps = 1) {
+  if (app.get().reviewProject) return fail("Snapshot preview is read-only. Switch to Current to edit.");
   const { status, data } = await call(`/api/${which}`, { steps, baseRevision: app.get().project?.revision });
   if (status === 409) await refresh();
   if (data.error) return app.set({ message: { text: data.error.message, error: true } });
@@ -296,7 +361,8 @@ export const dnd: { assetId: string | null } = { assetId: null };
 export const player: { ref: PlayerRef | null } = { ref: null };
 
 export function seek(frame: number) {
-  const max = Math.max(0, durationFrames(app.get().project!) - 1);
+  const state = app.get();
+  const max = Math.max(0, durationFrames(state.reviewProject ?? state.project!) - 1);
   frame = Math.max(0, Math.min(max, Math.round(frame)));
   player.ref ? player.ref.seekTo(frame) : playhead.set({ frame });
 }

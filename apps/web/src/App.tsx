@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
 import { ASPECTS, FPS_CHOICES, durationFrames, formatFrame, itemSpan, snapPoints, type Project, type SnapPoint } from "@splicewright/core";
 import { addMarker, addText, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, loopRange, markerAroundSelection, markerNear, nudge, paste, rangeFromSelection, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, videoUnder } from "./edit.ts";
-import { app, cancelExport, history, ioRange, newProject, op, player, playhead, refreshExport, revealExport, say, seek, startExport, switchProject } from "./store.ts";
+import { app, cancelExport, editReviewStatus, history, ioRange, newProject, op, player, playhead, refreshExport, revertEditReview, revealExport, say, seek, showEditReview, startExport, switchProject } from "./store.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 import { constrainLayout, DEFAULT_LAYOUT, type PanelLayout } from "./layout.ts";
 import { PanelSeparator } from "./PanelSeparator.tsx";
@@ -15,6 +15,7 @@ import { Preview } from "./Preview.tsx";
 
 export function App() {
   const p = app.use((s) => s.project);
+  const reviewProject = app.use((s) => s.reviewProject);
   const empty = app.use((s) => s.empty);
   const message = app.use((s) => s.message);
   const io = app.use((s) => s.io);
@@ -89,16 +90,17 @@ export function App() {
   }, [io]);
   if (empty) return <NewProject />;
   if (!p) return <div className="loading">loading project…</div>;
+  const displayProject = reviewProject ?? p;
   return (
-    <div className="app" style={{ "--bin-size": `${layout.bin}px`, "--inspector-size": `${layout.inspector}px`, "--timeline-size": `${layout.timeline}px` } as React.CSSProperties}>
+    <div className={`app${reviewProject ? " review-reading" : ""}`} style={{ "--bin-size": `${layout.bin}px`, "--inspector-size": `${layout.inspector}px`, "--timeline-size": `${layout.timeline}px` } as React.CSSProperties}>
       <Toolbar p={p} />
-      <FeaturePanel p={p} category={category} onCategory={setCategory} onLocate={locate} location={panelLocation} />
+      <FeaturePanel p={displayProject} category={category} onCategory={setCategory} onLocate={locate} location={panelLocation} readOnly={!!reviewProject} />
       <PanelSeparator className="bin-split" label="Resize media bin" orientation="vertical" value={layout.bin} min={Math.min(150, Math.round(innerWidth * 0.28))} max={Math.round(innerWidth * 0.28)} onPointerDown={(e) => beginResize("bin", e)} onKeyDown={resizeByKeyboard("bin", 10)} />
-      <Preview p={p} />
+      <Preview p={displayProject} readOnly={!!reviewProject} />
       <PanelSeparator className="inspector-split" label="Resize inspector" orientation="vertical" value={layout.inspector} min={Math.min(200, Math.round(innerWidth * 0.34))} max={Math.round(innerWidth * 0.34)} onPointerDown={(e) => beginResize("inspector", e)} onKeyDown={resizeByKeyboard("inspector", 10)} />
-      <Inspector p={p} location={inspectorLocation} />
+      <Inspector p={displayProject} location={inspectorLocation} readOnly={!!reviewProject} />
       <PanelSeparator className="" label="Resize timeline" orientation="horizontal" value={layout.timeline} min={Math.min(140, Math.round(innerHeight * 0.48))} max={Math.round(innerHeight * 0.48)} onPointerDown={(e) => beginResize("timeline", e)} onKeyDown={resizeByKeyboard("timeline", 10)} />
-      <Timeline />
+      <Timeline project={displayProject} readOnly={!!reviewProject} />
       <div className={`status ${message?.error ? "error" : ""}`}>{message?.text ?? ""}</div>
       <ContextMenu />
     </div>
@@ -178,6 +180,8 @@ function ContextMenu() {
 }
 
 function Toolbar({ p }: { p: Project }) {
+  const review = app.use((s) => s.review);
+  const reviewProject = app.use((s) => s.reviewProject);
   const snapping = app.use((s) => s.snapping);
   const useProxies = app.use((s) => s.useProxies);
   const proxies = app.use((s) => s.proxies);
@@ -188,6 +192,11 @@ function Toolbar({ p }: { p: Project }) {
   const [exportPreset, setExportPreset] = React.useState<"draft" | "master">("master");
   const runningExports = exports.filter((job) => job.status === "running").map((job) => job.id).join(",");
   useEffect(() => {
+    const controls = document.querySelectorAll<HTMLElement>(".toolbar > :not(.agent-review):not(.timecode):not(.spacer)");
+    controls.forEach((element) => { element.inert = !!reviewProject; });
+    return () => controls.forEach((element) => { element.inert = false; });
+  }, [reviewProject]);
+  useEffect(() => {
     if (!runningExports) return;
     const ids = runningExports.split(",");
     const timer = window.setInterval(() => ids.forEach((id) => void refreshExport(id)), 800);
@@ -196,11 +205,20 @@ function Toolbar({ p }: { p: Project }) {
   app.use((s) => s.io);
   const range = ioRange();
   return (
-    <div className="toolbar">
+    <div className="toolbar" onKeyDownCapture={(e) => { if (reviewProject && !(e.target as HTMLElement).closest(".agent-review")) { e.preventDefault(); e.stopPropagation(); } }}>
       <strong>{p.meta.title}</strong>
       <span className="dim">
         rev {p.revision} · {p.meta.width}×{p.meta.height} · {p.meta.fps} fps
       </span>
+      {review && <div className="agent-review" aria-label="Agent edit review">
+        <strong>Agent 修改 · {review.label}</strong><span>{review.summary}</span>
+        <button aria-pressed={!reviewProject} onClick={() => void showEditReview(null)}>目前版本</button>
+        <button aria-pressed={!!reviewProject && reviewProject.revision === review.beforeRevision} onClick={() => void showEditReview("before")}>修改前</button>
+        <button aria-pressed={!!reviewProject && reviewProject.revision === review.afterRevision} onClick={() => void showEditReview("after")}>Agent 修改後</button>
+        {reviewProject && <span className="dim">快照預覽 · 唯讀</span>}
+        {!reviewProject && review.status === "pending" && <><button onClick={() => void editReviewStatus("kept")}>保留修改</button></>}
+        {review.status !== "reverted" && <button title={p.revision === review.afterRevision ? "Restore this complete agent round" : "A later project edit prevents whole-round restore"} disabled={p.revision !== review.afterRevision} onClick={() => void revertEditReview()}>還原整輪修改</button>}
+      </div>}
       <Timecode fps={p.meta.fps} />
       <span className="spacer" />
       {recent.length > 0 && (
@@ -295,7 +313,7 @@ function onKey(e: KeyboardEvent) {
   if (app.get().sampling && e.key === "Escape") { e.preventDefault(); app.set({ sampling: null }); return; }
   if (el.closest("input, textarea, select")) return;
   const s = app.get();
-  const p = s.project;
+  const p = s.reviewProject ?? s.project;
   if (!p) return;
   const frame = playhead.get().frame;
   const mod = e.metaKey || e.ctrlKey;
@@ -303,8 +321,9 @@ function onKey(e: KeyboardEvent) {
   const handled = () => e.preventDefault();
 
   if (key === " ") return handled(), app.set({ rate: 1 }), player.ref?.toggle();
-  if (e.altKey && !mod && (key === "arrowleft" || key === "arrowright")) return handled(), stepKey(key === "arrowleft" ? -1 : 1);
+  if (!s.reviewProject && e.altKey && !mod && (key === "arrowleft" || key === "arrowright")) return handled(), stepKey(key === "arrowleft" ? -1 : 1);
   if (key === "arrowleft" || key === "arrowright") return handled(), player.ref?.pause(), seek(frame + (key === "arrowleft" ? -1 : 1) * (e.shiftKey ? 10 : 1));
+  if (s.reviewProject) return;
   if (key === "arrowup" || key === "arrowdown") {
     handled();
     // Shift adds beats and captions: every snap point.

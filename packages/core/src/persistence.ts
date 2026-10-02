@@ -1,11 +1,12 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gunzipSync } from "node:zlib";
+import { z } from "zod";
 import { apply, createProject, type OpResult } from "./ops.ts";
-import type { AudioFx, Ctx, Project } from "./schema.ts";
+import { Project as ProjectSchema, type AudioFx, type Ctx, type Project } from "./schema.ts";
 import { validate } from "./validate.ts";
 import { parseCube } from "./lut.ts";
 import { LUT_PRESETS } from "./lut-presets.ts";
@@ -71,6 +72,34 @@ export function writeAtomic(file: string, data: unknown) {
   const tmp = `${file}.tmp-${process.pid}`;
   writeFileSync(tmp, JSON.stringify(data, null, 2) + "\n");
   renameSync(tmp, file);
+}
+
+/** Synchronous, short-held project mutation lock shared by every project writer. */
+function withProjectLock<T>(dir: string, work: () => T): T | Err {
+  const lock = cacheDir(dir, "project.lock");
+  mkdirSync(dirname(lock), { recursive: true });
+  let fd: number;
+  try { fd = openSync(lock, "wx"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const recovery = `${lock}.recovery`;
+    let recoveryFd: number;
+    try { recoveryFd = openSync(recovery, "wx"); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") return { error: { code: "busy", message: "project lock recovery is busy" } }; throw e; }
+    try {
+      const pid = Number(readFileSync(lock, "utf8"));
+      if (!Number.isInteger(pid) || pid <= 0) return { error: { code: "busy", message: "project mutation lock is busy" } };
+      try { process.kill(pid, 0); return { error: { code: "busy", message: "project mutation lock is busy" } }; }
+      catch (probe) { if ((probe as NodeJS.ErrnoException).code !== "ESRCH") return { error: { code: "busy", message: "project mutation lock is busy" } }; }
+      unlinkSync(lock);
+      fd = openSync(lock, "wx");
+    } catch (retry) {
+      if (["EEXIST", "ENOENT"].includes((retry as NodeJS.ErrnoException).code ?? "")) return { error: { code: "busy", message: "project mutation lock is busy" } };
+      throw retry;
+    } finally { closeSync(recoveryFd); unlinkSync(recovery); }
+  }
+  try { writeFileSync(fd, String(process.pid)); return work(); }
+  finally { closeSync(fd); unlinkSync(lock); }
 }
 
 export function init(dir: string, meta: Project["meta"]): Project | Err {
@@ -161,8 +190,7 @@ export function fingerprint(file: string): string | undefined {
 const readJson = (f: string) => (existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : undefined);
 
 /** Adapter context: probe results, transcripts and beats from the ingest cache. */
-export function loadCtx(dir: string): Ctx & { sourceHealth: Record<string, SourceHealth> } {
-  const project = load(dir);
+export function loadCtx(dir: string, project = load(dir)): Ctx & { sourceHealth: Record<string, SourceHealth> } {
   const probed = readAssets(dir);
   const assetDurations: Record<string, number> = {};
   const fingerprints: Record<string, string> = {};
@@ -204,8 +232,7 @@ export function loadCtx(dir: string): Ctx & { sourceHealth: Record<string, Sourc
  * Atomic, optimistic write: rejected unless the on-disk revision is `baseRevision`,
  * and never writes a project that fails validation.
  */
-// ponytail: check-then-rename is not a cross-process lock; add a lockfile if two writers race in practice.
-export function commit(dir: string, project: Project, baseRevision: number, ctx = loadCtx(dir)): { revision: number } | Err {
+function commitUnlocked(dir: string, project: Project, baseRevision: number, ctx = loadCtx(dir)): { revision: number } | Err {
   const disk = load(dir);
   if (disk.revision !== baseRevision)
     return { error: { code: "conflict", message: `project is at revision ${disk.revision}; write was based on ${baseRevision}` } };
@@ -215,23 +242,176 @@ export function commit(dir: string, project: Project, baseRevision: number, ctx 
   return { revision: project.revision };
 }
 
+export function commit(dir: string, project: Project, baseRevision: number, ctx = loadCtx(dir)): { revision: number } | Err {
+  return withProjectLock(dir, () => commitUnlocked(dir, project, baseRevision, ctx));
+}
+
 /** Load, apply one op, commit, and record an undo step. What the CLI and MCP call. */
 export function run(dir: string, op: string, args: unknown, baseRevision?: number, context?: Partial<Ctx>): OpResult {
+  return withProjectLock(dir, () => runUnlocked(dir, op, args, baseRevision, context));
+}
+function runUnlocked(dir: string, op: string, args: unknown, baseRevision?: number, context?: Partial<Ctx>): OpResult {
   const before = load(dir);
   if (baseRevision !== undefined && baseRevision !== before.revision)
     return { error: { code: "conflict", message: `project is at revision ${before.revision}; op was based on ${baseRevision}` } };
   const ctx = { ...loadCtx(dir), ...context };
   const r = apply(before, op, args, ctx);
   if ("error" in r) return r;
-  const c = commit(dir, r.project, before.revision, ctx);
+  const c = commitUnlocked(dir, r.project, before.revision, ctx);
   if ("error" in c) return c;
   push(dir, "undo", { op, args, project: before, summary: r.changes.summary });
   rmSync(cacheDir(dir, "history", "redo"), { recursive: true, force: true });
   return r;
 }
 
+type EditReview = {
+  version: 1; id: string; label: string; summary: string; createdAt: string;
+  beforeRevision: number; afterRevision: number; status: "pending" | "kept" | "dismissed" | "reverted";
+  before: Project; after: Project; revertedAtRevision?: number;
+};
+const editReviewFile = (dir: string) => cacheDir(dir, "edit-review.json");
+const reviewSchema = z.object({
+  version: z.literal(1), id: z.string().uuid(),
+  label: z.string().min(1).max(160), summary: z.string().min(1).max(2000),
+  createdAt: z.string().datetime(), beforeRevision: z.number().int().min(0),
+  afterRevision: z.number().int().min(1),
+  status: z.enum(["pending", "kept", "dismissed", "reverted"]),
+  before: ProjectSchema, after: ProjectSchema, revertedAtRevision: z.number().int().min(1).optional(),
+});
+function readEditReview(dir: string): EditReview | undefined {
+  const file = editReviewFile(dir);
+  if (!existsSync(file)) return undefined;
+  if (statSync(file).size > 128 * 1024 * 1024) throw new Error("edit review record exceeds 128 MiB limit");
+  const parsed = reviewSchema.safeParse(JSON.parse(readFileSync(file, "utf8")));
+  if (!parsed.success) throw new Error(`invalid edit review record: ${parsed.error.message}`);
+  const r = parsed.data as EditReview;
+  if (r.before.revision !== r.beforeRevision || r.after.revision !== r.afterRevision || r.afterRevision !== r.beforeRevision + 1)
+    throw new Error("invalid edit review record revisions");
+  return r;
+}
+function reviewSummary(before: Project, after: Project, supplied?: string) {
+  if (supplied?.trim()) return supplied.trim().slice(0, 2000);
+  const clips = (p: Project) => new Map(p.tracks.flatMap((t) => t.items.map((i) => [i.id, { track: t.id, item: i } as const])));
+  const a = clips(before), b = clips(after);
+  const added = [...b.keys()].filter((id) => !a.has(id)).length;
+  const removed = [...a.keys()].filter((id) => !b.has(id)).length;
+  const changed = [...a.keys()].filter((id) => b.has(id) && stableJson(a.get(id)) !== stableJson(b.get(id))).length;
+  const trackIds = new Set([...before.tracks, ...after.tracks].map((t) => t.id));
+  const tracksChanged = [...trackIds].filter((id) => JSON.stringify(before.tracks.find((t) => t.id === id)) !== JSON.stringify(after.tracks.find((t) => t.id === id))).length;
+  const metaChanged = JSON.stringify(before.meta) !== JSON.stringify(after.meta);
+  const assetsChanged = stableJson(before.assets) !== stableJson(after.assets);
+  const markersChanged = stableJson(before.markers) !== stableJson(after.markers);
+  return `${added} clips added, ${removed} removed, ${changed} changed; ${tracksChanged} tracks changed${metaChanged ? "; project settings changed" : ""}${assetsChanged ? "; assets changed" : ""}${markersChanged ? "; markers changed" : ""}`;
+}
+
+/** Apply one agent round atomically and preserve bounded before/after snapshots for review. */
+export function applyEditReview(dir: string, ops: Array<{ op: string; args: unknown }>, options: { label?: string; summary?: string; baseRevision?: number } = {}): OpResult | { error: { code: string; message: string }; review?: never } {
+  const input = z.object({ ops: z.array(z.object({ op: z.string().min(1), args: z.unknown() })).min(1), options: z.object({ label: z.string().trim().min(1).max(160).optional(), summary: z.string().trim().min(1).max(2000).optional(), baseRevision: z.number().int().min(0).optional() }) }).safeParse({ ops, options });
+  if (!input.success) return { error: { code: "invalid_args", message: z.prettifyError(input.error) } };
+  options = input.data.options;
+  return withProjectLock(dir, () => {
+    const before = load(dir);
+    try { readEditReview(dir); } catch (error) { return { error: { code: "invalid_review", message: (error as Error).message } }; }
+    if (options.baseRevision !== undefined && options.baseRevision !== before.revision)
+      return { error: { code: "conflict", message: `project is at revision ${before.revision}; review was based on ${options.baseRevision}` } };
+    const ctx = loadCtx(dir);
+    const r = apply(before, "batch", { ops }, ctx);
+    if ("error" in r) return r;
+    const record: EditReview = {
+      version: 1, id: randomUUID(), label: (options.label?.trim() || "Agent edit review").slice(0, 160),
+      summary: reviewSummary(before, r.project, options.summary), createdAt: new Date().toISOString(),
+      beforeRevision: before.revision, afterRevision: r.project.revision, status: "pending",
+      before, after: r.project,
+    };
+    const historyFile = join(cacheDir(dir, "history", "undo"), `${String(r.project.revision).padStart(9, "0")}.json`);
+    const ledgerFile = editReviewFile(dir);
+    const priorLedger = existsSync(ledgerFile) ? readFileSync(ledgerFile) : undefined;
+    let historyWritten = false, committed = false;
+    const redo = cacheDir(dir, "history", "redo"), retiredRedo = cacheDir(dir, "history", `redo-retired-${record.id}`);
+    let retired = false;
+    try {
+      mkdirSync(dirname(historyFile), { recursive: true });
+      writeAtomic(historyFile, { op: "apply_edit_review", args: { id: record.id }, project: before, summary: options.summary ?? `agent review: ${record.label}` });
+      historyWritten = true;
+      writeAtomic(ledgerFile, record);
+      if (existsSync(redo)) { renameSync(redo, retiredRedo); retired = true; }
+      const c = commitUnlocked(dir, r.project, before.revision, ctx);
+      if ("error" in c) throw Object.assign(new Error(c.error.message), { result: c });
+      committed = true;
+      if (retired) rmSync(retiredRedo, { recursive: true, force: true });
+      return { project: r.project, changes: { summary: record.summary }, review: { id: record.id, label: record.label, summary: record.summary, beforeRevision: record.beforeRevision, afterRevision: record.afterRevision, status: record.status } } as any;
+    } catch (error) {
+      if (committed) return { project: r.project, changes: { summary: `${record.summary} (redo cache cleanup failed)` }, review: { id: record.id, label: record.label, summary: record.summary, beforeRevision: record.beforeRevision, afterRevision: record.afterRevision, status: record.status } } as OpResult;
+      if (retired) renameSync(retiredRedo, redo);
+      if (historyWritten) rmSync(historyFile, { force: true });
+      if (priorLedger) writeFileSync(ledgerFile, priorLedger); else rmSync(ledgerFile, { force: true });
+      const result = (error as { result?: OpResult }).result;
+      return result ?? { error: { code: "persistence_failed", message: `review transaction was not committed: ${(error as Error).message}` } };
+    }
+  }) as OpResult;
+}
+
+export function getEditReview(dir: string, id?: string, includeSnapshots?: false): Omit<EditReview, "before" | "after"> | undefined;
+export function getEditReview(dir: string, id: string | undefined, includeSnapshots: true): EditReview | undefined;
+export function getEditReview(dir: string, id: string | undefined, includeSnapshots: boolean): EditReview | Omit<EditReview, "before" | "after"> | undefined;
+export function getEditReview(dir: string, id?: string, includeSnapshots = false): EditReview | Omit<EditReview, "before" | "after"> | undefined {
+  const record = readEditReview(dir);
+  if (!record || (id && record.id !== id)) return undefined;
+  const { before, after, ...summary } = record;
+  return includeSnapshots ? { ...summary, before, after } : summary;
+}
+
+export function setEditReviewStatus(dir: string, id: string, status: "kept" | "dismissed") {
+  return withProjectLock(dir, () => {
+    if (status !== "kept" && status !== "dismissed") return { error: { code: "invalid_args", message: "status must be kept or dismissed" } };
+    const record = readEditReview(dir);
+    if (!record || record.id !== id) return { error: { code: "not_found", message: "edit review not found" } };
+    if (load(dir).revision !== record.afterRevision || record.status === "reverted") return { error: { code: "conflict", message: "review is no longer the current project revision" } };
+    record.status = status; writeAtomic(editReviewFile(dir), record); return { id, status };
+  });
+}
+
+/** Restore the before snapshot at a new revision, as one ordinary undoable step. */
+export function revertEditReview(dir: string, id: string, baseRevision?: number): OpResult {
+  return withProjectLock(dir, () => {
+    const current = load(dir), record = readEditReview(dir);
+    if (baseRevision !== undefined && current.revision !== baseRevision) return { error: { code: "conflict", message: `project is at revision ${current.revision}; revert was based on ${baseRevision}` } };
+    if (!record || record.id !== id) return { error: { code: "not_found", message: "edit review not found" } };
+    if (record.status === "reverted") return { error: { code: "conflict", message: "review was already reverted" } };
+    if (current.revision !== record.afterRevision || stableJson(current) !== stableJson(record.after)) return { error: { code: "conflict", message: "project changed after this review; refusing to overwrite later edits" } };
+    const ids = { ...record.before.ids };
+    for (const [k, n] of Object.entries(current.ids ?? {})) ids[k] = Math.max(ids[k] ?? 0, n);
+    const restored = { ...record.before, revision: current.revision + 1, ...(Object.keys(ids).length && { ids }) };
+    record.status = "reverted"; record.revertedAtRevision = restored.revision;
+    const historyFile = join(cacheDir(dir, "history", "undo"), `${String(restored.revision).padStart(9, "0")}.json`);
+    const priorLedger = readFileSync(editReviewFile(dir)); let wroteHistory = false, committed = false;
+    const redo = cacheDir(dir, "history", "redo"), retiredRedo = cacheDir(dir, "history", `redo-retired-${randomUUID()}`);
+    let retired = false;
+    try {
+      mkdirSync(dirname(historyFile), { recursive: true });
+      writeAtomic(historyFile, { op: "revert_edit_review", args: { id }, project: current, summary: `revert agent review: ${record.label}` }); wroteHistory = true;
+      writeAtomic(editReviewFile(dir), record);
+      if (existsSync(redo)) { renameSync(redo, retiredRedo); retired = true; }
+      const c = commitUnlocked(dir, restored, current.revision);
+      if ("error" in c) throw Object.assign(new Error(c.error.message), { result: c });
+      committed = true;
+      if (retired) rmSync(retiredRedo, { recursive: true, force: true });
+      return { project: restored, changes: { summary: `reverted review: ${record.label}` } };
+    } catch (error) {
+      if (committed) return { project: restored, changes: { summary: `reverted review: ${record.label} (redo cache cleanup failed)` } };
+      if (retired) renameSync(retiredRedo, redo);
+      if (wroteHistory) rmSync(historyFile, { force: true }); writeFileSync(editReviewFile(dir), priorLedger);
+      return (error as { result?: OpResult }).result ?? { error: { code: "persistence_failed", message: `review revert was not committed: ${(error as Error).message}` } };
+    }
+  }) as OpResult;
+}
+
 /** Copy one registry-owned built-in LUT into raw/ and assign it in one project history step. */
 export function applyLutPreset(dir: string, itemId: string, presetId: string, baseRevision?: number, at?: number): OpResult {
+  const locked = withProjectLock(dir, () => applyLutPresetUnlocked(dir, itemId, presetId, baseRevision, at));
+  return locked;
+}
+function applyLutPresetUnlocked(dir: string, itemId: string, presetId: string, baseRevision?: number, at?: number): OpResult {
   const before = load(dir);
   if (baseRevision !== undefined && baseRevision !== before.revision)
     return { error: { code: "conflict", message: `project is at revision ${before.revision}; preset was based on ${baseRevision}` } };
@@ -383,7 +563,7 @@ export function applyLutPreset(dir: string, itemId: string, presetId: string, ba
       rollback();
       return { error: { code: "invalid", message: errors.join("; ") } };
     }
-    const committed = commit(dir, project, before.revision, ctx);
+    const committed = commitUnlocked(dir, project, before.revision, ctx);
     if ("error" in committed) {
       rollback();
       return committed;
@@ -408,6 +588,10 @@ export const redo = (dir: string, baseRevision?: number) => step(dir, "redo", "u
 // History: one snapshot file per step, named by the revision it was pushed at (monotonic).
 // ponytail: full snapshots, never pruned; store diffs or cap the stack if projects get large.
 function step(dir: string, from: "undo" | "redo", to: "undo" | "redo", baseRevision?: number): OpResult {
+  const locked = withProjectLock(dir, () => stepUnlocked(dir, from, to, baseRevision));
+  return locked;
+}
+function stepUnlocked(dir: string, from: "undo" | "redo", to: "undo" | "redo", baseRevision?: number): OpResult {
   const current = load(dir);
   if (baseRevision !== undefined && baseRevision !== current.revision)
     return { error: { code: "conflict", message: `project is at revision ${current.revision}; ${from} was based on ${baseRevision}` } };
@@ -419,7 +603,7 @@ function step(dir: string, from: "undo" | "redo", to: "undo" | "redo", baseRevis
   const ids = { ...entry.project.ids };
   for (const [k, n] of Object.entries(current.ids ?? {})) ids[k] = Math.max(ids[k] ?? 0, n);
   const restored = { ...entry.project, revision: current.revision + 1, ...(Object.keys(ids).length && { ids }) };
-  const c = commit(dir, restored, current.revision);
+  const c = commitUnlocked(dir, restored, current.revision);
   if ("error" in c) return c;
   rmSync(join(stack, top));
   push(dir, to, { op: entry.op, args: entry.args, project: current, summary: entry.summary });

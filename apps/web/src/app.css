@@ -137,6 +137,13 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .vol span { position: absolute; right: 2px; top: -12px; font-size: 9px; color: #ffd43b; text-shadow: 0 1px 2px #000; display: none; }
 .item:hover .fade-h, .item.selected .fade-h, .item:hover .vol, .item.selected .vol { opacity: 1; }
 .vol:hover span, .vol.live span { display: block; }
+.agent-review { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; max-width: 100%; }
+.agent-review strong { white-space: nowrap; }
+.agent-review > span:not(.dim) { white-space: normal; color: #aeb4bf; }
+.agent-review button[aria-pressed="true"] { border-color: #83aaff; color: #d8e4ff; }
+.timeline-readonly .row:not(.ruler), .timeline-readonly .io-h, .timeline-readonly .marker { pointer-events: none; }
+.review-reading .feature-panel, .review-reading .inspector, .review-reading .bin { pointer-events: none; opacity: .76; }
+.review-reading .toolbar > :not(.agent-review):not(.timecode):not(.spacer) { pointer-events: none; opacity: .6; }
 .track-header { cursor: grab; }
 .row.drop-row { box-shadow: inset 0 2px 0 #4c6ef5; }
 .add-row .track-header { gap: 4px; }

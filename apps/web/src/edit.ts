@@ -715,6 +715,7 @@ export function insertOnNewTrack(kind: TrackKind, assetId: string, at: number, d
 /** Uploads files into raw/ and imports them; the server probes before answering, then ingests in the
  * background. Resolves to the asset ids, in order, of the files that imported. */
 export async function upload(files: File[]): Promise<string[]> {
+  if (app.get().reviewProject) { say("快照預覽為唯讀；請切回目前版本再匯入。", true); return []; }
   const ids: string[] = [];
   for (const f of files) {
     app.set(({ uploads }) => ({ uploads: [...uploads, f.name] }));

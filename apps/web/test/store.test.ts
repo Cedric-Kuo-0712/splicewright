@@ -57,3 +57,43 @@ it("a LUT the server can no longer serve is left out and reported, never kept un
   expect(app.get().message).toMatchObject({ error: true, text: expect.stringContaining("LUT gone") });
   vi.unstubAllGlobals();
 });
+
+it("blocks UI ops while a before/after snapshot is active", async () => {
+  const fetches = vi.fn(); vi.stubGlobal("fetch", fetches);
+  const { app, op } = await import("../src/store.ts");
+  const snapshot = { schemaVersion: 1, revision: 8, meta: { title: "snapshot", fps: 30, width: 640, height: 360 }, assets: {}, tracks: [] } as any;
+  app.set({ reviewProject: snapshot, message: null });
+  expect(await op("addMarker", { label: "blocked", start: 0 })).toBe(false);
+  expect(fetches).not.toHaveBeenCalled();
+  expect(app.get().message).toMatchObject({ error: true, text: expect.stringContaining("read-only") });
+  app.set({ reviewProject: null });
+  vi.unstubAllGlobals();
+});
+
+
+it("ignores a pending snapshot response after switching back to Current", async () => {
+  const { app, showEditReview } = await import("../src/store.ts");
+  app.set({ review: { id: "round" } as any, reviewProject: null, reviewMedia: null });
+  let resolve!: (value: any) => void;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise((done) => { resolve = done; })));
+  const pending = showEditReview("before");
+  await showEditReview(null);
+  resolve({ ok: true, status: 200, json: async () => ({ ...payload({}), project: { revision: 0 } }) });
+  await pending;
+  expect(app.get().reviewProject).toBeNull();
+  expect(app.get().reviewMedia).toBeNull();
+  vi.unstubAllGlobals();
+});
+
+
+it("keeps the selected snapshot when background refresh returns the same review", async () => {
+  const { app, refreshEditReview } = await import("../src/store.ts");
+  const snapshot = { revision: 0 } as any;
+  app.set({ review: { id: "same-round" } as any, reviewProject: snapshot, reviewView: "before" });
+  vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ id: "same-round", status: "kept" }) })));
+  await refreshEditReview();
+  expect(app.get().reviewProject).toBe(snapshot);
+  expect(app.get().reviewView).toBe("before");
+  app.set({ review: null, reviewProject: null, reviewMedia: null, reviewView: null });
+  vi.unstubAllGlobals();
+});

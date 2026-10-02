@@ -3,7 +3,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSyn
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { ASPECTS, FONT_PAIRS, FONTS, getSummary, lint, LUT_PRESETS, THEME_IDS } from "@splicewright/core";
-import { applyLutPreset, init, load, loadCtx, rawPath, redo, run, undo } from "@splicewright/core/node";
+import { applyEditReview, applyLutPreset, getEditReview, init, load, loadCtx, rawPath, redo, revertEditReview, setEditReviewStatus, run, undo } from "@splicewright/core/node";
 import { checkOutput, scanMaterials, relinkMaterial, displayable, ingest, STEPS, type Step } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
 import { render, still } from "@splicewright/render/node";
@@ -23,6 +23,8 @@ const USAGE = `usage: splicewright <command>
   op <opName> '<json args>' [--base <revision>]
   lut-presets
   apply-lut-preset <itemId> <presetId> [--base <revision>] [--at <timelineFrame>]
+  apply-edit-review '<json {ops,label?,summary?}>' [--base <revision>]
+  edit-review show [--snapshots] | edit-review keep|dismiss <id> | edit-review revert <id> [--base <revision>]
   undo | redo [--base <revision>]
   still --at <frame|[hh:]mm:ss[.s]> [-o out/still-<frame>.jpg]
   render [-o out/final.mp4] [--preset draft|master] [--range a-b]
@@ -54,6 +56,7 @@ const { values: flags, positionals } = parseArgs({
     jobs: { type: "string" },
     "no-ingest": { type: "boolean" },
     "refresh-agents": { type: "boolean" },
+    snapshots: { type: "boolean" },
   },
 });
 const [cmd, ...args] = positionals;
@@ -176,6 +179,23 @@ switch (cmd) {
     const [itemId, presetId] = args;
     if (!itemId || !presetId) out({ error: { code: "usage", message: "apply-lut-preset <itemId> <presetId> [--base <revision>]" } });
     out(opResult(applyLutPreset(dir, itemId, presetId, flags.base === undefined ? undefined : Number(flags.base), flags.at === undefined ? undefined : Number(flags.at))));
+  }
+  case "apply-edit-review": {
+    let parsed: any;
+    try { parsed = JSON.parse(args[0] ?? ""); } catch { out({ error: { code: "usage", message: "apply-edit-review expects one JSON object with ops" } }); }
+    if (!Array.isArray(parsed?.ops)) out({ error: { code: "usage", message: "review JSON must include an ops array" } });
+    const r = applyEditReview(dir, parsed.ops, { label: parsed.label, summary: parsed.summary, baseRevision: flags.base === undefined ? undefined : Number(flags.base) });
+    out("error" in r ? r : { revision: r.project.revision, summary: r.changes.summary, review: (r as any).review });
+  }
+  case "edit-review": {
+    const [action, id] = args;
+    if (action === "show") {
+      try { out(getEditReview(dir, undefined, !!flags.snapshots) ?? { error: { code: "not_found", message: "edit review not found" } }); }
+      catch (error) { out({ error: { code: "invalid_review", message: (error as Error).message } }); }
+    }
+    if ((action === "keep" || action === "dismiss") && id) out(setEditReviewStatus(dir, id, action === "keep" ? "kept" : "dismissed"));
+    if (action === "revert" && id) out(opResult(revertEditReview(dir, id, flags.base === undefined ? undefined : Number(flags.base))));
+    out({ error: { code: "usage", message: "edit-review show [--snapshots] | edit-review keep|dismiss <id> | edit-review revert <id> [--base <revision>]" } });
   }
   case "check-output": {
     if (!args[0]) out({ error: { code: "usage", message: "check-output <project-relative-output>" } });

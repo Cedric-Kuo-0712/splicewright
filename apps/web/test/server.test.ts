@@ -108,6 +108,26 @@ it("refuses writes from other sites", async () => {
 const postJson = (base: string, path: string, body: unknown, headers: Record<string, string> = {}) =>
   fetch(`${base}${path}`, { method: "POST", headers, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, data: await r.json() }));
 
+it("serves persistent review snapshots, validates origin and refuses to restore over later edits", async () => {
+  const reviewDir = join(parent, "review-project");
+  cpSync(join(import.meta.dirname, "../../../examples/basic"), reviewDir, { recursive: true, filter: (f) => !f.includes(".splicewright") });
+  const s = await open(reviewDir, { port: 0 });
+  try {
+    const project = await (await fetch(`${s.url}api/project`)).json();
+    const body = { ops: [{ op: "addMarker", args: { label: "agent round", start: 15 } }], label: "Reviewable", baseRevision: project.project.revision };
+    expect((await postJson(s.url, "api/edit-review/apply", body, { Origin: "https://evil.example" })).status).toBe(403);
+    const applied = await postJson(s.url, "api/edit-review/apply", body);
+    expect(applied).toMatchObject({ status: 200, data: { review: { status: "pending" }, project: { revision: project.project.revision + 1 } } });
+    expect(await (await fetch(`${s.url}api/edit-review?view=before`)).json()).toMatchObject({ project: { revision: project.project.revision } });
+    expect(await (await fetch(`${s.url}api/edit-review?view=after`)).json()).toMatchObject({ project: { markers: [{ label: "agent round" }] } });
+    expect((await postJson(s.url, "api/edit-review/status", { id: applied.data.review.id, status: "kept" })).status).toBe(200);
+    const latest = await (await fetch(`${s.url}api/project`)).json();
+    await postJson(s.url, "api/op", { op: "addMarker", args: { label: "human later", start: 30 }, baseRevision: latest.project.revision });
+    expect(await postJson(s.url, "api/edit-review/revert", { id: applied.data.review.id })).toMatchObject({ status: 409, data: { error: { code: "conflict" } } });
+    expect((await (await fetch(`${s.url}api/project`)).json()).project.markers).toEqual(expect.arrayContaining([expect.objectContaining({ label: "human later" }), expect.objectContaining({ label: "agent round" })]));
+  } finally { await s.close(); }
+});
+
 it("an empty folder serves the form: only /api/project and /api/init work, and init creates the project", async () => {
   const empty = join(parent, "empty");
   mkdirSync(empty);

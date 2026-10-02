@@ -24,7 +24,7 @@ function Section({ id, title, children }: { id: string; title: string; children:
   return <section className="inspector-section" data-inspector-section={id} tabIndex={-1}><h4>{title}</h4>{children}</section>;
 }
 
-export function Inspector({ p, location }: { p: Project; location?: ControlLocation }) {
+export function Inspector({ p, location, readOnly = false }: { p: Project; location?: ControlLocation; readOnly?: boolean }) {
   const selection = app.use((s) => s.selection);
   const live = app.use((s) => s.live);
   const found = selection.length === 1 ? findItem(p, selection[0]) : null;
@@ -46,9 +46,9 @@ export function Inspector({ p, location }: { p: Project; location?: ControlLocat
     <button aria-pressed={mode === "selection"} className={mode === "selection" ? "on" : ""} onClick={() => setMode("selection")}>選取內容</button>
     <button aria-pressed={mode === "project"} className={mode === "project" ? "on" : ""} onClick={() => setMode("project")}>專案設定</button>
   </div>;
-  if (mode === "project") return <div className="inspector" ref={root}>{tabs}<Section id="project" title="專案設定"><div data-ui-control="project"><ThemeField p={p} /></div></Section></div>;
+  if (mode === "project") return <div inert={readOnly} className="inspector" ref={root}>{tabs}<Section id="project" title="專案設定"><div data-ui-control="project"><ThemeField p={p} /></div></Section></div>;
   if (!found) return (
-    <div className="inspector" ref={root}>{tabs}
+    <div inert={readOnly} className="inspector" ref={root}>{tabs}
       <h3>{selection.length ? "多重選取" : "專案設定"}</h3>
       {selection.length ? <>
         <p className="scope-label">已選取 {selection.length} 個項目</p>
@@ -72,7 +72,7 @@ export function Inspector({ p, location }: { p: Project; location?: ControlLocat
   const hasAudio = t.kind === "audio" || t.kind === "video" && !isStill;
   const hasText = t.kind === "caption" || isOverlay && item.component === "Text";
   return (
-    <div className="inspector" ref={root}>{tabs}
+    <div inert={readOnly} className="inspector" ref={root}>{tabs}
       <h3>{item.id} <span className="dim">{t.name}</span></h3>
       <p className="scope-label">{t.kind === "caption" ? "字幕軌道樣式與單句文字" : "正在編輯單一項目"}</p>
       {t.locked && <p className="dim">此軌道已鎖定，控制項目前停用。</p>}

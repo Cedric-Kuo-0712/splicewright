@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { audioFxCachePath, audioFxModelFile, audioFxModelFingerprint, commit, fingerprint, historyList, init, load, loadCtx, rawPath, redo, run, undo, writeAtomic } from "../src/persistence.ts";
+import { applyEditReview, audioFxCachePath, audioFxModelFile, audioFxModelFingerprint, commit, fingerprint, getEditReview, historyList, init, load, loadCtx, rawPath, redo, revertEditReview, run, setEditReviewStatus, undo, writeAtomic } from "../src/persistence.ts";
 
 function project() {
   const dir = mkdtempSync(join(tmpdir(), "swr-"));
@@ -106,6 +106,50 @@ it("stale writes are rejected, not merged", () => {
   expect(commit(dir, { ...p, revision: 9 }, 0)).toMatchObject({ error: { code: "conflict" } });
   expect(commit(dir, { ...p, revision: 2, tracks: [{ bad: true }] } as any, 1)).toMatchObject({ error: { code: "invalid" } });
   expect(load(dir).markers).toHaveLength(1);
+});
+
+it("persists a validated before/after review and restores it as one undoable monotonic step", () => {
+  const dir = project();
+  const applied = applyEditReview(dir, [{ op: "addMarker", args: { label: "agent", start: 12 } }], { label: "Cut review", baseRevision: 0 });
+  expect(applied).toMatchObject({ project: { revision: 1 }, review: { status: "pending", beforeRevision: 0, afterRevision: 1 } });
+  const review = getEditReview(dir, undefined, true)!;
+  expect(review).toMatchObject({ label: "Cut review", before: { revision: 0 }, after: { revision: 1, markers: [{ label: "agent", start: 12 }] } });
+  expect(getEditReview(dir)).not.toHaveProperty("before");
+  expect(review.summary).toContain("markers changed");
+  // A pending round can be restored directly, without accepting it first.
+  expect(revertEditReview(dir, review.id, 1)).toMatchObject({ project: { revision: 2 }, changes: { summary: expect.stringContaining("reverted") } });
+  expect(load(dir).revision).toBe(2);
+  expect(load(dir)).not.toHaveProperty("markers");
+  expect(getEditReview(dir)).toMatchObject({ status: "reverted", revertedAtRevision: 2 });
+  expect(undo(dir, 2)).toMatchObject({ project: { revision: 3, markers: [{ label: "agent" }] } });
+  expect(redo(dir, 3)).toMatchObject({ project: { revision: 4 } });
+  expect(load(dir)).not.toHaveProperty("markers");
+});
+
+it("refuses a stale review and refuses to erase a later human edit without changing history", () => {
+  const dir = project();
+  run(dir, "addMarker", { label: "human first", start: 2 });
+  expect(applyEditReview(dir, [{ op: "addMarker", args: { label: "stale", start: 4 } }], { baseRevision: 0 })).toMatchObject({ error: { code: "conflict" } });
+  const applied = applyEditReview(dir, [{ op: "addMarker", args: { label: "agent", start: 6 } }], { baseRevision: 1 }) as any;
+  setEditReviewStatus(dir, applied.review.id, "dismissed");
+  run(dir, "addMarker", { label: "human later", start: 8 }, 2);
+  const before = load(dir), history = historyList(dir);
+  expect(revertEditReview(dir, applied.review.id, before.revision)).toMatchObject({ error: { code: "conflict" } });
+  expect(load(dir)).toEqual(before);
+  expect(historyList(dir)).toEqual(history);
+});
+
+it("rejects corrupt review metadata and all writers honor the shared project lock", () => {
+  const dir = project();
+  const review = applyEditReview(dir, [{ op: "addMarker", args: { label: "agent", start: 1 } }]) as any;
+  writeFileSync(join(dir, ".splicewright", "edit-review.json"), JSON.stringify({ version: 99 }));
+  expect(() => getEditReview(dir)).toThrow(/invalid edit review record/);
+  expect(applyEditReview(dir, [{ op: "addMarker", args: { label: "unsafe", start: 3 } }])).toMatchObject({ error: { code: "invalid_review" } });
+  writeFileSync(join(dir, ".splicewright", "edit-review.json"), "{}");
+  // A process holding the lock forces the same deterministic refusal for review and normal ops.
+  writeFileSync(join(dir, ".splicewright", "project.lock"), String(process.pid));
+  expect(run(dir, "addMarker", { label: "blocked", start: 3 })).toMatchObject({ error: { code: "busy" } });
+  expect(revertEditReview(dir, review.review.id)).toMatchObject({ error: { code: "busy" } });
 });
 
 it("undo and redo step one op at a time with fresh revisions; a new op clears redo", () => {

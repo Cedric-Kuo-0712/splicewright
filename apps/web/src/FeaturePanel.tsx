@@ -7,7 +7,7 @@ import { OperationSearch } from "./OperationSearch.tsx";
 import { actionAvailability, SEARCH_ACTIONS, WORKSPACE_CATEGORIES, type SearchAction, type WorkspaceCategory } from "./workspace-search.ts";
 import { focusControl, searchContext, shortcutHint, type ControlLocation } from "./workspace-navigation.ts";
 
-export function FeaturePanel({ p, category, location, onCategory, onLocate }: { p: Project; category: WorkspaceCategory; location?: ControlLocation; onCategory: (category: WorkspaceCategory) => void; onLocate: (action: SearchAction) => void }) {
+export function FeaturePanel({ p, category, location, onCategory, onLocate, readOnly = false }: { p: Project; category: WorkspaceCategory; location?: ControlLocation; onCategory: (category: WorkspaceCategory) => void; onLocate: (action: SearchAction) => void; readOnly?: boolean }) {
   const selection = app.use((s) => s.selection);
   const context = searchContext(p, selection);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -17,7 +17,7 @@ export function FeaturePanel({ p, category, location, onCategory, onLocate }: { 
   const images = Object.values(p.assets).filter((a) => a.kind === "image");
   const controls = SEARCH_ACTIONS.filter((a) => a.category === category && !a.destination);
   const closeSearch = () => { setSearchOpen(false); searchButton.current?.focus(); };
-  return <aside className="feature-panel" ref={root} aria-label="功能分類">
+  return <aside inert={readOnly} className="feature-panel" ref={root} aria-label="功能分類">
     <nav className="feature-categories" aria-label="剪輯功能">
       {WORKSPACE_CATEGORIES.map((c) => <button key={c} className={category === c ? "on" : ""} aria-pressed={category === c} onClick={() => onCategory(c)}>{c}</button>)}
     </nav>

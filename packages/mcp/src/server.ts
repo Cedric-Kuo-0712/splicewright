@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { find, findFillers, getItem, getRange, getSummary, lint, LUT_PRESETS, ops, type OpResult, type VideoItem } from "@splicewright/core";
-import { applyLutPreset, load, loadCtx, readAssets, sizesOf, redo, run, undo } from "@splicewright/core/node";
+import { applyEditReview, applyLutPreset, getEditReview, load, loadCtx, readAssets, sizesOf, redo, run, undo } from "@splicewright/core/node";
 import { checkOutput, ingest, scanMaterials, relinkMaterial, listMaterials, prepareMaterials, recordMaterialReview, materialPreview, peek, sourceFrame, STEPS, stamp, TRANSCRIPT_FORMAT } from "@splicewright/ingest";
 import { pip, type PipPreset } from "@splicewright/render/geometry";
 import { cancelRender, renderStatus, startRender, still, storyboard } from "@splicewright/render/node";
@@ -38,13 +38,32 @@ Keep context proportional to the next decision: select bounded ranges and fields
 
 Assets must be ingested before insertItem can default a duration and before detectBeats or addCaptionsFromTranscript; ingest is cached, so re-running is cheap.
 
-Edit only through splicewright_* tools, never by writing project.json or directly modifying raw/. Select built-in looks with list_lut_presets and apply_lut_preset; that tool copies only the selected LUT and its notices into the project. Put multi-step changes in splicewright_batch: atomic, one revision, one undo step. Pass the baseRevision you last read; on a conflict error the human changed something, so re-read instead of retrying. Undo is shared with the human: only undo your own last step, and pass the revision that step returned as baseRevision so a newer human edit is never the one undone. Frame args also take { near } to snap to edges, markers or beats.
+Edit only through splicewright_* tools, never by writing project.json or directly modifying raw/. For agent-authored rounds intended for human review, use apply_edit_review: it atomically applies the whole ops array and records before/after snapshots as one revision and undo step. Get its bounded summary with get_edit_review; request snapshots only when needed. Otherwise use splicewright_batch for an ordinary atomic edit. Pass the baseRevision you last read; on a conflict error the human changed something, so re-read instead of retrying. Undo is shared with the human: only undo your own last step, and pass the revision that step returned as baseRevision so a newer human edit is never the one undone. Frame args also take { near } to snap to edges, markers or beats.
 
 Before a master render, run lint and fix its errors (gaps, text outside the title-safe area, CJK in a font without glyphs, stale/unmeasured source decode or peak checks; run ingest with sourceHealth explicitly for source measurements). Check the result with storyboard over the changed range; render with preset draft for a quick full check. Record decisions worth keeping across sessions in AGENTS.md under Notes.`;
 
 export function createServer(dir: string): McpServer {
   const server = new McpServer({ name: "splicewright", version: "0.0.0" }, { instructions: INSTRUCTIONS });
   const baseRevision = z.number().int().optional().describe("Revision this edit is based on; stale writes are rejected. Omit for latest.");
+
+  server.registerTool("apply_edit_review", {
+    description: "Apply an agent edit round atomically as one revision and one undo step, preserving validated before/after snapshots for human review.",
+    inputSchema: {
+      ops: z.array(z.object({ op: z.string().min(1), args: z.unknown() })).min(1),
+      label: z.string().trim().min(1).max(160).optional(), summary: z.string().trim().min(1).max(2000).optional(), baseRevision,
+    },
+  }, async ({ ops: reviewOps, label, summary, baseRevision: revision }) => {
+    const r = applyEditReview(dir, reviewOps, { label, summary, baseRevision: revision });
+    if ("error" in r) return { ...json(r.error), isError: true };
+    return json({ revision: r.project.revision, summary: r.changes.summary, review: (r as any).review });
+  });
+  server.registerTool("get_edit_review", {
+    description: "Read the latest agent edit review metadata and concise summary. Full project snapshots are returned only when includeSnapshots is explicitly true.",
+    inputSchema: { recordId: z.string().uuid().optional(), includeSnapshots: z.boolean().optional().default(false) },
+  }, async ({ recordId, includeSnapshots }) => {
+    try { const review = getEditReview(dir, recordId, includeSnapshots); return review ? json(review) : { ...json({ code: "not_found", message: "edit review not found" }), isError: true }; }
+    catch (error) { return failed("invalid_review", error); }
+  });
 
   server.registerTool(
     "list_lut_presets",

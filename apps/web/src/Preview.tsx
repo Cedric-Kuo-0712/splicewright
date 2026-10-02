@@ -12,7 +12,7 @@ import { samplePlayerAudio } from "./audio-meter.ts";
 const Composition: React.FC<Props> = (props) => <SplicewrightProject {...props} components={config.components} />;
 
 
-export function Preview({ p }: { p: Project }) {
+export function Preview({ p, readOnly = false }: { p: Project; readOnly?: boolean }) {
   const [playing, setPlaying] = React.useState(false);
   const audioMeter = app.use((s) => s.audioMeter);
   const duck = app.use((s) => s.duck);
@@ -23,16 +23,19 @@ export function Preview({ p }: { p: Project }) {
   const frameRates = app.use((s) => s.frameRates);
   const useProxies = app.use((s) => s.useProxies);
   const rate = app.use((s) => s.rate);
-  const slip = app.use((s) => s.slip);
+  const storedSlip = app.use((s) => s.slip);
+  const slip = readOnly ? null : storedSlip;
   const looping = app.use((s) => s.looping);
-  const live = app.use((s) => s.live);
+  const storedLive = app.use((s) => s.live);
+  const live = readOnly ? null : storedLive;
   const sizes = app.use((s) => s.sizes);
   const animated = app.use((s) => s.animated);
   const fontVersions = app.use((s) => s.fontVersions);
   const luts = app.use((s) => s.luts);
   const audioFx = app.use((s) => s.audioFx);
   const reverseAudioFx = app.use((s) => s.reverseAudioFx);
-  const sampling = app.use((s) => s.sampling);
+  const storedSampling = app.use((s) => s.sampling);
+  const sampling = readOnly ? null : storedSampling;
   const shown = useMemo(() => {
     let out = p;
     if (useProxies && proxies.length) {
@@ -119,7 +122,7 @@ export function Preview({ p }: { p: Project }) {
         <span>Preview mix</span>
         {audioMeter.status === "unavailable" ? <b>Unmeasured</b> : audioMeter.status === "unmeasured" ? <b>Paused</b> : audioMeter.peakDb === null ? <b>Waiting for audio</b> : audioMeter.clipping ? <b>Clip</b> : <b>{audioMeter.peakDb === -Infinity ? "−∞" : audioMeter.peakDb.toFixed(1)} dBFS</b>}
       </div>
-      <TransformBox p={p} />
+      {!readOnly && <TransformBox p={p} />}
     </div>
   );
 }

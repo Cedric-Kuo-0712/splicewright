@@ -58,8 +58,9 @@ function scrub(e: React.PointerEvent<HTMLElement>, lanes: HTMLElement, ppf: numb
   el.onlostpointercapture = () => (scrubbing = false);
 }
 
-export function Timeline() {
-  const p = app.use((s) => s.project)!;
+export function Timeline({ project, readOnly = false }: { project?: Project | null; readOnly?: boolean } = {}) {
+  const storedProject = app.use((s) => s.project)!;
+  const p = project ?? storedProject;
   const ppf = app.use((s) => s.pxPerFrame);
   const selection = app.use((s) => s.selection);
   const gap = app.use((s) => s.gap);
@@ -351,15 +352,15 @@ export function Timeline() {
     ) : null;
 
   return (
-    <div className="timeline" ref={scroller} onScroll={onScroll}>
+      <div className={`timeline${readOnly ? " timeline-readonly" : ""}`} ref={scroller} onScroll={onScroll}>
       <div style={{ width: HEADER + width }}>
         <div className="row ruler" style={{ height: RULER }}>
           <div className="corner" style={{ width: HEADER }}>{formatFrame(from, fps, 1)}</div>
-          <div className="lane" style={{ width }} onPointerDown={(e) => scrub(e, e.currentTarget, ppf)} onContextMenu={(e) => openMenu(e, rulerMenu(frameAt(e.currentTarget, e.clientX, ppf)))}>
+          <div className="lane" style={{ width }} onPointerDown={(e) => scrub(e, e.currentTarget, ppf)} onContextMenu={(e) => !readOnly && openMenu(e, rulerMenu(frameAt(e.currentTarget, e.clientX, ppf)))}>
             {range && (
               <div className="io" style={{ left: range[0] * ppf, width: (range[1] - range[0]) * ppf }} title="I/O range: drag the ends; Alt+X clears">
-                <div className="io-h in" onPointerDown={(e) => ioDown(e, "in")} />
-                <div className="io-h out" onPointerDown={(e) => ioDown(e, "out")} />
+                <div className="io-h in" onPointerDown={(e) => !readOnly && ioDown(e, "in")} />
+                <div className="io-h out" onPointerDown={(e) => !readOnly && ioDown(e, "out")} />
               </div>
             )}
             <PlayheadHead ppf={ppf} />
@@ -390,7 +391,7 @@ export function Timeline() {
         </div>
         <div className="tracks" onPointerMove={move} onPointerUp={up}>
           {tracks.map((t) => (
-            <div key={t.id} className={`row ${reorder?.to === t.id && reorder.from !== t.id ? "drop-row" : ""}`} data-row={t.id} style={{ height: ROW }}>
+            <div inert={readOnly} key={t.id} className={`row ${reorder?.to === t.id && reorder.from !== t.id ? "drop-row" : ""}`} data-row={t.id} style={{ height: ROW }}>
               <TrackHeader p={p} t={t} onPointerDown={(e) => headerDown(e, t)} />
               <div
                 data-track={t.id}
@@ -451,7 +452,7 @@ export function Timeline() {
               </div>
             </div>
           ))}
-          <div className="row add-row" style={{ height: 30 }}>
+          <div inert={readOnly} className="row add-row" style={{ height: 30 }}>
             <div className="track-header" style={{ width: HEADER }} title="Add a track">
               {(["video", "audio", "caption", "overlay"] as const).map((k) => (
                 <button key={k} onClick={() => op("addTrack", { kind: k })} title={`Add ${k} track`}>
@@ -594,8 +595,8 @@ function SlipEnds({ p, item }: { p: Project; item: Item & { assetId: string; sou
   const last = item.sourceIn + (reverse ? 0 : item.duration - 1) * secPerFrame(p, item);
   return (
     <>
-      <img className="slip-end in" src={`/api/thumb?asset=${item.assetId}&t=${Math.floor(first)}`} alt="" draggable={false} />
-      <img className="slip-end out" src={`/api/thumb?asset=${item.assetId}&t=${Math.floor(last)}`} alt="" draggable={false} />
+      <img className="slip-end in" src={`/api/thumb?asset=${item.assetId}${snapshotQuery()}&t=${Math.floor(first)}`} alt="" draggable={false} />
+      <img className="slip-end out" src={`/api/thumb?asset=${item.assetId}${snapshotQuery()}&t=${Math.floor(last)}`} alt="" draggable={false} />
       <span className="slip-label">
         {formatFrame(Math.round(first * p.meta.fps), p.meta.fps)} → {formatFrame(Math.round(last * p.meta.fps), p.meta.fps)}
       </span>
@@ -694,7 +695,7 @@ function Thumbs({ p, item, width, viewLeft, viewWidth }: { p: Project; item: Ite
   const reverse = "reverse" in item && item.reverse;
   for (let x = Math.max(0, Math.floor(viewLeft / W) * W); x < Math.min(width, viewLeft + viewWidth); x += W) {
     const t = Math.floor(item.sourceIn + (reverse ? item.duration - 1 - x / ppf : x / ppf) * secPerFrame(p, item));
-    out.push(<img key={x} src={`/api/thumb?asset=${item.assetId}&t=${t}`} style={{ left: x, width: W }} draggable={false} alt="" />);
+    out.push(<img key={x} src={`/api/thumb?asset=${item.assetId}${snapshotQuery()}&t=${t}`} style={{ left: x, width: W }} draggable={false} alt="" />);
   }
   return <div className="thumbs">{out}</div>;
 }
@@ -705,10 +706,12 @@ function Wave({ assetId, sourceIn, fps, ppf, duration }: { assetId: string; sour
   const ref = useRef<HTMLCanvasElement>(null);
   // ponytail: one canvas per item capped at 8000 px; tile it if zoomed-in long music looks blurry.
   const w = Math.min(8000, Math.ceil(duration * ppf));
+  const query = snapshotQuery();
+  const waveKey = `${assetId}${query}`;
   useEffect(() => {
-    if (!waves.has(assetId)) waves.set(assetId, fetch(`/api/waveform?asset=${assetId}`).then((r) => r.json()));
+    if (!waves.has(waveKey)) waves.set(waveKey, fetch(`/api/waveform?asset=${assetId}${query}`).then((r) => r.json()));
     let live = true;
-    waves.get(assetId)!.then(({ rate, peaks }) => {
+    waves.get(waveKey)!.then(({ rate, peaks }) => {
       const c = ref.current;
       if (!live || !c || !peaks) return;
       const g = c.getContext("2d")!;
@@ -725,7 +728,7 @@ function Wave({ assetId, sourceIn, fps, ppf, duration }: { assetId: string; sour
       }
     });
     return () => void (live = false);
-  }, [assetId, sourceIn, fps, duration, w]);
+  }, [assetId, sourceIn, fps, duration, w, waveKey, query]);
   return <canvas ref={ref} className="wave" width={w} height={ROW - 8} style={{ width: duration * ppf }} />;
 }
 
@@ -747,4 +750,9 @@ export function zoom(factor: number) {
 export function fitZoom(p: Project) {
   const lanes = document.querySelector(".timeline")?.clientWidth ?? 1200;
   return (lanes - HEADER - 40) / Math.max(1, durationFrames(p));
+}
+
+function snapshotQuery() {
+  const { reviewView, review } = app.get();
+  return reviewView && review ? `&view=${reviewView}&id=${encodeURIComponent(review.id)}` : "";
 }

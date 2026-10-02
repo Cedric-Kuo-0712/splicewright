@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
-import { addRecent, applyLutPreset, fingerprint, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
+import { addRecent, applyEditReview, applyLutPreset, fingerprint, getEditReview, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, revertEditReview, run, setEditReviewStatus, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
 import { ASPECTS, captionWords, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
 import { scanMaterials, relinkMaterial, prepareMaterials, audioFxPath, displayable, ensureAudioFx, ffmpeg, ingest, limiter, loudness, reverseAudioPath, reverseProjectAudio, thumb, waveform, type Step } from "@splicewright/ingest";
 import { cancelRender, renderStatus, startRender, duckRanges, fontVersionsOf, lutsOf, lutVersion, reverseProxiesOf } from "@splicewright/render/node";
@@ -148,8 +148,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     }, 30);
   });
 
-  const snapshot = () => {
-    const project = load(dir);
+  const snapshot = (project = load(dir)) => {
     const fx = audioFxState(project);
     const probes = Object.fromEntries(Object.entries(readAssets(dir)).filter(([id, probe]) => {
       const asset = project.assets[id];
@@ -163,7 +162,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     const reverseProxies = reverseProxiesOf(dir, project);
     const durations = Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.duration ? [[id, a.duration]] : [])));
     const frameRates = Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.fps ? [[id, a.fps]] : [])));
-    const ctx = loadCtx(dir);
+    const ctx = loadCtx(dir, project);
     // A 65³ LUT is ~4 MB of JSON; the editor gets its version here and fetches the table from /api/lut when that changes.
     const lutVersions = Object.fromEntries(Object.entries(lutsOf(dir, project)).map(([id, lut]) => [id, lutVersion(lut)!]));
     const animated = Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : []));
@@ -264,6 +263,32 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             const b = await body(req);
             return result(res, b.op === "relinkAsset" ? await relinkMaterial(dir, b.args, b.baseRevision) : run(dir, b.op, b.args, b.baseRevision));
           }
+          if (route === "POST /api/edit-review/apply") {
+            const b = await body(req);
+            if (!Array.isArray(b.ops) || b.ops.length < 1) return send(res, 400, { error: { code: "invalid_args", message: "ops must be a non-empty array" } });
+            const r = applyEditReview(dir, b.ops, { label: b.label, summary: b.summary, baseRevision: b.baseRevision });
+            return "error" in r ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, { revision: r.project.revision, summary: r.changes.summary, review: (r as any).review, ...snapshot() });
+          }
+          if (route === "GET /api/edit-review") {
+            try {
+              const review = getEditReview(dir, url.searchParams.get("id") ?? undefined, true);
+              if (!review) return send(res, 404, { error: { code: "not_found", message: "edit review not found" } });
+              const view = url.searchParams.get("view");
+              if (view !== "before" && view !== "after") return send(res, 200, { ...review, before: undefined, after: undefined });
+              const project = review[view];
+              return send(res, 200, { ...snapshot(project), review: { id: review.id, label: review.label, summary: review.summary, status: review.status }, project });
+            } catch (error) { return send(res, 400, { error: { code: "invalid_review", message: (error as Error).message } }); }
+          }
+          if (route === "POST /api/edit-review/status") {
+            const b = await body(req);
+            const r = setEditReviewStatus(dir, String(b.id ?? ""), b.status);
+            return "error" in r && r.error ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, r);
+          }
+          if (route === "POST /api/edit-review/revert") {
+            const b = await body(req);
+            const r = revertEditReview(dir, String(b.id ?? ""), b.baseRevision);
+            return "error" in r ? send(res, r.error.code === "conflict" ? 409 : 400, r) : send(res, 200, { revision: r.project.revision, summary: r.changes.summary, ...snapshot() });
+          }
           if (route === "POST /api/reverse-proxy") {
             const b = await body(req);
             const asset = load(dir).assets[b.assetId];
@@ -335,7 +360,10 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
           if (route === "GET /api/history") return send(res, 200, historyList(dir));
           if (route === "GET /api/lut") {
             const id = url.searchParams.get("asset") ?? "";
-            const lut = lutsOf(dir, load(dir))[id];
+            const view = url.searchParams.get("view");
+            const review = view === "before" || view === "after" ? getEditReview(dir, url.searchParams.get("id") ?? undefined, true) : undefined;
+            if (view && !review) return send(res, 404, { error: { code: "not_found", message: "Review snapshot is unavailable" } });
+            const lut = lutsOf(dir, review && (view === "before" || view === "after") ? review[view] : load(dir))[id];
             return lut ? send(res, 200, lut) : send(res, 404, { error: { code: "not_found", message: `LUT ${id} is unused, missing or invalid` } });
           }
           if (route === "GET /api/events") {
@@ -344,12 +372,15 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             clients.add(res);
             return req.on("close", () => clients.delete(res));
           }
-          const asset = load(dir).assets[url.searchParams.get("asset") ?? ""];
+          const view = url.searchParams.get("view");
+          const review = view === "before" || view === "after" ? getEditReview(dir, url.searchParams.get("id") ?? undefined, true) : undefined;
+          const previewProject = review && (view === "before" || view === "after") ? review[view] : load(dir);
+          const asset = previewProject.assets[url.searchParams.get("asset") ?? ""];
           if (!asset) return send(res, 404, { error: "unknown asset" });
           if (route === "GET /api/thumb") {
             const t = Math.max(0, Math.round(Number(url.searchParams.get("t")) || 0));
             if (asset.kind === "image") return sendFile(req, res, join(dir, asset.path));
-            return sendFile(req, res, await thumb(dir, asset.id, asset.path, t, limited), "image/jpeg");
+            return sendFile(req, res, await thumb(dir, view ? `${asset.id}-${fingerprint(join(dir, asset.path))}` : asset.id, asset.path, t, limited), "image/jpeg");
           }
           if (route === "GET /api/waveform") return res.end(readFileSync(await waveform(dir, asset.id, asset.path, limited)));
           send(res, 404, { error: `no route ${route}` });

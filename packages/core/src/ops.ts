@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { ANIMATABLE, Ease, FontRole, MASK_PROPS, StickerProps, TextStyle, Theme, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type OverlayItem, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
-import { keyAt, withKey } from "./keyframes.ts";
+import { ANIMATABLE, GRADE_ANIMATABLE, Ease, FontRole, MASK_PROPS, OVERLAY_TRANSFORM_ANIMATABLE, StickerProps, TextStyle, Theme, type Anchor, type AudioItem, type CaptionItem, type Ctx, type Item, type OverlayItem, type Project, type Track, type TrackKind, type VideoItem } from "./schema.ts";
+import { keyAt, keyframeFrame, withKey } from "./keyframes.ts";
 import { beatFrames, snap, snapPoints, snapSpan } from "./timing.ts";
 import { badFont, isTheme, THEME_IDS } from "./themes.ts";
 import { anchorOf, frameOf, itemSpan, secPerFrame, sourceAt, validate, videoItems } from "./validate.ts";
@@ -204,7 +204,40 @@ function checkText(props: Record<string, unknown>, p: Project) {
 
 // ---------- ops ----------
 
+function advanceOverlayKeys(item: OverlayItem, seconds: number) {
+  if (!item.keyframes) return;
+  const offset = (item.keyframeOffset ?? 0) + seconds;
+  if (offset >= 0) item.keyframeOffset = offset;
+  else {
+    item.keyframes = Object.fromEntries(Object.entries(item.keyframes).map(([prop, keys]) => [prop, keys.map((key) => ({ ...key, t: key.t - offset }))]));
+    item.keyframeOffset = 0;
+  }
+}
+
 export const ops: Record<string, OpDef<any>> = {
+  relinkAsset: def(
+    "Explicitly replace a source while preserving asset ID and timeline references. Requires ingest preflight; changed content needs acceptChanged. Unsafe source ranges are refused. One undo step.",
+    z.object({ assetId: Id, path: z.string().min(1), acceptChanged: z.boolean().optional() }), (p, a, ctx) => {
+      const asset = p.assets[a.assetId];
+      if (!asset) fail("not_found", `asset ${a.assetId} not found`);
+      const candidate = ctx.relinkCandidate;
+      if (!candidate || candidate.assetId !== a.assetId || candidate.path !== a.path) fail("invalid", "relink requires source preflight through ingest");
+      if (candidate.kind !== asset.kind) fail("invalid", `replacement format kind ${candidate.kind} differs from ${asset.kind}`);
+      if (!candidate.identical && !a.acceptChanged) fail("invalid", "replacement content differs or original identity is unknown; explicitly pass acceptChanged after reviewing it");
+      const unsafe: string[] = [];
+      for (const track of p.tracks) for (const item of track.items) {
+        if (!("assetId" in item) || item.assetId !== asset.id || !("sourceIn" in item) || asset.kind === "image") continue;
+        const end = Math.max(sourceAt(p, item, item.start), sourceAt(p, item, item.start + item.duration));
+        if (candidate.duration === undefined || end > candidate.duration + 1e-6) unsafe.push(`${item.id}: source ${item.sourceIn.toFixed(3)}..${end.toFixed(3)}s`);
+      }
+      if (unsafe.length) fail("invalid", `replacement cannot safely preserve usage: ${unsafe.join("; ")}`);
+      const from = asset.path;
+      asset.path = candidate.path;
+      for (const track of p.tracks) if (track.kind === "overlay") for (const item of track.items)
+        if (item.component === "Sticker" && item.props.src === from) item.props.src = candidate.path;
+      return `relinked ${asset.id}: ${from} → ${candidate.path}${candidate.identical ? " (identical content)" : " (changed content; analysis and proxy invalidated)"}`;
+    },
+  ),
   importAsset: def(
     "Register a media file (path relative to the project root). Idempotent by path and by content fingerprint; a probed asset whose file moved is re-pointed to the new path.",
     z.object({ path: z.string().min(1), kind: z.enum(["video", "audio", "image", "lut", "font"]).optional() }),
@@ -337,6 +370,7 @@ export const ops: Record<string, OpDef<any>> = {
         if (t.kind === "video" && (item as VideoItem).reverse) (item as VideoItem).sourceIn += second.duration * secPerFrame(p, item as VideoItem);
         else (second as VideoItem | AudioItem).sourceIn += offset * secPerFrame(p, item as VideoItem);
       }
+      if (t.kind === "overlay") advanceOverlayKeys(second as OverlayItem, offset / p.meta.fps);
       delete (second as { fadeIn?: number }).fadeIn;
       delete (item as { fadeOut?: number }).fadeOut;
       delete (item as VideoItem).transition; // it leads out of the second half now
@@ -370,7 +404,9 @@ export const ops: Record<string, OpDef<any>> = {
       const anchor = anchorOf(item);
       if (anchor) {
         if (a.edge === "start" ? a.to >= end(item) : a.to <= item.start) fail("invalid", `trim leaves ${item.id} with no duration`);
+        const origin = t.kind === "overlay" ? keyframeFrame(p, item as OverlayItem, (item as OverlayItem).keyframeOffset ?? 0) : 0;
         anchor[a.edge === "start" ? "sourceStart" : "sourceEnd"] = toSource(p, anchor, a.to);
+        if (t.kind === "overlay") advanceOverlayKeys(item as OverlayItem, (keyframeFrame(p, item as OverlayItem, (item as OverlayItem).keyframeOffset ?? 0) - origin) / p.meta.fps);
         return `re-anchored ${item.id} ${a.edge} → ${spanText(p, item)}`;
       }
       const oldEnd = end(item);
@@ -388,8 +424,11 @@ export const ops: Record<string, OpDef<any>> = {
         const delta = a.to - item.start;
         item.duration -= delta;
         if ("sourceIn" in item && !(t.kind === "video" && (item as VideoItem).reverse)) item.sourceIn += delta * secPerFrame(p, item as VideoItem);
+        if (t.kind === "overlay") advanceOverlayKeys(item as OverlayItem, delta / p.meta.fps);
         if (ripple) shift(t, oldEnd, -delta);
-        else item.start = a.to;
+        else {
+          item.start = a.to;
+        }
       }
       if (item.duration < 1) fail("invalid", `trim leaves ${item.id} with no duration`);
       return `trimmed ${item.id} ${a.edge} → [${item.start}, ${end(item)})` + (ripple ? " (ripple)" : "");
@@ -526,6 +565,13 @@ export const ops: Record<string, OpDef<any>> = {
       for (const k of Object.keys(MASK_PROPS)) delete v.keyframes[k as keyof typeof MASK_PROPS];
       if (!Object.keys(v.keyframes).length) delete v.keyframes;
     }
+    if ("grade" in a.patch && !(a.patch.grade as VideoItem["grade"] | null)?.lut) {
+      delete v.lutKeyframes;
+      if (v.keyframes?.lutStrength) {
+        delete v.keyframes.lutStrength;
+        if (!Object.keys(v.keyframes).length) delete v.keyframes;
+      }
+    }
     if (t.kind === "overlay" && (item as OverlayItem).component === "Text") checkText((item as OverlayItem).props, p);
     if (t.kind === "overlay" && (item as OverlayItem).component === "Sticker") {
       const sticker = StickerProps.safeParse((item as OverlayItem).props);
@@ -552,20 +598,58 @@ export const ops: Record<string, OpDef<any>> = {
   ),
 
   setKeyframe: def(
-    `Key a video item's ${ANIMATABLE.join(", ")} (an audio item's volume only, for manual ducking) to \`value\` at timeline frame \`at\` (inside the item), replacing a key on that frame; value null removes it. Once a prop has keys they override its plain value; removing the last key restores it. Mask props (maskX, maskY, maskW, maskH, maskFeather) need a mask set first. Keys ride with the source, so split, trim, slip and speed keep them on the same content.`,
-    z.object({ itemId: Id, prop: z.enum(ANIMATABLE), at: z.number().int(), value: z.number().nullable(), ease: Ease.optional() }),
+    `Key video transform/effects/mask/volume and Color values (${[...ANIMATABLE, ...GRADE_ANIMATABLE].join(", ")}), an audio item's volume, or an overlay transform (${OVERLAY_TRANSFORM_ANIMATABLE.join(", ")}) to numeric value at timeline frame at. Overlays may also key an existing numeric component prop using props.<name>. Overlay keys use item-local seconds; media keys use source seconds. LUT strength is numeric; use setLutKeyframe to switch LUT assets discretely.`,
+    z.object({ itemId: Id, prop: z.string().min(1), at: z.number().int(), value: z.number().nullable(), ease: Ease.optional() }),
     (p, a) => {
       const { track: t, item } = locate(p, a.itemId);
+      const span = itemSpan(p, item);
+      if (!span || a.at < span.start || a.at >= span.start + span.duration) fail("invalid", `frame ${a.at} is outside ${item.id}'s visible span`);
+      if (t.kind === "overlay") {
+        const v = item as OverlayItem;
+        const customPath = a.prop.startsWith("props.") ? a.prop.slice(6).split(".") : [];
+        const customRoot = customPath.length === 2 ? v.props[customPath[0]] : undefined;
+        const customValue = customPath.length === 1 ? v.props[customPath[0]] : customPath.length === 2 && customRoot && typeof customRoot === "object" ? (customRoot as Record<string, unknown>)[customPath[1]] : undefined;
+        const custom = customPath.length > 0 && typeof customValue === "number";
+        if (!(OVERLAY_TRANSFORM_ANIMATABLE as readonly string[]).includes(a.prop) && !custom) fail("invalid", `${v.id} can key overlay transform props or existing numeric component props via props.<name>[.<nestedName>]; ${a.prop} is not numeric or absent`);
+        if (a.value === null && !keyAt(p, v, a.prop, a.at)) fail("invalid", `${v.id} has no ${a.prop} key at frame ${a.at}`);
+        const kf = withKey(p, v, a.prop, a.at, a.value, a.ease);
+        if (kf) v.keyframes = kf as OverlayItem["keyframes"];
+        else delete v.keyframes;
+        return a.value === null ? `removed ${a.prop} key on ${v.id} at ${a.at}` : `keyed ${v.id} ${a.prop} = ${a.value} at ${a.at}`;
+      }
+      if (!["video", "audio"].includes(t.kind) || !("assetId" in item)) fail("invalid", `${item.id} is not a video or audio item`);
       const v = item as VideoItem;
-      if (!["video", "audio"].includes(t.kind) || !("assetId" in v)) fail("invalid", `${item.id} is not a video or audio item`);
-      if (t.kind === "audio" && a.prop !== "volume") fail("invalid", `${v.id} is an audio item; only volume can be keyed, not ${a.prop}`);
+      const supported = t.kind === "audio" ? a.prop === "volume" : [...ANIMATABLE, ...GRADE_ANIMATABLE].includes(a.prop as never);
+      if (!supported) fail("invalid", `${v.id} does not support numeric key ${a.prop}`);
       if (a.prop in MASK_PROPS && !v.mask) fail("invalid", `${v.id} has no mask to key ${a.prop} on; set one with setProps first`);
-      if (a.at < v.start || a.at >= end(v)) fail("invalid", `frame ${a.at} is outside ${v.id} [${v.start}, ${end(v)})`);
+      if (a.prop === "lutStrength" && !v.grade?.lut) fail("invalid", `${v.id} has no LUT to key strength on; set one with setProps first`);
       if (a.value === null && !keyAt(p, v, a.prop, a.at)) fail("invalid", `${v.id} has no ${a.prop} key at frame ${a.at}`);
       const kf = withKey(p, v, a.prop, a.at, a.value, a.ease);
       if (kf) v.keyframes = kf;
       else delete v.keyframes;
       return a.value === null ? `removed ${a.prop} key on ${v.id} at ${a.at}` : `keyed ${v.id} ${a.prop} = ${a.value} at ${a.at}`;
+    },
+  ),
+
+  setLutKeyframe: def(
+    "Switch a video item's LUT at timeline frame at. Asset selection is discrete and holds the most recent key; LUTs are never blended with each other. Strength is animated separately with setKeyframe prop lutStrength.",
+    z.object({ itemId: Id, at: z.number().int(), assetId: Id.nullable() }),
+    (p, a) => {
+      const { track: t, item } = locate(p, a.itemId);
+      if (t.kind !== "video" || !("assetId" in item)) fail("invalid", `${item.id} is not a video item`);
+      const v = item as VideoItem;
+      if (a.at < v.start || a.at >= end(v)) fail("invalid", `frame ${a.at} is outside ${v.id} [${v.start}, ${end(v)})`);
+      if (!v.grade?.lut) fail("invalid", `${v.id} has no LUT to switch; set one with setProps first`);
+      const at = sourceAt(p, v, a.at);
+      const keys = (v.lutKeyframes ?? []).filter((key) => Math.abs(key.t - at) >= secPerFrame(p, v) / 2);
+      if (a.assetId !== null) {
+        if (p.assets[a.assetId]?.kind !== "lut") fail("invalid", `${a.assetId} is missing or is not a LUT asset`);
+        keys.push({ t: +at.toFixed(4), assetId: a.assetId });
+        keys.sort((x, y) => x.t - y.t);
+      }
+      if (keys.length) v.lutKeyframes = keys;
+      else delete v.lutKeyframes;
+      return a.assetId === null ? `removed LUT key on ${v.id} at ${a.at}` : `keyed LUT ${a.assetId} on ${v.id} at ${a.at}`;
     },
   ),
 

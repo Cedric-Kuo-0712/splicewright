@@ -1,14 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, extname, join, resolve, sep } from "node:path";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
-import { renderMedia, renderStill, selectComposition } from "@remotion/renderer";
+import { makeCancelSignal, renderMedia, renderStill, selectComposition } from "@remotion/renderer";
 import { fingerprint, load, loadCtx, readAssets, sizesOf } from "@splicewright/core/node";
 import { captionWords, parseCube, type Project } from "@splicewright/core";
-import { audioFxPath, ffmpeg, grid, reverseAudioPath, scratch, spread } from "@splicewright/ingest";
+import { audioFxPath, ffmpeg, grid, measureFinalMix, reverseAudioPath, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
 import type { GradeLut } from "./grade-effect.ts";
 import { duckRanges } from "./duck.ts";
@@ -47,7 +47,7 @@ const lutVersions = new WeakMap<object, string>();
  * (lookEffects then names the unavailable asset where it is used) so one bad .cube can't take the
  * editor or an unrelated render down. */
 export function lutsOf(dir: string, project: Project) {
-  const used = new Set(project.tracks.flatMap((t) => t.items.flatMap((i) => ("grade" in i && i.grade?.lut ? [i.grade.lut.assetId] : []))));
+  const used = new Set(project.tracks.flatMap((t) => t.items.flatMap((i) => ("grade" in i && i.grade?.lut ? [i.grade.lut.assetId, ...(i.lutKeyframes ?? []).map((key) => key.assetId)] : []))));
   const luts: Record<string, GradeLut> = {};
   for (const a of Object.values(project.assets)) {
     if (a.kind !== "lut" || !used.has(a.id)) continue;
@@ -207,6 +207,10 @@ export interface RenderOptions {
   /** Timeline frames [from, to). */
   range?: [number, number];
   onProgress?: (progress: number) => void;
+  /** Internal cancellation hook used by background export jobs. */
+  cancelSignal?: Parameters<typeof renderMedia>[0]["cancelSignal"];
+  /** Internal cancellation check around preparation steps that do not accept a signal. */
+  shouldCancel?: () => boolean;
 }
 
 /**
@@ -225,8 +229,10 @@ export async function limit(file: string) {
   }
 }
 
-export async function render(dir: string, { output, preset = "master", range, onProgress }: RenderOptions) {
+export async function render(dir: string, { output, preset = "master", range, onProgress, cancelSignal, shouldCancel }: RenderOptions) {
+  if (shouldCancel?.()) throw new Error("render cancelled");
   const { composition, ...opts } = await prepare(dir);
+  if (shouldCancel?.()) throw new Error("render cancelled");
   const presets = { ...BUILTIN, ...(composition.props.presets as Record<string, Preset> | undefined) };
   if (!presets[preset]) throw new Error(`unknown preset "${preset}"; have ${Object.keys(presets).join(", ")}`);
   mkdirSync(dirname(output), { recursive: true });
@@ -235,6 +241,7 @@ export async function render(dir: string, { output, preset = "master", range, on
     composition,
     codec: "h264",
     outputLocation: output,
+    cancelSignal,
     frameRange: range ? [range[0], range[1] - 1] : null,
     onProgress: ({ progress }) => onProgress?.(progress),
     ...presets[preset],
@@ -245,23 +252,56 @@ export async function render(dir: string, { output, preset = "master", range, on
 
 export interface Job {
   id: string;
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "cancelled";
   progress: number;
   output: string;
+  preset: string;
+  finalMix?: { status: "measuring" } | ({ status: "measured"; measuredAt: string } & Awaited<ReturnType<typeof measureFinalMix>>);
   error?: string;
 }
 
 const jobs = new Map<string, Job>();
+const controls = new Map<string, { cancel: () => void; cancelled: boolean; staging: string }>();
 
-/** Starts render() in the background; poll with renderStatus(). In-process only. */
+/** Starts an atomic background render. Only completed output is published at the requested path. */
 export function startRender(dir: string, opts: RenderOptions): Job {
-  const job: Job = { id: `r_${(jobs.size + 1).toString(36)}`, status: "running", progress: 0, output: opts.output };
+  const id = `r_${randomUUID()}`;
+  const ext = extname(opts.output) || ".mp4";
+  const staging = join(dirname(opts.output), `.${basename(opts.output, ext)}.partial-${id}${ext}`);
+  const { cancel, cancelSignal } = makeCancelSignal();
+  const control = { cancel, cancelled: false, staging };
+  const job: Job = { id, status: "running", progress: 0, output: opts.output, preset: opts.preset ?? "master" };
   jobs.set(job.id, job);
-  render(dir, { ...opts, onProgress: (p) => (job.progress = +p.toFixed(3)) }).then(
-    () => Object.assign(job, { status: "done", progress: 1 }),
-    (e: Error) => Object.assign(job, { status: "error", error: e.message }),
-  );
+  controls.set(id, control);
+  render(dir, { ...opts, output: staging, cancelSignal, shouldCancel: () => control.cancelled, onProgress: (p) => (job.progress = +p.toFixed(3)) }).then(async () => {
+    if (control.cancelled) throw new Error("render cancelled");
+    if (!existsSync(staging) || !statSync(staging).size) throw new Error("render produced no output file");
+    job.finalMix = { status: "measuring" };
+    const finalMix = await measureFinalMix(staging);
+    if (control.cancelled) throw new Error("render cancelled");
+    job.finalMix = { status: "measured", measuredAt: new Date().toISOString(), ...finalMix };
+    renameSync(staging, opts.output);
+    Object.assign(job, { status: "done", progress: 1 });
+  }).catch((e: unknown) => {
+    if (control.cancelled) Object.assign(job, { status: "cancelled", error: undefined });
+    else Object.assign(job, { status: "error", error: e instanceof Error ? e.message : String(e) });
+    try { rmSync(staging, { force: true }); }
+    catch (cleanupError) {
+      job.error = `${job.error ?? "render cancelled"}; staging cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`;
+    }
+  }).finally(() => controls.delete(id));
   return job;
 }
 
 export const renderStatus = (id: string) => jobs.get(id);
+
+/** Request cancellation of a running export. Returns false once it has settled or if unknown. */
+export function cancelRender(id: string): boolean {
+  const control = controls.get(id);
+  const job = jobs.get(id);
+  if (!control || control.cancelled || !job || job.status !== "running") return false;
+  control.cancelled = true;
+  control.cancel();
+  Object.assign(job, { status: "cancelled", error: undefined });
+  return true;
+}

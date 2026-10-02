@@ -1,4 +1,6 @@
 import { createReadStream, createWriteStream, type ReadStream, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, watch } from "node:fs";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { pipeline } from "node:stream/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
@@ -6,14 +8,15 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
-import { addRecent, applyLutPreset, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
+import { addRecent, applyLutPreset, fingerprint, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, run, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
 import { ASPECTS, captionWords, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
-import { audioFxPath, displayable, ensureAudioFx, ffmpeg, ingest, limiter, loudness, reverseAudioPath, reverseProjectAudio, thumb, waveform, type Step } from "@splicewright/ingest";
-import { duckRanges, fontVersionsOf, lutsOf, lutVersion, reverseProxiesOf } from "@splicewright/render/node";
+import { scanMaterials, relinkMaterial, prepareMaterials, audioFxPath, displayable, ensureAudioFx, ffmpeg, ingest, limiter, loudness, reverseAudioPath, reverseProjectAudio, thumb, waveform, type Step } from "@splicewright/ingest";
+import { cancelRender, renderStatus, startRender, duckRanges, fontVersionsOf, lutsOf, lutVersion, reverseProxiesOf } from "@splicewright/render/node";
 
 // Spec §7.3. `splicewright open` runs this: a Vite dev server for the UI (open question 5, the simple
 // option) plus a small API. Every mutation goes through core ops with the client's baseRevision.
 
+const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
 function send(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
@@ -75,6 +78,7 @@ interface Hooks {
 function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
   const hasProject = () => existsSync(join(dir, "project.json"));
   const clients = new Set<ServerResponse>();
+  const exportIds = new Set<string>();
   const broadcast = (m: unknown) => clients.forEach((c) => c.write(`data: ${JSON.stringify(m)}\n\n`));
   const audioFxPending = new Map<string, string>();
   const audioFxErrors = new Map<string, { path: string; message: string }>();
@@ -147,9 +151,16 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
   const snapshot = () => {
     const project = load(dir);
     const fx = audioFxState(project);
-    const proxies = Object.keys(project.assets).filter((id) => existsSync(join(dir, ".splicewright", "proxies", "edit", `${id}.mp4`)));
+    const probes = Object.fromEntries(Object.entries(readAssets(dir)).filter(([id, probe]) => {
+      const asset = project.assets[id];
+      return asset && probe.path === asset.path && probe.fingerprint === fingerprint(join(dir, asset.path));
+    }));
+    const proxies = Object.keys(project.assets).filter((id) => {
+      const probe = probes[id];
+      return probe && probe.done?.proxy === probe.fingerprint
+        && existsSync(join(dir, ".splicewright", "proxies", "edit", `${id}.mp4`));
+    });
     const reverseProxies = reverseProxiesOf(dir, project);
-    const probes = readAssets(dir);
     const durations = Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.duration ? [[id, a.duration]] : [])));
     const frameRates = Object.fromEntries(Object.entries(probes).flatMap(([id, a]) => (a.fps ? [[id, a.fps]] : [])));
     const ctx = loadCtx(dir);
@@ -205,9 +216,53 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             return path === dir ? undefined : switchTo(path);
           }
           if (!hasProject()) return send(res, 409, { error: { code: "no_project", message: "no project in this folder yet; create one with POST /api/init" } });
+          if (route === "GET /api/export") {
+            const jobs = [...exportIds].map((id) => renderStatus(id)).filter((job) => !!job).map((job) => ({ ...job, output: basename(job.output) }));
+            return send(res, 200, jobs);
+          }
+          if (route === "POST /api/export") {
+            const b = await body(req);
+            const preset = b.preset === "draft" ? "draft" : b.preset === "master" ? "master" : null;
+            if (!preset) return send(res, 400, { error: { code: "invalid", message: 'preset must be "draft" or "master"' } });
+            const title = String(load(dir).meta.title).replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "splicewright";
+            const outputDir = join(dir, "exports");
+            const output = join(outputDir, `${title}-${preset}-${Date.now()}.mp4`);
+            mkdirSync(outputDir, { recursive: true });
+            const job = startRender(dir, { output, preset });
+            exportIds.add(job.id);
+            return send(res, 202, { ...job, output: basename(job.output) });
+          }
+          const exportMatch = /^\/api\/export\/([^/]+)(?:\/(cancel|reveal))?$/.exec(url.pathname);
+          if (exportMatch) {
+            const [, id, action] = exportMatch;
+            if (action && req.method !== "POST") return send(res, 405, { error: { code: "method_not_allowed", message: "export actions require POST" } });
+            if (!action && req.method !== "GET") return send(res, 405, { error: { code: "method_not_allowed", message: "export status requires GET" } });
+            if (!exportIds.has(id)) return send(res, 404, { error: { code: "not_found", message: "unknown export job" } });
+            const job = renderStatus(id);
+            if (!job) return send(res, 404, { error: { code: "not_found", message: "unknown export job" } });
+            if (action === "cancel") {
+              if (!cancelRender(id)) return send(res, 409, { error: { code: "not_running", message: "export is no longer running" } });
+            } else if (action === "reveal") {
+              if (job.status !== "done" || !existsSync(job.output)) return send(res, 409, { error: { code: "not_complete", message: "output is available after a successful export" } });
+              try {
+                if (process.platform === "darwin") await execFileAsync("open", ["-R", job.output]);
+                else if (process.platform === "win32") await execFileAsync("explorer.exe", ["/select,", job.output]);
+                else await execFileAsync("xdg-open", [dirname(job.output)]);
+              } catch (e) { return send(res, 500, { error: { code: "open_failed", message: (e as Error).message } }); }
+              return send(res, 200, { opened: true });
+            }
+            return send(res, 200, { ...job, output: basename(job.output) });
+          }
+          if (route === "GET /api/materials/scan") return send(res, 200, await scanMaterials(dir));
+          if (route === "POST /api/materials/prepare") {
+            const b = await body(req);
+            const task = queue.then(() => prepareMaterials(dir, { paths: b.paths, steps: b.steps ?? ["sourceHealth", "thumbs", "waveform", "loudness"] }));
+            queue = task.then(() => {}, () => {});
+            return send(res, 200, await task);
+          }
           if (route === "POST /api/op") {
             const b = await body(req);
-            return result(res, run(dir, b.op, b.args, b.baseRevision));
+            return result(res, b.op === "relinkAsset" ? await relinkMaterial(dir, b.args, b.baseRevision) : run(dir, b.op, b.args, b.baseRevision));
           }
           if (route === "POST /api/reverse-proxy") {
             const b = await body(req);
@@ -220,7 +275,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
           }
           if (route === "POST /api/lut-presets/apply") {
             const b = await body(req);
-            return result(res, applyLutPreset(dir, b.itemId, b.presetId, b.baseRevision));
+            return result(res, applyLutPreset(dir, b.itemId, b.presetId, b.baseRevision, b.at));
           }
           if (route === "POST /api/import") {
             mkdirSync(join(dir, "raw"), { recursive: true });

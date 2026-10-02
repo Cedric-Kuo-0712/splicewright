@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { animate, apply, bezier, Keyframes, badFont, builtinTheme, captionWords, createProject, itemSpan, sourceAt, textCss, THEME_IDS, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
+import { animate, animateOverlay, apply, bezier, Keyframes, badFont, builtinTheme, captionWords, createProject, itemSpan, sourceAt, textCss, THEME_IDS, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
 
 const ctx: Ctx = {
   assetDurations: { a_clip: 10, a_song: 60 },
@@ -355,6 +355,60 @@ describe("ops", () => {
     p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 0, value: null }, ctx));
     p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "opacity", at: 30, value: null }, ctx));
     expect(v().keyframes).toBeUndefined();
+  });
+
+  it("animates overlay transforms and numeric component props in local time through split and left trim", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { component: "Text", props: { text: "Hi", amount: 0, textStyle: { size: 20 } }, at: 0, duration: 90 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_3", prop: "x", at: 0, value: 0 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_3", prop: "x", at: 60, value: 120 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_3", prop: "props.amount", at: 0, value: 2 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_3", prop: "props.textStyle.size", at: 60, value: 40 }, ctx));
+    expect(animateOverlay(p, item(p, "i_3"), 30).transform?.x).toBeCloseTo(60);
+    expect(animateOverlay(p, item(p, "i_3"), 30).props.amount).toBe(2);
+    expect(animateOverlay(p, item(p, "i_3"), 60).props.textStyle).toMatchObject({ size: 40 });
+    const split = ok(apply(p, "split", { itemId: "i_3", at: 30 }, ctx));
+    expect(animateOverlay(split, item(split, "i_4"), 30).transform?.x).toBeCloseTo(60);
+    const trim = ok(apply(p, "trim", { itemId: "i_3", edge: "start", to: 30 }, ctx));
+    expect(animateOverlay(trim, item(trim, "i_3"), 30).transform?.x).toBeCloseTo(60);
+    expect(err(apply(p, "setKeyframe", { itemId: "i_3", prop: "props.text", at: 0, value: 1 }, ctx))).toBe("invalid");
+    expect(err(apply(p, "setKeyframe", { itemId: "i_3", prop: "opacity", at: 0, value: 2 }, ctx))).toBe("invalid");
+    expect(err(apply(p, "setKeyframe", { itemId: "i_3", prop: "props.textStyle.size", at: 0, value: -2 }, ctx))).toBe("invalid");
+  });
+
+  it("preserves overlay phase on ripple trim, left extension and moved anchors", () => {
+    let p = ok(apply(fixture(), "insertItem", { component: "Card", props: {}, at: 0, duration: 90 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_3", prop: "x", at: 0, value: 0 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_3", prop: "x", at: 60, value: 120 }, ctx));
+    const trimmed = ok(apply(p, "trim", { itemId: "i_3", edge: "start", to: 30, ripple: true }, ctx));
+    expect(animateOverlay(trimmed, item(trimmed, "i_3"), 0).transform?.x).toBeCloseTo(60);
+    const moved = ok(apply(p, "move", { itemId: "i_3", to: 30 }, ctx));
+    const extended = ok(apply(moved, "trim", { itemId: "i_3", edge: "start", to: 0 }, ctx));
+    expect(animateOverlay(extended, item(extended, "i_3"), 60).transform?.x).toBeCloseTo(60);
+    p = ok(apply(p, "attach", { itemId: "i_3", to: "i_1" }, ctx));
+    p = ok(apply(p, "move", { itemId: "i_1", to: 180 }, ctx));
+    expect(animateOverlay(p, item(p, "i_3"), 210).transform?.x).toBeCloseTo(60);
+    expect(ok(apply(p, "setKeyframe", { itemId: "i_3", prop: "opacity", at: 210, value: 0.5 }, ctx))).toBeDefined();
+  });
+
+  it("animates Color controls numerically and switches LUT assets discretely", () => {
+    let p = fixture();
+    p.assets.lut_a = { id: "lut_a", path: "raw/a.cube", kind: "lut" };
+    p.assets.lut_b = { id: "lut_b", path: "raw/b.cube", kind: "lut" };
+    p = ok(apply(p, "setProps", { itemId: "i_1", patch: { grade: { exposure: -1, lut: { assetId: "lut_a", strength: 0.2 } } } }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "exposure", at: 0, value: -1 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "exposure", at: 30, value: 1 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "lutStrength", at: 0, value: 0 }, ctx));
+    p = ok(apply(p, "setKeyframe", { itemId: "i_1", prop: "lutStrength", at: 30, value: 1 }, ctx));
+    p = ok(apply(p, "setLutKeyframe", { itemId: "i_1", at: 30, assetId: "lut_b" }, ctx));
+    expect(animate(p, item(p, "i_1"), 15).grade?.exposure).toBeCloseTo(0);
+    expect(animate(p, item(p, "i_1"), 15).grade?.lut?.strength).toBeCloseTo(0.5);
+    expect(animate(p, item(p, "i_1"), 29).grade?.lut?.assetId).toBe("lut_a");
+    expect(animate(p, item(p, "i_1"), 30).grade?.lut?.assetId).toBe("lut_b");
+    expect(err(apply(p, "setLutKeyframe", { itemId: "i_1", at: 45, assetId: "a_song" }, ctx))).toBe("invalid");
+    const cleared = ok(apply(p, "setProps", { itemId: "i_1", patch: { grade: null } }, ctx));
+    expect(item(cleared, "i_1").lutKeyframes).toBeUndefined();
+    expect(item(cleared, "i_1").keyframes?.lutStrength).toBeUndefined();
   });
 
   it("masks: setProps validates them, keys need a mask and ride split and trim, keyed values override", () => {

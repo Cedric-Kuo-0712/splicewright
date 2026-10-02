@@ -87,6 +87,25 @@ export interface State {
   uploads: string[];
   /** Media-bin asset to scroll to and flash. */
   reveal: string | null;
+  exports: ExportJob[];
+  audioMeter: { status: "unmeasured" | "measuring" | "unavailable"; peakDb: number | null; clipping: boolean };
+}
+
+export interface ExportJob {
+  id: string;
+  status: "running" | "done" | "error" | "cancelled";
+  progress: number;
+  output: string;
+  preset: "draft" | "master";
+  finalMix?: { status: "measuring" } | {
+    status: "measured"; measuredAt: string; decoded: true;
+    audio: { status: "none" } | {
+      status: "measured"; integratedLufs: number | null;
+      samplePeak: { dbfs: number | null; atSeconds: number | null };
+      truePeak: { dbfs: number | null; atSeconds: number | null };
+    };
+  };
+  error?: string;
 }
 
 export type MenuEntry = { label: string; hint?: string; run: () => unknown; disabled?: boolean } | "-";
@@ -96,7 +115,7 @@ const num = (v: string | null) => (v === null || v === "" || isNaN(Number(v)) ? 
 
 export const app = store<State>({
   project: null, empty: false, recent: [], duck: {}, words: {}, proxies: [], reverseProxies: [], durations: {}, frameRates: {}, sizes: {}, animated: {}, fontVersions: {}, loudness: {}, audioFx: {}, reverseAudioFx: {}, audioFxProcessing: [], audioFxErrors: {}, audioFxLoudness: {}, luts: {}, useProxies: true, selection: [], sampling: null, gap: null, snapping: true, pxPerFrame: 2, message: null, rate: 1,
-  io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, cropping: false, masking: false, ingesting: {}, uploads: [], reveal: null,
+  io: { in: num(hash.get("in")), out: num(hash.get("out")) }, looping: false, menu: null, editing: null, slip: null, live: null, cropping: false, masking: false, ingesting: {}, uploads: [], reveal: null, exports: [], audioMeter: { status: "unmeasured", peakDb: null, clipping: false },
 });
 export const playhead = store({ frame: 0 });
 
@@ -142,10 +161,52 @@ export async function prepareReverse(assetId: string) {
   app.set({ message: { text: data.queued ? "Preparing reverse proxy…" : "Reverse proxy ready" } });
 }
 
+export async function startExport(preset: "draft" | "master") {
+  try {
+    const r = await fetch("/api/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ preset }) });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message ?? `HTTP ${r.status}`);
+    app.set(({ exports }) => ({ exports: [data as ExportJob, ...exports] }));
+  } catch (e) { say(`Export: ${(e as Error).message}`, true); }
+}
+
+export async function refreshExports() {
+  try {
+    const r = await fetch("/api/export");
+    if (r.ok) app.set({ exports: await r.json() as ExportJob[] });
+  } catch { /* The regular project refresh reports connection failures. */ }
+}
+
+export async function refreshExport(id: string) {
+  try {
+    const r = await fetch(`/api/export/${encodeURIComponent(id)}`);
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message ?? `HTTP ${r.status}`);
+    app.set(({ exports }) => ({ exports: exports.map((job) => job.id === id ? data as ExportJob : job) }));
+  } catch (e) { say(`Export status: ${(e as Error).message}`, true); }
+}
+
+export async function cancelExport(id: string) {
+  try {
+    const r = await fetch(`/api/export/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message ?? `HTTP ${r.status}`);
+    app.set(({ exports }) => ({ exports: exports.map((job) => job.id === id ? data as ExportJob : job) }));
+  } catch (e) { say(`Cancel export: ${(e as Error).message}`, true); }
+}
+
+export async function revealExport(id: string) {
+  try {
+    const r = await fetch(`/api/export/${encodeURIComponent(id)}/reveal`, { method: "POST" });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error?.message ?? `HTTP ${r.status}`);
+  } catch (e) { say(`Open export: ${(e as Error).message}`, true); }
+}
+
 export async function refresh() {
   const { data } = await call("/api/project");
   app.set({ empty: !!data.empty, recent: data.recent ?? [] });
-  if (!data.empty) await take(data);
+  if (!data.empty) await Promise.all([take(data), refreshExports()]);
 }
 
 const fail = (text: string) => app.set({ message: { text, error: true } });
@@ -179,9 +240,9 @@ export async function op(name: string, args: unknown) {
   return true;
 }
 
-export async function applyLutPreset(itemId: string, presetId: string) {
+export async function applyLutPreset(itemId: string, presetId: string, at?: number) {
   const baseRevision = app.get().project?.revision;
-  const { status, data } = await call("/api/lut-presets/apply", { itemId, presetId, baseRevision });
+  const { status, data } = await call("/api/lut-presets/apply", { itemId, presetId, baseRevision, at });
   if (status === 409) await refresh();
   if (data.error) return app.set({ message: { text: `apply LUT preset: ${data.error.message}`, error: true } }), false;
   await take(data);

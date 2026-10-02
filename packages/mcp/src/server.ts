@@ -3,10 +3,11 @@ import { join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { find, findFillers, getItem, getRange, getSummary, lint, LUT_PRESETS, ops, type OpResult } from "@splicewright/core";
-import { applyLutPreset, load, loadCtx, redo, run, undo } from "@splicewright/core/node";
-import { ingest, peek, STEPS } from "@splicewright/ingest";
-import { renderStatus, startRender, still, storyboard } from "@splicewright/render/node";
+import { find, findFillers, getItem, getRange, getSummary, lint, LUT_PRESETS, ops, type OpResult, type VideoItem } from "@splicewright/core";
+import { applyLutPreset, load, loadCtx, readAssets, sizesOf, redo, run, undo } from "@splicewright/core/node";
+import { checkOutput, ingest, scanMaterials, relinkMaterial, listMaterials, prepareMaterials, recordMaterialReview, materialPreview, peek, sourceFrame, STEPS, stamp, TRANSCRIPT_FORMAT } from "@splicewright/ingest";
+import { pip, type PipPreset } from "@splicewright/render/geometry";
+import { cancelRender, renderStatus, startRender, still, storyboard } from "@splicewright/render/node";
 
 // Spec §7.2. Write tools map 1:1 to core ops; read tools return compact JSON.
 
@@ -27,13 +28,19 @@ export const INSTRUCTIONS = `Splicewright edits a video project in the current f
 
 Start: get_summary, then read AGENTS.md for the brief. Timeline positions and durations are frames at meta.fps; sourceIn and peek ranges are source seconds.
 
-Look before cutting, cheapest first: find (transcripts, labels, notes) → inspect_asset (transcript + contact sheet) → peek (frame grid of a source range) → storyboard (grid of the edit) → still (one full frame). Avoid still in loops.
+When asked to review materials or start a new edit, call list_materials, prepare only relevant unread/changed paths with prepare_materials, then inspect_asset/peek/material_preview. Record actual observations with record_material_review using the listed source version; preparation alone never means reviewed. For a local fix, inspect only relevant sources. New materials are candidates, never automatically added to the timeline. These tools run only when explicitly called; opening the UI does not trigger an agent review.
+
+Look before cutting, cheapest first: find (transcripts, labels, notes) → inspect_asset (asset summary) / get_asset_transcript (cached source transcript with range/search/page; never runs STT) → peek (small frame grid of a source range) → source_frame (one bounded, higher-detail source frame only when a specific detail matters) → storyboard (grid of the edit) → still (one full composition frame). Avoid still in loops.
+
+For a picture-in-picture corner/side placement, use apply_pip_preset so placement matches the editor's crop and aspect-ratio geometry. It refuses rotation or position/mask keyframes that would make a static preset misleading; preserve those edits and choose another placement path instead of deleting keyframes.
+
+Keep context proportional to the next decision: select bounded ranges and fields, reuse valid schemas/results/artifacts, and request more detail only for a concrete uncertainty. Group independent reads; keep dependent edits revision-aware. Diagnose failures before retrying and use the host's supported completion mechanism for long jobs instead of repeated status-only calls.
 
 Assets must be ingested before insertItem can default a duration and before detectBeats or addCaptionsFromTranscript; ingest is cached, so re-running is cheap.
 
 Edit only through splicewright_* tools, never by writing project.json or directly modifying raw/. Select built-in looks with list_lut_presets and apply_lut_preset; that tool copies only the selected LUT and its notices into the project. Put multi-step changes in splicewright_batch: atomic, one revision, one undo step. Pass the baseRevision you last read; on a conflict error the human changed something, so re-read instead of retrying. Undo is shared with the human: only undo your own last step, and pass the revision that step returned as baseRevision so a newer human edit is never the one undone. Frame args also take { near } to snap to edges, markers or beats.
 
-Before a master render, run lint and fix its errors (gaps, text outside the title-safe area, CJK in a font without glyphs). Check the result with storyboard over the changed range; render with preset draft for a quick full check. Record decisions worth keeping across sessions in AGENTS.md under Notes.`;
+Before a master render, run lint and fix its errors (gaps, text outside the title-safe area, CJK in a font without glyphs, stale/unmeasured source decode or peak checks; run ingest with sourceHealth explicitly for source measurements). Check the result with storyboard over the changed range; render with preset draft for a quick full check. Record decisions worth keeping across sessions in AGENTS.md under Notes.`;
 
 export function createServer(dir: string): McpServer {
   const server = new McpServer({ name: "splicewright", version: "0.0.0" }, { instructions: INSTRUCTIONS });
@@ -48,10 +55,16 @@ export function createServer(dir: string): McpServer {
     "apply_lut_preset",
     {
       description: "Copy one built-in LUT into this project's raw/ and assign it to a video item in one undoable step.",
-      inputSchema: { itemId: z.string().min(1), presetId: z.string().min(1), baseRevision },
+      inputSchema: { itemId: z.string().min(1), presetId: z.string().min(1), baseRevision, at: z.number().int().min(0).optional().describe("Timeline frame: set a discrete LUT key instead of changing the base LUT.") },
     },
-    async ({ itemId, presetId, baseRevision: revision }) => writeResult(applyLutPreset(dir, itemId, presetId, revision)),
+    async ({ itemId, presetId, baseRevision: revision, at }) => writeResult(applyLutPreset(dir, itemId, presetId, revision, at)),
   );
+
+  server.registerTool("check_output", { description: "Full decode and audio sample/true peak measurement of a completed project-local output. Separate final-mix scope; never treats missing measurement as passing.", inputSchema: { path: z.string().min(1) } }, async ({ path }) => {
+    try { return json(await checkOutput(dir, path)); } catch (error) { return failed("measurement_failed", error); }
+  });
+
+  server.registerTool("scan_materials", { description: "Explicit read-only source scan: new, changed, missing and ingest failures. Never starts analysis." }, async () => json(await scanMaterials(dir)));
 
   for (const [name, op] of Object.entries(ops)) {
     // The shape only; core re-validates the full schema (including refinements) on every call.
@@ -59,7 +72,7 @@ export function createServer(dir: string): McpServer {
     server.registerTool(
       `splicewright_${name}`,
       { description: op.doc, inputSchema: { ...shape, baseRevision } },
-      async ({ baseRevision, ...args }: Record<string, unknown>) => writeResult(run(dir, name, args, baseRevision as number | undefined)),
+      async ({ baseRevision, ...args }: Record<string, unknown>) => writeResult(name === "relinkAsset" ? await relinkMaterial(dir, args as { assetId: string; path: string; acceptChanged?: boolean }, baseRevision as number | undefined) : run(dir, name, args, baseRevision as number | undefined)),
     );
   }
   const stepBase = z.number().int().optional().describe("The revision your last write returned. If anyone has written since, this is rejected as a conflict instead of undoing their step.");
@@ -74,6 +87,44 @@ export function createServer(dir: string): McpServer {
     async ({ baseRevision }) => writeResult(redo(dir, baseRevision)),
   );
 
+  server.registerTool(
+    "list_materials",
+    { description: "Read-only inventory of raw/ and registered assets, with source versions and unreviewed/reviewed/changed/missing states. No STT, import or review writes.", inputSchema: {} },
+    async () => { try { return json(await listMaterials(dir)); } catch (e) { return failed("materials_failed", e); } },
+  );
+  server.registerTool(
+    "prepare_materials",
+    {
+      description: "Explicitly register and prepare selected raw/ materials. Defaults to pending materials and analysis/thumbs/transcript. Returns preparation results; never marks a material reviewed. Use paths to limit cost.",
+      inputSchema: { paths: z.array(z.string().min(1)).optional(), steps: z.array(z.enum(["sourceHealth", "analysis", "thumbs", "transcript", "waveform", "loudness"])).optional() },
+    },
+    async (args) => {
+      try {
+        const result = await prepareMaterials(dir, args);
+        return { ...json(result), ...(result.errors.length > 0 && { isError: true }) };
+      } catch (e) { return failed("materials_failed", e); }
+    },
+  );
+  server.registerTool(
+    "record_material_review",
+    {
+      description: "After actually inspecting a source, persist observations for its exact listed version. Stale versions are refused. Review status is separate from candidate/include/exclude decisions; this does not edit the timeline.",
+      inputSchema: {
+        path: z.string().min(1), version: z.string().min(1), summary: z.string().trim().min(1),
+        segments: z.array(z.object({ from: z.number().min(0), to: z.number().positive(), note: z.string().trim().min(1) })).optional(),
+        decision: z.enum(["candidate", "include", "exclude"]).optional(), reason: z.string().trim().min(1).optional(),
+      },
+    },
+    async (args) => { try { return json(await recordMaterialReview(dir, args)); } catch (e) { return failed("review_failed", e); } },
+  );
+  server.registerTool(
+    "material_preview",
+    { description: "Read a still-image material as a bounded JPEG preview (up to 960 px). For video use peek; for speech use inspect_asset after transcript preparation.", inputSchema: { path: z.string().min(1), version: z.string().min(1).optional() } },
+    async (args) => {
+      try { const { image, mimeType } = await materialPreview(dir, args); return { content: [{ type: "image" as const, data: image.toString("base64"), mimeType }] }; }
+      catch (e) { return failed("preview_failed", e); }
+    },
+  );
   server.registerTool(
     "ingest",
     {
@@ -90,7 +141,7 @@ export function createServer(dir: string): McpServer {
   server.registerTool(
     "lint",
     { description: "Read-only checks before a master render: gaps on magnetic tracks, captions/text outside the title-safe area, CJK text in a font without CJK glyphs → [{ level, what, at, itemId? }]. No revision change." },
-    async () => json(lint(load(dir))),
+    async () => json(lint(load(dir), loadCtx(dir))),
   );
   server.registerTool(
     "get_range",
@@ -139,6 +190,79 @@ export function createServer(dir: string): McpServer {
         transcript: ctx.transcript?.(assetId)?.map((s) => `[${s.start.toFixed(1)}-${s.end.toFixed(1)}] ${s.text.trim()}`),
         contactSheet: existsSync(join(dir, sheet)) ? sheet : undefined,
       });
+    },
+  );
+  server.registerTool(
+    "get_asset_transcript",
+    {
+      description: "Read cached transcript segments for any registered audio/video source, including assets not on the timeline. Filter by overlapping source seconds or case-insensitive text and page results. Does not run STT; ingest transcript first if needed.",
+      inputSchema: {
+        assetId: z.string(), from: z.number().min(0).optional(), to: z.number().min(0).optional(),
+        query: z.string().trim().min(1).optional(), limit: z.number().int().min(1).max(100).default(20), offset: z.number().int().min(0).default(0),
+      },
+    },
+    async ({ assetId, from, to, query, limit, offset }) => {
+      try {
+        const project = load(dir);
+        const asset = project.assets[assetId];
+        if (!asset) return { ...json({ code: "not_found", message: `asset ${assetId} not found` }), isError: true };
+        if (asset.kind !== "audio" && asset.kind !== "video") return { ...json({ code: "invalid_asset_kind", message: `asset ${assetId} is ${asset.kind}; transcripts require audio or video` }), isError: true };
+        if (from !== undefined && to !== undefined && from >= to) return { ...json({ code: "invalid_range", message: "from must be less than to" }), isError: true };
+        const probe = readAssets(dir)[assetId];
+        const ctx = loadCtx(dir);
+        const expected = !!probe?.fingerprint && probe.done?.transcript === stamp(probe.fingerprint, "transcript") && ctx.fingerprint?.(asset.path) === probe.fingerprint;
+        if (!expected) return json({ assetId, available: false, reason: "missing_or_stale", segments: [], total: 0, offset, limit, hasMore: false });
+        const segments = ctx.transcript?.(assetId);
+        if (!Array.isArray(segments)) return json({ assetId, available: false, reason: "missing_or_stale", segments: [], total: 0, offset, limit, hasMore: false });
+        const q = query?.toLocaleLowerCase();
+        const matched = segments.filter((segment) =>
+          (from === undefined || segment.end > from) && (to === undefined || segment.start < to) &&
+          (!q || segment.text.toLocaleLowerCase().includes(q))
+        );
+        const page = matched.slice(offset, offset + limit);
+        return json({ assetId, available: true, format: TRANSCRIPT_FORMAT, segments: page, total: matched.length, offset, limit, hasMore: offset + page.length < matched.length });
+      } catch (e) { return failed("transcript_failed", e); }
+    },
+  );
+  server.registerTool(
+    "source_frame",
+    {
+      description: "Decode one requested frame directly from a registered video source and return a bounded JPEG (default max side 640 px, max 1280). Use only for details that low-resolution peek cannot resolve; no full source media is returned.",
+      inputSchema: { assetId: z.string(), at: z.number().min(0), maxSize: z.number().int().min(1).max(1280).default(640) },
+    },
+    async ({ assetId, at, maxSize }) => {
+      try {
+        const { image, seconds } = await sourceFrame(dir, assetId, at, maxSize);
+        return { content: [{ type: "image" as const, data: image.toString("base64"), mimeType: "image/jpeg" }, { type: "text" as const, text: JSON.stringify({ assetId, seconds, maxSize }) }] };
+      } catch (e) { return failed("source_frame_failed", e); }
+    },
+  );
+  server.registerTool(
+    "apply_pip_preset",
+    {
+      description: "Apply the shared picture-in-picture geometry preset to an existing video timeline item as one undoable setProps op. Refuses positioning keyframes and rotated geometry that the preset cannot place reliably; circle mask preserves current position.",
+      inputSchema: { itemId: z.string(), preset: z.enum(["tl", "tr", "bl", "br", "left", "right", "circle"]), baseRevision },
+    },
+    async ({ itemId, preset, baseRevision }) => {
+      try {
+        const project = load(dir);
+        const track = project.tracks.find((candidate) => candidate.items.some((item) => item.id === itemId));
+        const item = track?.items.find((candidate) => candidate.id === itemId);
+        if (!item || !track) return { ...json({ code: "not_found", message: `item ${itemId} not found` }), isError: true };
+        if (track.kind !== "video" || !("assetId" in item)) return { ...json({ code: "invalid_item_kind", message: `item ${itemId} is not a video item` }), isError: true };
+        {
+          const video = item as VideoItem;
+          const overridden = preset === "circle" ? ["maskX", "maskY", "maskW", "maskH", "maskFeather"] : ["x", "y", "scale", "maskX", "maskY", "maskW", "maskH", "maskFeather"];
+          if (video.keyframes && overridden.some((key) => video.keyframes?.[key as keyof typeof video.keyframes]?.length))
+            return { ...json({ code: "position_keyframes", message: `${itemId} has keyframes that override the ${preset} preset; remove or retime them first` }), isError: true };
+          if (preset !== "circle") {
+            const rotation = (project.assets[item.assetId]?.rotation ?? 0) + (video.transform?.rotation ?? 0);
+            if (rotation % 360 !== 0) return { ...json({ code: "rotated_geometry", message: `${itemId} is rotated ${rotation}°; corner/side presets cannot place its visible bounds reliably` }), isError: true };
+          }
+        }
+        const patch = pip(project, item as VideoItem, sizesOf(readAssets(dir))[item.assetId], preset as PipPreset);
+        return writeResult(run(dir, "setProps", { itemId, patch }, baseRevision));
+      } catch (e) { return failed("pip_failed", e); }
     },
   );
   server.registerTool(
@@ -195,6 +319,11 @@ export function createServer(dir: string): McpServer {
     },
     async ({ output, preset, range }) => json(startRender(dir, { output: resolve(dir, output), preset, range })),
   );
+  server.registerTool("cancel_render", { description: "Cancel a running render job. Cancelled or failed staging files are never successful outputs.", inputSchema: { jobId: z.string() } }, async ({ jobId }) => {
+    const job = renderStatus(jobId);
+    if (!job) return failed("not_found", new Error(`job ${jobId} not found`));
+    return json({ cancelled: cancelRender(jobId), job: renderStatus(jobId) });
+  });
   server.registerTool(
     "render_status",
     { description: "Status and progress (0..1) of a render job.", inputSchema: { jobId: z.string() } },

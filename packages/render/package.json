@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./node": "./src/node.ts",
-    "./animation": "./src/animation.tsx"
+    "./animation": "./src/animation.tsx",
+    "./geometry": "./src/geometry.ts"
   },
   "dependencies": {
     "@fontsource-variable/caveat": "^5.3.0",

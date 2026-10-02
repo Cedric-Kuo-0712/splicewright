@@ -2,13 +2,15 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { audioFxCachePath, audioFxModelFile, audioFxModelFingerprint, commit, historyList, init, load, loadCtx, rawPath, redo, run, undo, writeAtomic } from "../src/persistence.ts";
+import { audioFxCachePath, audioFxModelFile, audioFxModelFingerprint, commit, fingerprint, historyList, init, load, loadCtx, rawPath, redo, run, undo, writeAtomic } from "../src/persistence.ts";
 
 function project() {
   const dir = mkdtempSync(join(tmpdir(), "swr-"));
   init(dir, { title: "t", fps: 30, width: 640, height: 360 });
   mkdirSync(join(dir, ".splicewright", "transcripts"), { recursive: true });
-  writeFileSync(join(dir, ".splicewright", "assets.json"), JSON.stringify({ a_clip: { duration: 4 } }));
+  mkdirSync(join(dir, "raw"), { recursive: true });
+  writeFileSync(join(dir, "raw/clip.mp4"), "source fixture");
+  writeFileSync(join(dir, ".splicewright", "assets.json"), JSON.stringify({ a_clip: { kind: "video", path: "raw/clip.mp4", fingerprint: fingerprint(join(dir, "raw/clip.mp4")), duration: 4 } }));
   writeFileSync(join(dir, ".splicewright", "transcripts", "a_clip.json"), JSON.stringify({ segments: [{ start: 1, end: 2, text: "hi" }] }));
   return dir;
 }
@@ -150,7 +152,7 @@ it("undo with a stale baseRevision is refused; undone ids stay taken", () => {
 
 it("rawPath reuses a raw/ file only when the bytes match, whatever the mtime", () => {
   const dir = project();
-  mkdirSync(join(dir, "raw"));
+  mkdirSync(join(dir, "raw"), { recursive: true });
   const tmp = (text: string) => (writeFileSync(join(dir, "tmp"), text), join(dir, "tmp"));
   expect(rawPath(dir, "a.mp4", tmp("same"))).toBe(join("raw", "a.mp4"));
   utimesSync(join(dir, "raw", "a.mp4"), 1, 1);

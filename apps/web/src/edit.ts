@@ -1,4 +1,4 @@
-import { anchorOf, durationFrames, frameOf, itemSpan, keyAt, nextId, secPerFrame, type Ease, type Item, type Project, type Track, type TrackKind, type VideoItem } from "@splicewright/core";
+import { anchorOf, durationFrames, keyframeFrame, itemSpan, keyAt, nextId, secPerFrame, type AudioItem, type Ease, type Item, type OverlayItem, type Project, type Track, type TrackKind, type VideoItem } from "@splicewright/core";
 import { pip, type PipPreset } from "@splicewright/render";
 import { app, history, ioRange, op, player, playhead, refresh, say, seek, type MenuEntry } from "./store.ts";
 import { captureStyle, styleOperations, type StyleClipboard } from "./style.ts";
@@ -109,11 +109,11 @@ export function stepKey(dir: -1 | 1) {
   const p = app.get().project!;
   const frame = playhead.get().frame;
   const sel = app.get().selection[0];
-  const it = (sel ? findItem(p, sel)?.item : videoUnder(p, frame)) as VideoItem | undefined;
+  const it = (sel ? findItem(p, sel)?.item : videoUnder(p, frame)) as VideoItem | AudioItem | OverlayItem | undefined;
   // Keys outside the trimmed span are invisible (no ◆), so they don't count.
-  const keyed = Object.values(it?.keyframes ?? {})
-    .flatMap((ks) => ks.map((k) => Math.round(frameOf(p, it!, k.t))))
-    .filter((f) => f >= it!.start && f < end(it!));
+  const span = it && itemSpan(p, it);
+  const times = [...Object.values(it?.keyframes ?? {}).flatMap((keys) => keys.map((key) => key.t)), ...((it && "lutKeyframes" in it ? it.lutKeyframes : undefined) ?? []).map((key) => key.t)];
+  const keyed = it && span ? times.map((time) => Math.round(keyframeFrame(p, it, time))).filter((frame) => frame >= span.start && frame < span.start + span.duration) : [];
   const to = dir < 0 ? keyed.filter((f) => f < frame).sort((a, b) => b - a)[0] : keyed.filter((f) => f > frame).sort((a, b) => a - b)[0];
   return to !== undefined ? seek(to) : say(`no ${dir < 0 ? "previous" : "next"} keyframe`, true);
 }
@@ -570,11 +570,11 @@ export const EASE_PRESETS: [string, Ease][] = [
 ];
 
 /** Context menu of a key diamond: one setProps sets the ease of every key on that frame (the segment leaving it). */
-export function keyMenu(item: VideoItem, frame: number, locked?: boolean): MenuEntry[] {
+export function keyMenu(item: VideoItem | AudioItem | OverlayItem, frame: number, locked?: boolean): MenuEntry[] {
   const set = (ease: Ease) => {
     const keyframes = Object.fromEntries(
       Object.entries(item.keyframes ?? {}).map(([prop, ks]) => {
-        const hit = keyAt(app.get().project!, item, prop as never, frame);
+        const hit = keyAt(app.get().project!, item, prop, frame);
         return [prop, ks.map((k) => (k === hit ? { ...k, ease } : k))];
       }),
     );

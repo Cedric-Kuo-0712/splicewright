@@ -45,4 +45,37 @@ describe("lint", () => {
     tall.tracks = [...p.tracks.slice(0, 2), { id: "t_3", name: "C1", kind: "caption", items: [{ id: "c_1", start: 0, duration: 30, mode: "free", text: "hi" }] }];
     expect(lint(tall)).toMatchObject([{ level: "warn", itemId: "c_1" }]);
   });
+
+  it("reports unmeasured, failed, stale, and excessive-peak source health with source ranges", () => {
+    const p = base();
+    const videoTrack = p.tracks.find((track) => track.kind === "video");
+    if (videoTrack?.kind === "video") videoTrack.items[0].sourceIn = 2;
+    const media = p.assets.a_clip;
+    const sourceHealth = {
+      format: 1 as const,
+      method: "ffmpeg" as const,
+      path: media.path,
+      fingerprint: "live",
+      measuredAt: "2026-10-02T00:00:00.000Z",
+      decode: { status: "ok" as const },
+      audio: {
+        status: "measured" as const,
+        integratedLufs: -8,
+        samplePeak: { dbfs: -0.7, atSeconds: 3.24 },
+        truePeak: { dbfs: -0.4, atSeconds: 3.26 },
+      },
+    };
+    const metadata = { sourceHealth: { a_clip: sourceHealth }, fingerprints: { a_clip: "live" }, fingerprint: () => "live" };
+
+    expect(lint(p, { fingerprint: () => "live" })).toMatchObject([{ level: "warn", itemId: expect.any(String), what: expect.stringContaining("no current full-decode/peak measurement") }]);
+    expect(lint(p, metadata)).toMatchObject([{ level: "warn", itemId: expect.any(String), what: expect.stringContaining("source [2.00, 5.00)s") }]);
+    expect(lint(p, metadata)[0].what).toContain("near source 3.26s");
+    if (videoTrack?.kind === "video") videoTrack.items[0].sourceIn = 0;
+    expect(lint(p, metadata)[0].what).toContain("selected-range maximum is not separately measured");
+    p.meta.limiter = true;
+    expect(lint(p, metadata)[0].what).toContain("Source peaks are independent of the render limiter");
+    expect(lint(p, { ...metadata, sourceHealth: { a_clip: { ...sourceHealth, fingerprint: "old" } } })).toMatchObject([{ level: "error", what: expect.stringContaining("stale source-health") }]);
+    expect(lint(p, { ...metadata, sourceHealth: { a_clip: { ...sourceHealth, decode: { status: "failed", error: "corrupt packet" } } } })).toMatchObject([{ level: "error", what: expect.stringContaining("cannot be fully decoded") }]);
+    expect(lint(p, { ...metadata, sourceHealth: { a_clip: { ...sourceHealth, audio: { status: "none" } } } })).toEqual([]);
+  });
 });

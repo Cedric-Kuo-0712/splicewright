@@ -475,6 +475,7 @@ explained, not hidden.
 | M9 | Audio: item keyframes, loudness, master limiter (§13.3) | volume keys on an audio item survive split/trim; `loudness` step within ±0.5 LU of ffmpeg `ebur128` | ✅ done (limiter render-only, -1 dBFS before AAC, ≤ ~1 dB overshoot after; toggled by `setMeta`) |
 | M10 | More transitions + PIP presets (§13.4) | still-frame snapshot mid-transition per kind; handles invariant (§4.4 #4) holds | ✅ done (mid-frame still per kind at t=0.5, up/down covered by `look()` string tests only; PIP `border` not built; UI verified by typecheck only) |
 | M11 | Transcript cuts: fillers and silences (§13.5) | on `examples/`, one `batch` removes the listed words; anchored captions stay in sync | ✅ done (unit-tested on synthetic transcripts; `findFillers` checked on real Whisper word output from TTS speech, zh + en; the re-transcribe path is not run end to end; no CLI verb for `findFillers`, MCP only) |
+| M12 | Overlay and Color/LUT keyframes (§13.7) | overlay transform/custom numeric keys and video grade keys evaluate at chosen frames; overlay trim/split preserve phase; LUT asset switches are discrete | ✅ done (core op coverage plus still renders pixel-probed translation, interpolated exposure, and discrete LUT switch) |
 
 ---
 
@@ -629,11 +630,26 @@ Already built: item volume, fades, ducking, volume keyframes on video items.
 
 ### 13.6 Later (not scheduled)
 Fonts, caption styles, themes, color grading, LUTs, curves, chroma/luma key and beauty moved to
-**SPEC-LOOK.md** (built-in fonts are done there). The rest is specced in §13.7. Still unspecced: keyframes on
-overlay props, nested sequences.
+**SPEC-LOOK.md** (built-in fonts are done there). The rest is specced in §13.7. Still unspecced: nested
+sequences.
 
 ### 13.7 Next candidates (non-look)
 Same rules as §13 and SPEC-LOOK.md §1: preview and render run one program, so a process either renders in the
+
+#### Overlay and Color/LUT keyframes
+`OverlayItem` supports numeric transform keys `x`, `y`, `scale`, `rotation`, and `opacity`, plus keys for an
+existing numeric component prop written as `props.<name>` or `props.<object>.<name>`. This is opt-in for custom
+components: the component must consume that numeric prop; arbitrary strings, booleans, and arrays are not
+animatable. Overlay key times are item-local seconds. An internal local-time offset keeps the same animation
+phase through split and left trim. Transform opacity is clamped to 0..1; custom numeric key values are limited
+to ±1,000,000.
+
+Video items can key `exposure` (−5..5), `temperature`, `tint`, `vibrance`, `shadows`, `highlights` (each −1..1),
+and `lutStrength` (0..1). These numeric keys use source seconds and interpolate with the key's ease. Text overlays
+also support positive `props.textStyle.size`; custom numeric props use the same explicit `props.<path>` opt-in. LUT asset
+selection uses separate `lutKeyframes` and `setLutKeyframe`: the base LUT remains active before the first key, then
+the most recent key selects one LUT until the next key. LUTs are never cross-blended. LUT strength remains numeric
+and interpolates independently.
 composition or bakes a file that both sides play.
 
 - **A1 Audio processing (EQ, pan, noise reduction).** `audioFx?: { eq?: { hz: number; gain: number; q?: number }[];
@@ -660,7 +676,7 @@ composition or bakes a file that both sides play.
   on the forward file. Acceptance: frame k of a reversed item equals frame (n−1−k) of the forward one. ✅ done: ingest reverses bounded ~10 s chunks with ffmpeg reverse/areverse and concatenates chunks in reverse order; sourceIn remains the lower bound of the forward-source selection, with trim, speed, transition, preview, and render time mapping handled in reverse.
 - **Lint.** Read-only op `lint` → `{ level, what, at, itemId? }[]`: gaps on the magnetic track, captions or text
   outside the title-safe area, CJK text in a font without CJK glyphs, peaks above −1 dBFS without the limiter,
-  items on the canvas path that can't decode. MCP instructions tell agents to run it before `render` master. ✅ done: `lint(project)` in core, CLI `splicewright lint`, MCP `lint`. Implemented: magnetic-track gaps, default-caption/Text inset vs title-safe (px insets only), CJK font. Not yet: peaks (no peak measurement is stored, only LUFS) and decode failures (no recorded probe signal).
+  items on the canvas path that can't decode. MCP instructions tell agents to run it before `render` master. ✅ done: `lint(project)` in core, CLI `splicewright lint`, MCP `lint`. Implemented: magnetic-track gaps, default-caption/Text inset vs title-safe (px insets only), CJK font. Source decode and peak checks now accept `loadCtx` metadata: missing, stale, failed and unmeasured results remain explicit; source-wide peaks warn independently of the render limiter. Peak time identifies an FFmpeg frame/block, not an exact sample. A source-wide maximum outside a selected trim does not prove the trimmed-range maximum. Final output measurements and browser playback meters are separate scopes.
 - **Desktop wrapper.** Electron: rendering needs Node + Chromium, which Electron has; Tauri would need a bundled
   Node as a sidecar. Not before the web UI stabilises.
 
@@ -819,3 +835,59 @@ On the MCP side:
   warm-up trim; B lands on the playhead frame, so taps carry up to half a frame of quantization).
 - `fitToBeats`: unit test on a slideshow of 8 images plus a synthetic beat list, checking that every cut
   lands on a beat and the total duration is correct.
+
+
+## 16. Source scan and explicit relink
+
+- `scan-materials` (CLI), `scan_materials` (MCP), and the Media bin's **Scan sources**
+  explicitly enumerate supported files in `raw/` plus registered sources. Scanning is
+  read-only: no import, ingest, project revision, or agent analysis. Opening the UI
+  does not initiate material analysis. Review status remains separate from source
+  health (`new`, `changed`, `missing`, `failed`, `unmeasured`, `present`). `present`
+  means the file was probed, not that decode, peaks or final mix have passed.
+- **Prepare** explicitly registers selected sources and runs thumbnails, waveform
+  and loudness (plus source health when requested); it never starts agent analysis.
+  Failed preparation is recorded against the source SHA-256 version. Supported
+  preparation steps retain the existing material-review workflow.
+- `relinkAsset {assetId,path,acceptChanged?}` is an ingest-preflighted shared core op.
+  The UI, CLI and MCP all use the same implementation. The replacement must be a
+  safe project-local file within `raw/`, have the same asset kind, and probe into a
+  usable media stream (LUT/font replacements use their format validators).
+- Content identity uses full SHA-256 of the existing source or the previous
+  prepared-material identity. A basename is never identity. Missing identity or
+  different content requires explicit `acceptChanged:true`. The replacement
+  duration must cover all existing source usages, including transition handles
+  checked by core validation; refusals identify unsafe items/ranges.
+- A successful relink preserves asset IDs, item IDs, timing, anchors and numeric
+  keyframes. Built-in Sticker paths pointing at the old source are updated. The
+  project edit is one undo step; undo restores the old path. Analysis/review,
+  transcript, waveform, thumbnail and proxy caches are invalidated and are not
+  restored by undo. Metadata/proxies are usable only with matching path and source
+  fingerprint. Prepare/ingest rebuilds derived data for the selected source.
+
+
+### Export jobs and audio measurement scopes
+
+- Shared `startRender` / `renderStatus` / `cancelRender` jobs expose draft/master,
+  progress, running/done/error/cancelled. Output is rendered to a private staging
+  MP4, fully decoded and audio-measured, then atomically published. Cancellation
+  or failure removes staging and cannot mark an incomplete output successful.
+  Web exports include completion/error feedback and completed-only Reveal.
+  MCP provides `render`, `render_status`, and `cancel_render`; jobs live in the
+  process that started them and do not survive its exit.
+- Default ingest includes `sourceHealth`: full FFmpeg decode, astats sample peak,
+  ebur128 true peak/LUFS, source path/fingerprint/version/time. Failure is persisted;
+  no audio is N/A and silence has null peaks. Source checks are not final mix checks.
+  `check-output <path>` / `check_output` explicitly measure a project-local output
+  with fingerprint and measurement time. Export jobs also attach final mix results.
+- Playback meters sample the stereo browser mix every 50 ms and flag sample
+  clipping. Each channel is analyzed separately to avoid mono phase cancellation.
+  They are sampled live indicators, not exhaustive peak/true-peak or final-render
+  verification; unavailable/unmeasured states are explicit. Subjective listening,
+  browser Player behavior and interaction feel require human acceptance.
+- Overlay numeric animation retains phase through split, normal/ripple left trim
+  and left extension (held first value before existing keys), and follows anchored
+  media movement. Anchored overlays retain the existing split refusal: detach
+  first. LUT asset switches hold discretely; numeric LUT strength interpolates.
+  Preset application at a requested timeline frame copies its portable files and
+  creates a LUT key in one undo step. Curves/levels and chroma/luma keys are static.

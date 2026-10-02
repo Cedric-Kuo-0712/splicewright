@@ -1,9 +1,8 @@
 import React from "react";
-import { animate, BLENDS, LUT_PRESETS, MASK_SHAPES, withKey, type Animatable, type OverlayItem, type Project, type VideoItem } from "@splicewright/core";
+import { animate, BLENDS, lutAssetAt, LUT_PRESETS, MASK_SHAPES, withKey, type OverlayItem, type Project, type VideoItem } from "@splicewright/core";
 import { gradeWith, lookEntries, openMenu, pipEntries } from "../edit.ts";
 import { app, applyLutPreset, op, player, playhead, prepareReverse } from "../store.ts";
 import { Field, KeyButton, KeyGroupButton, EFFECTS, EFFECT_ZERO, prune, Slider } from "./fields.tsx";
-
 
 
 const TRANSITIONS = ["dissolve", "dip", "wipe", "slide", "push", "zoom"] as const;
@@ -13,13 +12,14 @@ export function VideoFields({ p, item, fps, still, set }: { p: Project; item: Vi
   const reverseProxies = app.use((s) => s.reverseProxies);
   const ingesting = app.use((s) => s.ingesting);
   const frame = playhead.use((s) => s.frame);
+  const canKey = frame >= item.start && frame < item.start + item.duration;
   const tf: Record<string, number> = item.transform ?? {};
   const tr = item.transition;
   // Values at the playhead; a prop with keys edits its key there instead of its plain value.
   const now = animate(p, item, frame);
-  const keyed = (k: Animatable) => !!item.keyframes?.[k];
-  const mark = (k: Animatable, v: number) => <KeyButton p={p} item={item} prop={k} frame={frame} value={v} />;
-  const keyPatch = (k: Animatable, v: number) => ({ keyframes: withKey(p, item, k, frame, v) ?? null });
+  const keyed = (k: string) => !!(item.keyframes as Record<string, unknown[]> | undefined)?.[k];
+  const mark = (k: string, v: number) => <KeyButton p={p} item={item} prop={k} frame={frame} value={v} />;
+  const keyPatch = (k: string, v: number) => ({ keyframes: withKey(p, item, k, frame, v) ?? null });
   const setTf = (k: string, v: string | number | null) => {
     const next = { ...tf, [k]: v ?? undefined };
     if (v === null) delete next[k];
@@ -111,7 +111,7 @@ export function VideoFields({ p, item, fps, still, set }: { p: Project; item: Vi
       <h4>color</h4>
       {(["exposure", "temperature", "tint", "vibrance", "shadows", "highlights"] as const).map((k) => {
         const [min, max, step] = { exposure: [-5, 5, 0.05], temperature: [-1, 1, 0.01], tint: [-1, 1, 0.01], vibrance: [-1, 1, 0.01], shadows: [-1, 1, 0.01], highlights: [-1, 1, 0.01] }[k];
-        return <Slider key={k} itemId={item.id} label={k} min={min} max={max} step={step} zero={0} value={item.grade?.[k] ?? 0} patch={(v) => ({ grade: gradeWith(item.grade, k, v) })} />;
+        return <Slider key={k} itemId={item.id} label={k} min={min} max={max} step={step} zero={0} value={now.grade?.[k] ?? 0} mark={mark(k, now.grade?.[k] ?? 0)} patch={(v) => (keyed(k) ? keyPatch(k, v) : { grade: gradeWith(item.grade, k, v) })} />;
       })}
       {(["inBlack", "inWhite", "gamma", "outBlack", "outWhite"] as const).map((k) => {
         const levels = { inBlack: 0, inWhite: 1, gamma: 1, outBlack: 0, outWhite: 1, ...item.grade?.levels };
@@ -121,9 +121,9 @@ export function VideoFields({ p, item, fps, still, set }: { p: Project; item: Vi
         return <Slider key={k} itemId={item.id} label={`levels ${k}`} {...range} value={levels[k]} patch={(v) => ({ grade: { ...item.grade, levels: { ...levels, [k]: v } } })} />;
       })}
       <CurveEditor key={item.id} itemId={item.id} grade={item.grade} onCommit={(curves) => setGrade("curves", curves)} />
-      <label className="field"><span>LUT</span><select value={item.grade?.lut?.assetId ?? ""} onChange={(e) => { const value = e.target.value; if (value.startsWith("preset:")) void applyLutPreset(item.id, value.slice(7)); else setGrade("lut", value ? { assetId: value, strength: item.grade?.lut?.strength ?? 1 } : null); }}><option value="">None</option>{presetCategories.map((category) => <optgroup key={category} label={category}>{LUT_PRESETS.filter((preset) => preset.category === category).map((preset) => <option key={preset.id} value={`preset:${preset.id}`}>{preset.name}</option>)}</optgroup>)}<optgroup label="Project LUT assets">{Object.values(p.assets).filter((a) => a.kind === "lut").map((a) => <option key={a.id} value={a.id}>{lutLabel(a.path)}</option>)}</optgroup></select></label>
+      <label className="field"><span>LUT <button className={`kf-btn ${item.lutKeyframes?.length ? "keyed" : ""}`} title="Add a discrete LUT switch at the playhead" disabled={!canKey || !item.grade?.lut} onClick={() => op("setLutKeyframe", { itemId: item.id, at: frame, assetId: lutAssetAt(p, item, frame) ?? item.grade?.lut?.assetId })}>◇</button></span><select value={lutAssetAt(p, item, frame) ?? ""} onChange={(e) => { const value = e.target.value; if (value.startsWith("preset:")) void applyLutPreset(item.id, value.slice(7), item.grade?.lut && canKey ? frame : undefined); else if (item.grade?.lut && canKey && value) void op("setLutKeyframe", { itemId: item.id, at: frame, assetId: value }); else setGrade("lut", value ? { assetId: value, strength: item.grade?.lut?.strength ?? 1 } : null); }}><option value="">None</option>{presetCategories.map((category) => <optgroup key={category} label={category}>{LUT_PRESETS.filter((preset) => preset.category === category).map((preset) => <option key={preset.id} value={`preset:${preset.id}`}>{preset.name}</option>)}</optgroup>)}<optgroup label="Project LUT assets">{Object.values(p.assets).filter((a) => a.kind === "lut").map((a) => <option key={a.id} value={a.id}>{lutLabel(a.path)}</option>)}</optgroup></select></label>
       <small className="muted">Creative SDR look · input profile unspecified</small>
-      {item.grade?.lut && <Slider itemId={item.id} label="LUT strength" min={0} max={1} step={0.01} zero={1} value={item.grade.lut.strength ?? 1} patch={(v) => ({ grade: { ...item.grade, lut: { ...item.grade!.lut!, strength: v } } })} />}
+      {item.grade?.lut && <Slider itemId={item.id} label="LUT strength" min={0} max={1} step={0.01} zero={1} value={now.grade?.lut?.strength ?? 1} mark={mark("lutStrength", now.grade?.lut?.strength ?? 1)} patch={(v) => (keyed("lutStrength") ? keyPatch("lutStrength", v) : { grade: { ...item.grade, lut: { ...item.grade!.lut!, strength: v } } })} />}
       <h4>key</h4>
       <label className="field"><span>type</span><select value={item.key?.kind ?? ""} onChange={(e) => set({ key: e.target.value === "chroma" ? { kind: "chroma", color: "#00ff00", similarity: 0.18, smoothness: 0.08 } : e.target.value === "luma" ? { kind: "luma", low: 0.1, high: 0.9 } : null })}><option value="">Off</option><option value="chroma">Chroma</option><option value="luma">Luma</option></select></label>
       {item.key?.kind === "chroma" && <><Field label="key color" value={item.key.color} onCommit={(v) => set({ key: { ...item.key!, color: v } })} /><button onClick={() => { player.ref?.pause(); app.set({ sampling: item.id }); }}>Eyedropper · click preview</button><Slider itemId={item.id} label="similarity" min={0} max={1} step={0.01} zero={0.45} value={item.key.similarity} patch={(v) => ({ key: { ...item.key!, similarity: v } })} /><Slider itemId={item.id} label="smoothness" min={0} max={1} step={0.01} zero={0.08} value={item.key.smoothness} patch={(v) => ({ key: { ...item.key!, smoothness: v } })} /><Slider itemId={item.id} label="spill" min={0} max={1} step={0.01} zero={0} value={item.key.spill ?? 0} patch={(v) => ({ key: { ...item.key!, spill: v } })} /></>}
@@ -268,4 +268,3 @@ export function MaskFields({ p, item, set }: { p: Project; item: VideoItem | Ove
     </>
   );
 }
-

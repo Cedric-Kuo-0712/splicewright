@@ -4,21 +4,23 @@ import { availableParallelism, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HEIF, type Asset } from "@splicewright/core";
-import { cacheDir, fingerprint, load, rawPath, readAssets, writeAtomic, type Probe } from "@splicewright/core/node";
+import { cacheDir, fingerprint, load, rawPath, readAssets, writeAtomic, type Probe, type SourceHealth } from "@splicewright/core/node";
 import { audioFxPath, ensureAudioFx } from "./audio-fx.ts";
+import { measureFinalMix, measureSourceHealth } from "./source-health.ts";
 
 // Spec §8. ffmpeg steps run here; transcript and beats need Python libraries and run ingest/*.py.
 // Every step is cached by content fingerprint: a probe entry records, per step, the fingerprint it ran on.
 
-export const STEPS = ["proxy", "reverse", "analysis", "thumbs", "waveform", "transcript", "beats", "loudness", "audioFx"] as const;
+export const STEPS = ["sourceHealth", "proxy", "reverse", "analysis", "thumbs", "waveform", "transcript", "beats", "loudness", "audioFx"] as const;
 export type Step = (typeof STEPS)[number];
 type Entry = Probe & { done?: Partial<Record<Step, string>> };
 
 /** Shape of ingest/transcribe.py's output; bump when it changes so cached transcripts re-run (2: word timestamps). */
 export const TRANSCRIPT_FORMAT = 2;
 const IMAGE_PROBE_FORMAT = 1;
+const SOURCE_HEALTH_FORMAT = 1;
 /** What a step records as done: the content fingerprint, plus the format version for transcripts. */
-export const stamp = (fingerprint: string, step: Step) => (step === "transcript" ? `${fingerprint}#t${TRANSCRIPT_FORMAT}` : fingerprint);
+export const stamp = (fingerprint: string, step: Step) => step === "transcript" ? `${fingerprint}#t${TRANSCRIPT_FORMAT}` : step === "sourceHealth" ? `${fingerprint}#h${SOURCE_HEALTH_FORMAT}` : fingerprint;
 
 const pyDir = join(dirname(fileURLToPath(import.meta.url)), "../../../ingest");
 
@@ -129,6 +131,8 @@ export async function probe(file: string, kind: Asset["kind"]): Promise<Omit<Pro
   }
   const info = JSON.parse(await exec("ffprobe", ["-v", "error", ...(kind === "image" ? ["-count_frames"] : []), "-print_format", "json", "-show_format", "-show_streams", file]));
   const v = info.streams.find((s: any) => s.codec_type === "video");
+  if ((kind === "video" || kind === "image") && (!v?.width || !v.height)) throw new Error(`source declared as ${kind} has no readable visual stream`);
+  if (kind === "audio" && !info.streams.some((s: any) => s.codec_type === "audio")) throw new Error("source declared as audio has no readable audio stream");
   const [num, den] = String(v?.avg_frame_rate ?? "0/1").split("/").map(Number);
   const rotation = v?.side_data_list?.find((d: any) => "rotation" in d)?.rotation ?? (v?.tags?.rotate ? Number(v.tags.rotate) : undefined);
   const duration = Number(info.format.duration);
@@ -361,17 +365,35 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
       const fp = fingerprint(src);
       if (!fp) return fail("probe", a.id, new Error(`${a.path} not found`));
       if (cache[a.id]?.fingerprint === fp && cache[a.id].path === a.path && (a.kind !== "image" || cache[a.id].imageProbeVersion === IMAGE_PROBE_FORMAT)) {
+        const health = cache[a.id].sourceHealth;
+        if (health?.method === "ffprobe" && health.decode.status === "failed")
+          return fail("probe", a.id, new Error(`cached probe failure: ${health.decode.error}`));
         tally.probe.cached++;
         return ready.push(cache[a.id]);
       }
       try {
         const same = cache[a.id]?.fingerprint === fp ? cache[a.id] : undefined; // renamed, same content
-        cache[a.id] = { path: a.path, fingerprint: fp, ...(await run(() => probe(src, a.kind))), ...(same?.done && { done: same.done }), ...(same?.loudness !== undefined && { loudness: same.loudness }) };
+        const priorHealth = same?.sourceHealth?.fingerprint === fp ? { ...same.sourceHealth, path: a.path } : undefined;
+        cache[a.id] = { path: a.path, fingerprint: fp, ...(await run(() => probe(src, a.kind))), ...(same?.done && { done: same.done }), ...(same?.loudness !== undefined && { loudness: same.loudness }), ...(priorHealth && { sourceHealth: priorHealth }) };
         dirty.add(a.id);
         tally.probe.ran++;
         log(`probe ${a.id}`);
         ready.push(cache[a.id]);
       } catch (e) {
+        const message = (e as Error).message ?? String(e);
+        cache[a.id] = {
+          path: a.path,
+          fingerprint: fp,
+          kind: a.kind as Probe["kind"],
+          done: { sourceHealth: stamp(fp, "sourceHealth") },
+          sourceHealth: {
+            format: SOURCE_HEALTH_FORMAT, method: "ffprobe", path: a.path, fingerprint: fp, measuredAt: new Date().toISOString(),
+            decode: { status: "failed", error: message },
+            audio: a.kind === "audio" ? { status: "failed", error: message } : a.kind === "video" ? { status: "unmeasured" } : { status: "none" },
+          },
+        };
+        dirty.add(a.id);
+        if (steps.has("sourceHealth")) tally.sourceHealth.failed++;
         fail("probe", a.id, e);
       }
     }),
@@ -380,7 +402,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
 
   const idOf = new Map(ready.map((e) => [e, Object.keys(cache).find((k) => cache[k] === e)!]));
   // loudness has no file: its value lives on the probe entry.
-  const outputs: Record<Exclude<Step, "loudness" | "audioFx">, (id: string) => string> = {
+  const outputs: Record<Exclude<Step, "loudness" | "audioFx" | "sourceHealth">, (id: string) => string> = {
     proxy: (id) => cacheDir(dir, "proxies", "edit", `${id}.mp4`),
     reverse: (id) => cacheDir(dir, "proxies", "reverse", `${id}.mp4`),
     analysis: (id) => cacheDir(dir, "proxies", "analysis", `${id}.mp4`),
@@ -390,12 +412,13 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
     beats: (id) => cacheDir(dir, "beats", `${id}.json`),
   };
   const applies: Record<Exclude<Step, "audioFx">, (e: Entry) => boolean> = {
+    sourceHealth: (e) => e.kind !== "font",
     proxy: (e) => e.kind === "video",
     reverse: (e) => e.kind === "video",
     analysis: (e) => e.kind === "video",
     thumbs: (e) => e.kind === "video",
     waveform: (e) => e.kind !== "image" && !!e.audio,
-    transcript: (e) => e.kind === "video" && !!e.audio,
+    transcript: (e) => (e.kind === "video" || e.kind === "audio") && !!e.audio,
     beats: (e) => e.kind === "audio",
     loudness: (e) => e.kind !== "image" && !!e.audio,
   };
@@ -403,10 +426,45 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
   const todo = (step: Exclude<Step, "audioFx">) =>
     ready.filter((e) => {
       if (!applies[step](e)) return tally[step].skipped++, false;
-      if (e.done?.[step] === stamp(e.fingerprint, step) && (step === "loudness" || existsSync(outputs[step](idOf.get(e)!)))) return tally[step].cached++, false;
+      if (e.done?.[step] === stamp(e.fingerprint, step) && (step === "loudness" || step === "sourceHealth" || existsSync(outputs[step](idOf.get(e)!)))) {
+        if (step === "sourceHealth") {
+          if (!e.sourceHealth || e.sourceHealth.format !== SOURCE_HEALTH_FORMAT) return true;
+          if (e.sourceHealth.decode.status === "failed") errors.push(`sourceHealth ${idOf.get(e)!}: cached decode failure: ${e.sourceHealth.decode.error}`);
+          else if (e.sourceHealth.audio.status === "failed") errors.push(`sourceHealth ${idOf.get(e)!}: cached audio measurement failure: ${e.sourceHealth.audio.error}`);
+        }
+        tally[step].cached++;
+        if (step === "sourceHealth" && e.sourceHealth?.decode.status === "failed") {
+          tally.sourceHealth.failed++;
+          errors.push(`sourceHealth ${idOf.get(e)!}: ${e.sourceHealth.decode.error}`);
+        }
+        return false;
+      }
       return true;
     });
   const mark = (e: Entry, step: Step) => (dirty.add(idOf.get(e)!), ((e.done ??= {})[step] = stamp(e.fingerprint, step)));
+
+  if (steps.has("sourceHealth"))
+    await Promise.all(todo("sourceHealth").map(async (e) => {
+      const id = idOf.get(e)!;
+      try {
+        const health = await run(() => measureSourceHealth(join(dir, e.path), e.path, e.fingerprint, !!e.audio));
+        e.sourceHealth = health;
+        mark(e, "sourceHealth");
+        if (health.decode.status === "failed") fail("sourceHealth", id, new Error(health.decode.error));
+        else tally.sourceHealth.ran++, log(`sourceHealth ${id}${health.audio.status === "measured" ? ` (true peak ${health.audio.truePeak.dbfs ?? "silent"} dBFS)` : " (no audio)"}`);
+      } catch (err) {
+        // `measureSourceHealth` returns decode failures as data; this catches process-launch failures only.
+        const message = (err as Error).message ?? String(err);
+        e.sourceHealth = {
+          format: SOURCE_HEALTH_FORMAT, method: "ffmpeg", path: e.path, fingerprint: e.fingerprint, measuredAt: new Date().toISOString(),
+          decode: { status: "failed", error: message },
+          audio: e.audio ? { status: "failed", error: message } : { status: "none" },
+        } satisfies SourceHealth;
+        mark(e, "sourceHealth");
+        fail("sourceHealth", id, err);
+      }
+    }));
+  save();
 
   const ff: Record<"proxy" | "reverse" | "analysis" | "thumbs" | "waveform", (e: Entry, id: string, out: string) => Promise<unknown>> = {
     proxy: (e, _, out) => run(() => editProxy(join(dir, e.path), out)),
@@ -501,4 +559,9 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
   return { assets: assets.length, steps: tally, ...(errors.length && { errors }) };
 }
 
-export { audioFxPath, ensureAudioFx };
+export { audioFxPath, ensureAudioFx, measureFinalMix };
+export type { AudioMeasurement, AudioPeak, FinalMixMeasurement, SourceHealth } from "@splicewright/core/node";
+export { scanMaterials, relinkMaterial, listMaterials, prepareMaterials, recordMaterialReview, materialPreview, type ListedMaterial, type MaterialReview, type PrepareStep } from "./materials.ts";
+export { sourceFrame } from "./source-frame.ts";
+
+export { checkOutput } from "./output-health.ts";

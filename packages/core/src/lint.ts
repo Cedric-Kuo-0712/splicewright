@@ -1,7 +1,8 @@
 // Read-only checks run before a master render (SPEC §13.7). Never mutates; no revision, no undo step.
 
 import { FONTS } from "./fonts.ts";
-import type { Project } from "./schema.ts";
+import type { Ctx, Project } from "./schema.ts";
+import type { AudioPeak, SourceHealth } from "./source-health.ts";
 import { textCss, themeOf } from "./themes.ts";
 import { anchorOf, itemSpan } from "./validate.ts";
 
@@ -19,10 +20,13 @@ const SAFE = 0.05;
 /** CaptionLayer's fixed bottom offset in px (render/Composition.tsx). */
 const CAPTION_BOTTOM = 60;
 
-// ponytail: skipped checks. Peaks above -1 dBFS (the project only stores integrated LUFS, no sample/true peak;
-// add a `peak` ingest step to Probe, then compare against meta.limiter) and undecodable canvas-path items
-// (no probe records decode failures; ingest would need to store one).
-export function lint(p: Project): LintIssue[] {
+export type LintMetadata = Pick<Ctx, "fingerprints" | "fingerprint"> & { sourceHealth?: Record<string, SourceHealth> };
+
+const peakText = (peak: AudioPeak) =>
+  peak.dbfs === null ? "silent" : `${peak.dbfs.toFixed(1)} dBFS${peak.atSeconds === null ? "" : ` near source ${peak.atSeconds.toFixed(2)}s`}`;
+
+/** Optional ingest metadata adds source integrity and peak checks without bringing Node or filesystem APIs into core. */
+export function lint(p: Project, metadata?: LintMetadata): LintIssue[] {
   const out: LintIssue[] = [];
   const { width: W, height: H } = p.meta;
 
@@ -67,6 +71,52 @@ export function lint(p: Project): LintIssue[] {
         const sides: [string, number][] = [["left", W], ["right", W], ["top", H], ["bottom", H]];
         const bad = sides.filter(([k, size]) => typeof inset[k] === "number" && (inset[k] as number) < size * SAFE).map(([k]) => k);
         if (bad.length) out.push({ level: "warn", what: `${o.id} text is within the title-safe margin on ${bad.join("/")}; move it at least 5% in`, at: itemSpan(p, o)?.start ?? o.start, itemId: o.id });
+      }
+    }
+
+    if (metadata && (t.kind === "video" || t.kind === "audio")) {
+      for (const item of t.items) {
+        const asset = p.assets[item.assetId];
+        if (!asset || asset.kind === "lut" || asset.kind === "font") continue;
+        const at = itemSpan(p, item)?.start ?? item.start;
+        const health = metadata.sourceHealth?.[asset.id];
+        const liveFingerprint = metadata.fingerprint?.(asset.path);
+        const intervalStart = "sourceIn" in item ? item.sourceIn : 0;
+        const intervalEnd = intervalStart + item.duration / p.meta.fps * ("speed" in item ? item.speed ?? 1 : 1);
+        const interval = `[${intervalStart.toFixed(2)}, ${intervalEnd.toFixed(2)})s`;
+        if (metadata.fingerprint && liveFingerprint === undefined) {
+          out.push({ level: "error", what: `source file ${asset.path} for ${item.id} is missing; relink it before rendering`, at, itemId: item.id });
+          continue;
+        }
+        if (!health) {
+          out.push({ level: "warn", what: `${asset.path} used by ${item.id} has no current full-decode/peak measurement for source ${interval}; run ingest`, at, itemId: item.id });
+          continue;
+        }
+        if (health.path !== asset.path || health.fingerprint !== liveFingerprint || (metadata.fingerprints?.[asset.id] !== undefined && metadata.fingerprints[asset.id] !== health.fingerprint)) {
+          out.push({ level: "error", what: `${item.id} has stale source-health metadata for ${asset.path} source ${interval}; run ingest before rendering`, at, itemId: item.id });
+          continue;
+        }
+        if (health.decode.status === "failed") {
+          out.push({ level: "error", what: `${asset.path} cannot be fully decoded for ${item.id} source ${interval}: ${health.decode.error}`, at, itemId: item.id });
+          continue;
+        }
+        if (health.audio.status === "failed") {
+          out.push({ level: "error", what: `${asset.path} audio peaks could not be measured for ${item.id} source ${interval}: ${health.audio.error}`, at, itemId: item.id });
+          continue;
+        }
+        if (health.audio.status === "unmeasured") {
+          out.push({ level: "warn", what: `${asset.path} has unmeasured source audio peaks for ${item.id} source ${interval}; run ingest`, at, itemId: item.id });
+          continue;
+        }
+        if (health.audio.status === "none") continue;
+        const { samplePeak, truePeak } = health.audio;
+        const inSourceRange = (peakAt: number | null) => peakAt !== null && peakAt >= intervalStart && peakAt < intervalEnd;
+        const hotSample = (samplePeak.dbfs ?? -Infinity) > -1;
+        const hotTruePeak = (truePeak.dbfs ?? -Infinity) > -1;
+        if (hotSample || hotTruePeak) {
+          const selected = (hotSample && inSourceRange(samplePeak.atSeconds)) || (hotTruePeak && inSourceRange(truePeak.atSeconds));
+          out.push({ level: "warn", what: `${item.id} uses source ${interval} from ${asset.path}; whole-source peaks ${peakText(samplePeak)} sample / ${peakText(truePeak)} true peak${selected ? " in the selected source interval" : "; selected-range maximum is not separately measured"}. Source peaks are independent of the render limiter; check the final mix separately`, at, itemId: item.id });
+        }
       }
     }
   }

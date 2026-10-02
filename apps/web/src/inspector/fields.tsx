@@ -1,5 +1,5 @@
 import React from "react";
-import { keyAt, type Animatable, type AudioItem, type Project, type VideoItem } from "@splicewright/core";
+import { keyAt, type Animatable, type AudioItem, type OverlayItem, type Project, type VideoItem } from "@splicewright/core";
 import { app, op, playhead } from "../store.ts";
 
 
@@ -42,12 +42,12 @@ export function Field({ label, value, onCommit, type = "text", mark }: { label: 
 }
 
 /** ◆ when a key sits on the playhead (click removes it), ◇ otherwise (click keys `value` there); lit once the prop has keys. */
-export function KeyButton({ p, item, prop, frame, value }: { p: Project; item: VideoItem | AudioItem; prop: Animatable; frame: number; value: number }) {
+export function KeyButton({ p, item, prop, frame, value }: { p: Project; item: VideoItem | AudioItem | OverlayItem; prop: string; frame: number; value: number }) {
   const on = !!keyAt(p, item, prop, frame);
   const inside = frame >= item.start && frame < item.start + item.duration;
   return (
     <button
-      className={`kf-btn ${item.keyframes?.[prop] ? "keyed" : ""}`}
+      className={`kf-btn ${(item.keyframes as Record<string, unknown[]> | undefined)?.[prop] ? "keyed" : ""}`}
       disabled={!inside}
       title={inside ? (on ? `remove the ${prop} key here` : `key ${prop} here`) : "move the playhead into the item to key it"}
       onClick={() => op("setKeyframe", { itemId: item.id, prop, at: frame, value: on ? null : +value.toFixed(4) })}
@@ -147,4 +147,3 @@ export function PropsField({ value, onCommit }: { value: unknown; onCommit: (v: 
     </label>
   );
 }
-

@@ -74,6 +74,17 @@ it("applies ops against the client's revision", async () => {
   expect(await post({ op: "addMarker", args: { label: "y", start: 6 }, baseRevision: project.revision })).toMatchObject({ status: 409, data: { error: { code: "conflict" } } });
 });
 
+it("manages export jobs and refuses to reveal an incomplete output", async () => {
+  const post = (path: string, body: unknown) => fetch(`${server.url}${path}`, { method: "POST", body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, data: await r.json() }));
+  expect(await post("api/export", { preset: "unknown" })).toMatchObject({ status: 400, data: { error: { code: "invalid" } } });
+  const started = await post("api/export", { preset: "draft" });
+  expect(started).toMatchObject({ status: 202, data: { status: "running", preset: "draft", output: expect.stringMatching(/\.mp4$/) } });
+  const id = started.data.id as string;
+  expect(await post(`api/export/${id}/reveal`, {})).toMatchObject({ status: 409, data: { error: { code: "not_complete" } } });
+  expect(await post(`api/export/${id}/cancel`, {})).toMatchObject({ status: 200, data: { status: "cancelled" } });
+  expect(await (await fetch(`${server.url}api/export`)).json()).toMatchObject([{ id, status: "cancelled" }]);
+});
+
 it("undo past the oldest step lands the steps that exist", async () => {
   const post = (path: string, body: unknown) => fetch(`${server.url}${path}`, { method: "POST", body: JSON.stringify(body) }).then((r) => r.json());
   const { project } = await (await fetch(`${server.url}api/project`)).json();

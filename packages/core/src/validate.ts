@@ -70,6 +70,10 @@ export function validate(project: unknown, prev?: Project, ctx: Ctx = {}): strin
     unique(t.id);
     for (const i of t.items) {
       unique(i.id);
+      if (t.kind === "overlay" && "component" in i && "props" in i) for (const prop of Object.keys(i.keyframes ?? {}).filter((key) => key.startsWith("props."))) {
+        const value = prop.slice(6).split(".").reduce<unknown>((current, key) => current && typeof current === "object" ? (current as Record<string, unknown>)[key] : undefined, i.props);
+        if (typeof value !== "number") errs.push(`${i.id}: ${prop} key requires an existing numeric component prop`);
+      }
       if ("assetId" in i) {
         if (!p.assets[i.assetId]) errs.push(`${i.id}: unknown asset ${i.assetId}`);
         else if (p.assets[i.assetId].kind === "lut" || p.assets[i.assetId].kind === "font") errs.push(`${i.id}: ${p.assets[i.assetId].kind.toUpperCase()} assets cannot be placed on a track`);
@@ -77,6 +81,10 @@ export function validate(project: unknown, prev?: Project, ctx: Ctx = {}): strin
         const dur = ctx.assetDurations?.[i.assetId];
         if ("grade" in i && i.grade?.lut && p.assets[i.grade.lut.assetId]?.kind !== "lut")
           errs.push(`${i.id}: grade LUT ${i.grade.lut.assetId} is missing or is not a LUT asset`);
+        if ("lutKeyframes" in i) for (const key of i.lutKeyframes ?? [])
+          if (p.assets[key.assetId]?.kind !== "lut") errs.push(`${i.id}: keyed LUT ${key.assetId} is missing or is not a LUT asset`);
+        if ("lutKeyframes" in i && i.lutKeyframes?.length && !("grade" in i && i.grade?.lut))
+          errs.push(`${i.id}: LUT keys require a base grade LUT`);
         if (dur !== undefined && i.sourceIn + i.duration * secPerFrame(p, i) > dur + 1e-6)
           errs.push(`${i.id}: source range ends past asset duration ${dur}s`);
         // dissolve and wipe play both sides past the cut; images have no source limits.

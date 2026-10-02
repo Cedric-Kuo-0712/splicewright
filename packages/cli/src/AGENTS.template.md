@@ -12,6 +12,14 @@ Splicewright video project, {{width}}×{{height}} at {{fps}} fps. Edit it throug
 - Must keep / must cut:
 - Music and captions:
 
+## Context and execution
+
+Use the smallest current evidence needed for the next decision; load relevant instructions and source ranges progressively.
+Reuse valid analysis and artifacts. Select compact fields and bounded ranges before returning tool output; keep full logs on disk.
+Group independent reads, preserve revision ordering for edits, and diagnose failures before retrying. Use bounded waits or the
+host's supported background completion mechanism instead of repeated status-only calls. When delegating, pass a self-contained
+brief with ownership and acceptance criteria; prefer fresh context over unrelated history where supported.
+
 ## Workflow
 
 The human watches and edits in the web UI while you work; treat it as a shared timeline, not your scratch space.
@@ -19,19 +27,30 @@ Op names below are the `splicewright_<op>` tools.
 
 1. **Orient.** `get_summary`, then this file. If the Brief above is empty, ask for it (goal, length, style,
    must-keep, music/captions) before cutting, and write the answers into it.
-2. **Know the footage.** `ingest`, then per asset `inspect_asset` (transcript + contact sheet); `find` to locate
-   lines or moments; `peek` a source range when the sheet isn't enough. Note one line per asset under Notes.
+2. **Know the materials on request.** When asked to review a materials folder or start a new edit, call
+   `list_materials` to find unreviewed, changed and missing sources. A local correction only needs its relevant sources.
+   Use `prepare_materials` with selected paths and only the needed steps; it registers sources and builds cached analysis,
+   but never marks them reviewed. Read `inspect_asset` for transcripts/contact-sheet paths, `peek` for sampled video frames,
+   and `material_preview` for bounded image previews. Narrow a video range when sparse frames miss fast action.
+   After actually inspecting each source, call `record_material_review` with its listed version, factual summary,
+   useful source-second ranges and optional candidate/include/exclude decision. If the source changed, re-list and inspect
+   it again. Failed preparation or a filename alone is not a review. Missing sources need attention before affected edits.
+   New materials must be considered, but are never automatically inserted into the timeline. Review records persist in
+   `.splicewright/material-reviews.json`; use tools to manage them. Opening the UI does not start this agent workflow.
 3. **Propose, then cut.** Outline the edit in chat (sections, chosen takes, rough timings) and wait for a yes on
    anything larger than a small fix. Mark sections with `addMarker` so the human can navigate them.
 4. **Rough cut.** Main story on the magnetic V1 track (`insertItem` in a `batch`); B-roll, titles and overlays on
    tracks above. Cut talking heads from transcript times; remove dead air and retakes.
-5. **Refine** only where it earns it: `trim`/`slip` for timing, `setProps` transition on cuts that need one, `setSpeed`,
+5. **Refine** only where it earns it. For rough-cut, transition, picture-in-picture, keyframe, or audio recipes,
+   read `.agents/skills/splicewright-editing/SKILL.md`. Refine with purpose: use GIF/stickers to clarify a point in the Brief; reverse only for an
+   intentional visual/story effect and check its audio; `trim`/`slip` for timing, `setProps` transition on cuts that need one, `setSpeed`,
    `effects`/`crop`/`transform` to match shots or reframe, `setKeyframe` for moves and fades over time (e.g. a slow
    push-in: scale keys at the start and end of a clip; a key's optional `ease` shapes the segment leaving it: `linear`,
    `ease`, or a CSS `[x1, y1, x2, y2]` cubic-bezier with x in 0..1, y beyond it overshoots); `setProps` `mask` + `transform` scale for a circle
    picture-in-picture (ellipse mask), `blend` (screen, multiply…) for light leaks and overlays; `detachAudio` for
    J/L-cuts (detach, then trim the audio separately).
-6. **Sound.** Music on an audio track with `volume` and fades; `detectBeats` then `fitToBeats` to cut a montage on
+6. **Sound.** Use EQ or FFT denoise for an identified problem, then compare the result; RNNoise requires a supplied model.
+   Music on an audio track with `volume` and fades; `detectBeats` then `fitToBeats` to cut a montage on
    the beat. `normalizeLoudness` (after `ingest --only loudness`) before mixing dialogue and music; `setKeyframe` on an
    audio item's `volume` for manual ducking.
    **Cutting fillers and dead air.** `find_fillers` (add `itemId` for one clip); if it returns `hints`, run

@@ -9,6 +9,9 @@ import type { AudioFx, Ctx, Project } from "./schema.ts";
 import { validate } from "./validate.ts";
 import { parseCube } from "./lut.ts";
 import { LUT_PRESETS } from "./lut-presets.ts";
+import type { SourceHealth } from "./source-health.ts";
+
+export type { AudioMeasurement, AudioPeak, FinalMixMeasurement, SourceHealth } from "./source-health.ts";
 
 // Spec §6. The only Node-dependent part of core.
 
@@ -125,6 +128,8 @@ export interface Probe {
   audio?: boolean;
   /** Integrated loudness in LUFS (ebur128); absent for silent assets. */
   loudness?: number;
+  /** Full source decode and audio peak measurement; valid only for this path and fingerprint. */
+  sourceHealth?: SourceHealth;
 }
 
 export function readAssets(dir: string): Record<string, Probe> {
@@ -156,17 +161,22 @@ export function fingerprint(file: string): string | undefined {
 const readJson = (f: string) => (existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : undefined);
 
 /** Adapter context: probe results, transcripts and beats from the ingest cache. */
-export function loadCtx(dir: string): Ctx {
+export function loadCtx(dir: string): Ctx & { sourceHealth: Record<string, SourceHealth> } {
   const project = load(dir);
   const probed = readAssets(dir);
   const assetDurations: Record<string, number> = {};
   const fingerprints: Record<string, string> = {};
   const loudness: Record<string, number> = {};
   const audioFxLoudness: Record<string, number> = {};
+  const sourceHealth: Record<string, SourceHealth> = {};
   for (const [id, a] of Object.entries(probed)) {
+    // Keep historical fingerprints for importAsset identity/relink matching; measurement data must match the live asset.
+    fingerprints[id] = a.fingerprint;
+    const asset = project.assets[id];
+    if (!asset || asset.path !== a.path || fingerprint(join(dir, asset.path)) !== a.fingerprint) continue;
     if (typeof a.duration === "number") assetDurations[id] = a.duration;
     if (typeof a.loudness === "number") loudness[id] = a.loudness;
-    fingerprints[id] = a.fingerprint;
+    if (a.sourceHealth?.path === a.path && a.sourceHealth.fingerprint === a.fingerprint) sourceHealth[id] = a.sourceHealth;
   }
   for (const track of project.tracks) for (const item of track.items) {
     if (!("audioFx" in item) || !item.audioFx || !("assetId" in item)) continue;
@@ -181,6 +191,7 @@ export function loadCtx(dir: string): Ctx {
     assetDurations,
     fingerprints,
     loudness,
+    sourceHealth,
     audioFxLoudness,
     validateLut: (path) => parseCube(readFileSync(projectLutPath(dir, path), "utf8")),
     fingerprint: (path) => fingerprint(join(dir, path)),
@@ -205,11 +216,11 @@ export function commit(dir: string, project: Project, baseRevision: number, ctx 
 }
 
 /** Load, apply one op, commit, and record an undo step. What the CLI and MCP call. */
-export function run(dir: string, op: string, args: unknown, baseRevision?: number): OpResult {
+export function run(dir: string, op: string, args: unknown, baseRevision?: number, context?: Partial<Ctx>): OpResult {
   const before = load(dir);
   if (baseRevision !== undefined && baseRevision !== before.revision)
     return { error: { code: "conflict", message: `project is at revision ${before.revision}; op was based on ${baseRevision}` } };
-  const ctx = loadCtx(dir);
+  const ctx = { ...loadCtx(dir), ...context };
   const r = apply(before, op, args, ctx);
   if ("error" in r) return r;
   const c = commit(dir, r.project, before.revision, ctx);
@@ -220,7 +231,7 @@ export function run(dir: string, op: string, args: unknown, baseRevision?: numbe
 }
 
 /** Copy one registry-owned built-in LUT into raw/ and assign it in one project history step. */
-export function applyLutPreset(dir: string, itemId: string, presetId: string, baseRevision?: number): OpResult {
+export function applyLutPreset(dir: string, itemId: string, presetId: string, baseRevision?: number, at?: number): OpResult {
   const before = load(dir);
   if (baseRevision !== undefined && baseRevision !== before.revision)
     return { error: { code: "conflict", message: `project is at revision ${before.revision}; preset was based on ${baseRevision}` } };
@@ -359,7 +370,12 @@ export function applyLutPreset(dir: string, itemId: string, presetId: string, ba
       rollback();
       return { error: { code: "not_found", message: `video item ${itemId} not found` } };
     }
-    editedItem.grade = { ...editedItem.grade, lut: { assetId, strength: 1 } };
+    if (at === undefined) editedItem.grade = { ...editedItem.grade, lut: { assetId, strength: 1 } };
+    else {
+      const keyed = apply(project, "setLutKeyframe", { itemId, at, assetId }, loadCtx(dir));
+      if ("error" in keyed) { rollback(); return keyed; }
+      Object.assign(project, keyed.project);
+    }
     project.revision = before.revision + 1;
     const ctx = loadCtx(dir);
     const errors = validate(project, before, ctx);

@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
 import { ASPECTS, FPS_CHOICES, durationFrames, formatFrame, itemSpan, snapPoints, type Project, type SnapPoint } from "@splicewright/core";
 import { addMarker, addText, copy, cut, detachAudio, duplicate, findItem, freezeFrame, historyMenu, itemsAfter, loopRange, markerAroundSelection, markerNear, nudge, paste, rangeFromSelection, rippleDelete, selectItems, setIO, slipBy, split, stepKey, tapBeat, videoUnder } from "./edit.ts";
-import { app, history, ioRange, newProject, op, player, playhead, say, seek, switchProject } from "./store.ts";
+import { app, cancelExport, history, ioRange, newProject, op, player, playhead, refreshExport, revealExport, say, seek, startExport, switchProject } from "./store.ts";
 import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 import { constrainLayout, DEFAULT_LAYOUT, type PanelLayout } from "./layout.ts";
 import { PanelSeparator } from "./PanelSeparator.tsx";
@@ -171,6 +171,15 @@ function Toolbar({ p }: { p: Project }) {
   const selection = app.use((s) => s.selection);
   const gap = app.use((s) => s.gap);
   const recent = app.use((s) => s.recent);
+  const exports = app.use((s) => s.exports);
+  const [exportPreset, setExportPreset] = React.useState<"draft" | "master">("master");
+  const runningExports = exports.filter((job) => job.status === "running").map((job) => job.id).join(",");
+  useEffect(() => {
+    if (!runningExports) return;
+    const ids = runningExports.split(",");
+    const timer = window.setInterval(() => ids.forEach((id) => void refreshExport(id)), 800);
+    return () => window.clearInterval(timer);
+  }, [runningExports]);
   app.use((s) => s.io);
   const range = ioRange();
   return (
@@ -189,6 +198,34 @@ function Toolbar({ p }: { p: Project }) {
           ))}
         </select>
       )}
+      <details className="export-menu">
+        <summary>Export{runningExports ? ` · ${runningExports.split(",").length}` : ""}</summary>
+        <div className="export-panel">
+          <div className="export-start">
+            <select aria-label="Export preset" value={exportPreset} onChange={(e) => setExportPreset(e.target.value as "draft" | "master")}>
+              <option value="draft">Draft · faster</option>
+              <option value="master">Master · high quality</option>
+            </select>
+            <button onClick={() => void startExport(exportPreset)}>Render</button>
+          </div>
+          {exports.length === 0 ? <span className="dim">No exports yet</span> : exports.map((job) => (
+            <div className="export-job" key={job.id}>
+              <div className="export-job-head"><b>{job.preset}</b><span>{job.status === "running" ? `${Math.round(job.progress * 100)}%` : job.status}</span></div>
+              {job.status === "running" && <progress max={1} value={job.progress} />}
+              <small>{job.output}</small>
+              {job.finalMix?.status === "measuring" && <small>Checking completed render audio…</small>}
+              {job.finalMix?.status === "measured" && <small title={`Full decode and audio measurement at ${job.finalMix.measuredAt}`}>
+                {job.finalMix.audio.status === "none" ? "Render audio · no audio stream · decode checked" : `Render audio · ${job.finalMix.audio.integratedLufs === null ? "LUFS unmeasured" : `${job.finalMix.audio.integratedLufs.toFixed(1)} LUFS`} · sample ${dbfs(job.finalMix.audio.samplePeak.dbfs)} dBFS · true peak ${dbfs(job.finalMix.audio.truePeak.dbfs)} dBTP`}
+              </small>}
+              {job.error && <small className="error-text">{job.error}</small>}
+              <div className="export-job-actions">
+                <button disabled={job.status !== "running"} onClick={() => void cancelExport(job.id)}>Cancel</button>
+                <button disabled={job.status !== "done"} onClick={() => void revealExport(job.id)}>Reveal output</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </details>
       {range && (
         <span className="io-label" title="I/O range: I and O set it, Alt+X clears it, / plays it in a loop">
           I/O {formatFrame(range[0], p.meta.fps)}–{formatFrame(range[1], p.meta.fps)}
@@ -223,6 +260,8 @@ function Toolbar({ p }: { p: Project }) {
     </div>
   );
 }
+
+const dbfs = (value: number | null) => value === null ? "unmeasured" : value.toFixed(1);
 
 export function Timecode({ fps }: { fps: number }) {
   const frame = playhead.use((s) => s.frame);

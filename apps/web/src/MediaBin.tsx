@@ -1,7 +1,9 @@
 import React, { useEffect } from "react";
 import { type Project } from "@splicewright/core";
 import { addSticker, KEYS, openMenu, replaceWith, upload } from "./edit.ts";
-import { app, dnd, op, playhead } from "./store.ts";
+import { app, dnd, op, playhead, refresh } from "./store.ts";
+
+type Material = { path: string; assetId?: string; health: string; errors?: string[]; measurement?: { decode: { status: string }; audio: { status: string; samplePeak?: { dbfs: number | null }; truePeak?: { dbfs: number | null } } } };
 
 
 export function MediaBin({ p }: { p: Project }) {
@@ -10,6 +12,28 @@ export function MediaBin({ p }: { p: Project }) {
   const reveal = app.use((s) => s.reveal);
   const [over, setOver] = React.useState(false);
   const input = React.useRef<HTMLInputElement>(null);
+  const [materials, setMaterials] = React.useState<Material[] | null>(null);
+  const [scanning, setScanning] = React.useState(false);
+  const [relink, setRelink] = React.useState<{ assetId: string; path: string; acceptChanged: boolean } | null>(null);
+  const scan = async () => {
+    setScanning(true);
+    try {
+      const response = await fetch("/api/materials/scan"), data = await response.json();
+      if (!response.ok || data.error) throw new Error(data.error?.message ?? "Material scan failed");
+      setMaterials(data.materials);
+    } catch (error) { app.set({ message: { text: String(error), error: true } }); }
+    finally { setScanning(false); }
+  };
+  const prepare = async (path: string) => {
+    setScanning(true);
+    try {
+      const response = await fetch("/api/materials/prepare", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ paths: [path] }) });
+      const data = await response.json();
+      if (!response.ok || data.error || data.errors?.length) throw new Error(data.error?.message ?? data.errors?.join("; ") ?? "Preparation failed");
+      await refresh();
+    } catch (error) { app.set({ message: { text: String(error), error: true } }); }
+    finally { await scan(); }
+  };
   useEffect(() => {
     if (!reveal) return;
     document.querySelector(`[data-asset="${reveal}"]`)?.scrollIntoView({ block: "nearest" });
@@ -26,11 +50,27 @@ export function MediaBin({ p }: { p: Project }) {
     >
       <h3>
         Media{" "}
+        <button disabled={scanning} onClick={() => void scan()} title="Explicit source scan; never starts agent analysis">{scanning ? "Scanning…" : "Scan sources"}</button>
         <button onClick={() => input.current!.click()} title={`Import files into raw/ (or drop them here or on the timeline) (${KEYS.import})`}>
           Import…
         </button>
         <input ref={input} type="file" multiple hidden accept="video/*,audio/*,image/*,.cube" onChange={(e) => (upload([...e.currentTarget.files!]), (e.currentTarget.value = ""))} />
       </h3>
+      {materials && <div aria-label="Source health">
+        {materials.map((material) => <div key={material.path} className="material-health">
+          <span title={material.errors?.join("; ")}>{material.path}: {material.health} · source decode {material.measurement?.decode.status ?? "unmeasured"} · audio {material.measurement?.audio.status ?? "unmeasured"}{material.measurement?.audio.status === "measured" && ` · sample ${material.measurement.audio.samplePeak?.dbfs ?? "silent"} / true ${material.measurement.audio.truePeak?.dbfs ?? "silent"} dBFS`}</span>
+          {material.health !== "missing" && <button disabled={scanning} onClick={() => void prepare(material.path)} title="Register and prepare thumbnails, waveform and loudness; no agent analysis">Prepare</button>}
+          {material.assetId && <button onClick={() => setRelink({ assetId: material.assetId!, path: "raw/", acceptChanged: false })}>Relink…</button>}
+        </div>)}
+      </div>}
+      {relink && <form aria-label="Relink source" onSubmit={async (event) => {
+        event.preventDefault();
+        if (await op("relinkAsset", relink)) { setRelink(null); await scan(); }
+      }}>
+        <label>Replacement in raw/ <input value={relink.path} onChange={(event) => setRelink({ ...relink, path: event.target.value })} /></label>
+        <label><input type="checkbox" checked={relink.acceptChanged} onChange={(event) => setRelink({ ...relink, acceptChanged: event.target.checked })} />Accept different or unknown content (ranges must fit)</label>
+        <button type="submit">Relink source</button><button type="button" onClick={() => setRelink(null)}>Cancel</button>
+      </form>}
       {Object.values(p.assets).map((a) => (
         <div
           key={a.id}

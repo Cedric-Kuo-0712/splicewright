@@ -80,6 +80,12 @@ export const Crop = z
   .refine((c) => (c.left ?? 0) + (c.right ?? 0) < 1 && (c.top ?? 0) + (c.bottom ?? 0) < 1, { message: "crop leaves nothing visible" });
 
 const Volume = z.number().min(0).max(2);
+/** `"linear"`, `"ease"` (smoothstep) or a CSS-style cubic-bezier; y may leave [0, 1] to overshoot. */
+export const Ease = z.union([
+  z.enum(["linear", "ease"]),
+  z.tuple([z.number().min(0).max(1), z.number(), z.number().min(0).max(1), z.number()]),
+]);
+export type Ease = z.infer<typeof Ease>;
 
 export const MASK_SHAPES = ["rect", "ellipse", "diamond", "star", "polygon"] as const;
 export const BLENDS = ["normal", "multiply", "screen", "overlay", "darken", "lighten", "difference"] as const;
@@ -120,25 +126,55 @@ const ANIMATED = {
 export const ANIMATABLE = Object.keys(ANIMATED) as (keyof typeof ANIMATED)[];
 export type Animatable = (typeof ANIMATABLE)[number];
 
+/** Numeric Color controls accepted by setKeyframe. LUT asset selection has its own discrete keys. */
+export const GRADE_ANIMATABLE = ["exposure", "temperature", "tint", "vibrance", "shadows", "highlights", "lutStrength"] as const;
+export type GradeAnimatable = (typeof GRADE_ANIMATABLE)[number];
+const GRADE_ANIMATED: Record<GradeAnimatable, z.ZodTypeAny> = {
+  exposure: Grade.shape.exposure,
+  temperature: Grade.shape.temperature,
+  tint: Grade.shape.tint,
+  vibrance: Grade.shape.vibrance,
+  shadows: Grade.shape.shadows,
+  highlights: Grade.shape.highlights,
+  lutStrength: Grade.shape.lut.unwrap().shape.strength,
+};
+export const OVERLAY_TRANSFORM_ANIMATABLE = ["x", "y", "scale", "rotation", "opacity"] as const;
+export type OverlayTransformAnimatable = (typeof OVERLAY_TRANSFORM_ANIMATABLE)[number];
+const OverlayKeyframes = z.record(z.string().min(1), z.array(z.object({ t: Seconds.min(0), v: z.number().min(-1_000_000).max(1_000_000), ease: Ease.optional() })).min(1))
+  .superRefine((kf, ctx) => {
+    for (const [prop, keys] of Object.entries(kf)) {
+      if (!OVERLAY_TRANSFORM_ANIMATABLE.includes(prop as OverlayTransformAnimatable) && !/^props\.[A-Za-z_$][\w$-]*(?:\.[A-Za-z_$][\w$-]*)?$/.test(prop))
+        ctx.addIssue({ code: "custom", message: `${prop} is not an overlay animatable; custom numeric props use props.<name>` });
+      if (OVERLAY_TRANSFORM_ANIMATABLE.includes(prop as OverlayTransformAnimatable)) {
+        const schema = Transform.shape[prop as OverlayTransformAnimatable];
+        keys.forEach((key, i) => {
+          if (i && key.t <= keys[i - 1].t) ctx.addIssue({ code: "custom", message: `${prop} keys must increase in t` });
+          if (!schema.safeParse(key.v).success) ctx.addIssue({ code: "custom", message: `${prop} key ${key.v} out of range` });
+        });
+      } else keys.forEach((key, i) => {
+        if (i && key.t <= keys[i - 1].t) ctx.addIssue({ code: "custom", message: `${prop} keys must increase in t` });
+        if (prop === "props.textStyle.size" && key.v <= 0) ctx.addIssue({ code: "custom", message: `${prop} key ${key.v} must be positive` });
+      });
+    }
+  });
+export const LutKeyframes = z.array(z.object({ t: Seconds.min(0), assetId: Id })).min(1)
+  .refine((keys) => keys.every((key, i) => !i || key.t > keys[i - 1].t), { message: "LUT keys must increase in t" });
+export const KEYFRAME_PROPS = [...ANIMATABLE, ...GRADE_ANIMATABLE] as const;
+export type KeyframeProp = (typeof KEYFRAME_PROPS)[number];
+
 /**
  * Per prop, keys sorted by `t` in source seconds, so split, trim, slip and speed keep them on the
  * same content. `ease` shapes the segment leaving a key (default linear); values hold past the ends.
  */
-/** `"linear"`, `"ease"` (smoothstep) or a CSS-style cubic-bezier `[x1, y1, x2, y2]`; y may leave [0, 1] to overshoot. */
-export const Ease = z.union([
-  z.enum(["linear", "ease"]),
-  z.tuple([z.number().min(0).max(1), z.number(), z.number().min(0).max(1), z.number()]),
-]);
-
-export type Ease = z.infer<typeof Ease>;
 
 export const Keyframes = z
-  .partialRecord(z.enum(ANIMATABLE), z.array(z.object({ t: Seconds.min(0), v: z.number(), ease: Ease.optional() })).min(1))
+  .partialRecord(z.enum(KEYFRAME_PROPS), z.array(z.object({ t: Seconds.min(0), v: z.number(), ease: Ease.optional() })).min(1))
   .superRefine((kf, ctx) => {
-    for (const [k, keys] of Object.entries(kf) as [Animatable, { t: number; v: number }[]][])
+    for (const [k, keys] of Object.entries(kf) as [KeyframeProp, { t: number; v: number }[]][])
       keys.forEach((key, i) => {
         if (i && key.t <= keys[i - 1].t) ctx.addIssue({ code: "custom", message: `${k} keys must increase in t` });
-        if (!ANIMATED[k].safeParse(key.v).success) ctx.addIssue({ code: "custom", message: `${k} key ${key.v} out of range` });
+        const schema = k in ANIMATED ? ANIMATED[k as Animatable] : GRADE_ANIMATED[k as GradeAnimatable];
+        if (!schema.safeParse(key.v).success) ctx.addIssue({ code: "custom", message: `${k} key ${key.v} out of range` });
       });
   });
 
@@ -177,6 +213,7 @@ export const VideoItem = z.object({
   mask: Mask.optional(),
   blend: z.enum(BLENDS).optional(),
   keyframes: Keyframes.optional(),
+  lutKeyframes: LutKeyframes.optional(),
   role: z.string().optional(),
   /** Playback rate: source seconds per timeline second. Changes how much source `duration` covers. */
   speed: z.number().min(0.1).max(10).optional(),
@@ -255,6 +292,10 @@ export const OverlayItem = z.object({
   ...itemBase,
   component: z.string().min(1),
   props: z.record(z.string(), z.unknown()),
+  transform: Transform.optional(),
+  keyframes: OverlayKeyframes.optional(),
+  /** Internal local-time phase offset used to keep overlay keys identical through split/start-trim. */
+  keyframeOffset: Seconds.min(0).optional(),
   mask: Mask.optional(),
   blend: z.enum(BLENDS).optional(),
   anchor: Anchor.optional(),
@@ -331,6 +372,8 @@ export interface Ctx {
   audioFxLoudness?: Record<string, number>;
   /** Validate a project-relative LUT when registering it. */
   validateLut?: (path: string) => void;
+  /** Ingest preflight for an explicitly selected replacement; never inferred from a filename. */
+  relinkCandidate?: { assetId: string; path: string; kind: Asset["kind"]; duration?: number; identical: boolean; fingerprint: string };
 }
 
 export interface BeatAnalysis {

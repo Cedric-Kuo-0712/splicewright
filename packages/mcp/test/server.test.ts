@@ -35,7 +35,9 @@ it("an agent can read and edit a project over stdio MCP", async () => {
     expect(await call("get_range", { from: 0, to: 1000 })).toHaveLength(2);
     expect(await call("splicewright_undo")).toMatchObject({ revision: 5 });
     expect((await call("get_summary")).durationFrames).toBe(90);
-    expect(await call("lint")).toEqual([]);
+    const sourceIssues = await call("lint");
+    expect(sourceIssues).toHaveLength(2);
+    expect(sourceIssues).toEqual(expect.arrayContaining([{ level: "error", what: expect.stringContaining("source file raw/clip.mp4"), at: 0, itemId: "i_1" }]));
     expect(load(dir).revision).toBe(5);
     const trim = (await client.listTools()).tools.find((t) => t.name === "splicewright_trim")!;
     expect(JSON.stringify(trim.inputSchema.properties!.to)).toContain("near");

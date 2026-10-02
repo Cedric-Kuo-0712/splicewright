@@ -7,11 +7,14 @@ import { mediaBox, SplicewrightProject, type Props } from "@splicewright/render"
 import { findItem, split } from "./edit.ts";
 import { app, ioRange, op, player, playhead, say } from "./store.ts";
 import { mapSamplePoint, multiplyMatrix, sampledRgb } from "./sample-coordinates.ts";
+import { samplePlayerAudio } from "./audio-meter.ts";
 
 const Composition: React.FC<Props> = (props) => <SplicewrightProject {...props} components={config.components} />;
 
 
 export function Preview({ p }: { p: Project }) {
+  const [playing, setPlaying] = React.useState(false);
+  const audioMeter = app.use((s) => s.audioMeter);
   const duck = app.use((s) => s.duck);
   const words = app.use((s) => s.words);
   const proxies = app.use((s) => s.proxies);
@@ -48,8 +51,19 @@ export function Preview({ p }: { p: Project }) {
     player.ref = r;
     r?.addEventListener("frameupdate", (e) => playhead.set({ frame: e.detail.frame }));
     r?.addEventListener("seeked", (e) => playhead.set({ frame: e.detail.frame }));
-    r?.addEventListener("pause", () => app.get().looping && app.set({ looping: false }));
+    r?.addEventListener("play", () => setPlaying(true));
+    r?.addEventListener("pause", () => { setPlaying(false); app.set({ audioMeter: { status: "unmeasured", peakDb: null, clipping: false } }); app.get().looping && app.set({ looping: false }); });
   }, []);
+  useEffect(() => {
+    if (!playing) return app.set({ audioMeter: { status: "unmeasured", peakDb: null, clipping: false } });
+    const root = player.ref?.getContainerNode();
+    if (!root) return app.set({ audioMeter: { status: "unavailable", peakDb: null, clipping: false } });
+    return samplePlayerAudio(root, (reading, available) => app.set({ audioMeter: {
+      status: available ? reading ? "measuring" : "unmeasured" : "unavailable",
+      peakDb: available ? reading?.peakDb ?? null : null,
+      clipping: available && !!reading?.clipping,
+    } }));
+  }, [playing]);
   // The eyedropper belongs to one item; a different selection (or none) ends it.
   const selected = app.use((s) => s.selection);
   useEffect(() => {
@@ -101,6 +115,10 @@ export function Preview({ p }: { p: Project }) {
         acknowledgeRemotionLicense
         style={{ width: "100%", height: "100%" }}
       />
+      <div className={`audio-meter${audioMeter.clipping ? " clipped" : ""}`} aria-live="polite" aria-label="Live preview audio meter">
+        <span>Preview mix</span>
+        {audioMeter.status === "unavailable" ? <b>Unmeasured</b> : audioMeter.status === "unmeasured" ? <b>Paused</b> : audioMeter.peakDb === null ? <b>Waiting for audio</b> : audioMeter.clipping ? <b>Clip</b> : <b>{audioMeter.peakDb === -Infinity ? "−∞" : audioMeter.peakDb.toFixed(1)} dBFS</b>}
+      </div>
       <TransformBox p={p} />
     </div>
   );

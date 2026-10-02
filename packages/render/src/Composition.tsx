@@ -10,9 +10,11 @@ import { shadowsHighlights } from "@remotion/effects/shadows-highlights";
 import { gradeEffect, type GradeLut } from "./grade-effect.ts";
 import { lumaKey } from "./luma-key.ts";
 import "./fonts.ts";
-import { animate, fontAssetFamily, itemSpan, sourceAt, textCss, themeOf, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem, type Word, type FontRole, type TextStyle } from "@splicewright/core";
+import { animate, animateOverlay, fontAssetFamily, itemSpan, sourceAt, textCss, themeOf, transitionOf, valueAt, type AudioItem, type Item, type OverlayItem, type Project, type Track, type VideoItem, type Word, type FontRole, type TextStyle } from "@splicewright/core";
 import type { Config } from "./config.ts";
 import { duckGain, type Ranges } from "./duck.ts";
+import { mediaBox } from "./geometry.ts";
+export { mediaBox, pip, type PipPreset } from "./geometry.ts";
 
 // Spec §9: one composition renders any project.json, tracks bottom (index 0) to top.
 
@@ -248,59 +250,6 @@ export function look(item: VideoItem, f: number, inc?: Transition, out?: Transit
   return { opacity, bright, gain, clip, dx, dy, zoom };
 }
 
-/**
- * Where a video item's picture sits at scale 1. The media element is `ew`×`eh` (the frame, swapped when
- * the total rotation is a quarter turn) and rotated by `rot`; the visible picture inside it is `vw`×`vh`,
- * centred. `display` is that picture upright as the asset plays (asset rotation applied, the item's not),
- * and `turn` is the asset rotation in quarter turns. Without a probed `size` the picture fills the element.
- */
-export function mediaBox(p: Project, item: VideoItem, size?: [number, number]) {
-  const { width: W, height: H } = p.meta;
-  const a = p.assets[item.assetId]?.rotation ?? 0;
-  const rot = a + (item.transform?.rotation ?? 0);
-  const [ew, eh] = Math.abs(rot % 180) === 90 ? [H, W] : [W, H];
-  const [w, h] = size ?? [ew, eh];
-  const s = (item.fit === "cover" ? Math.max : Math.min)(ew / w, eh / h);
-  const [vw, vh] = [Math.min(ew, w * s), Math.min(eh, h * s)];
-  const turn = ((Math.round(a / 90) % 4) + 4) % 4;
-  return { ew, eh, vw, vh, rot, turn, display: (turn % 2 ? [vh, vw] : [vw, vh]) as [number, number] };
-}
-
-export type PipPreset = "tl" | "tr" | "bl" | "br" | "left" | "right" | "circle";
-
-/**
- * Picture-in-picture as a setProps patch (transform and/or mask only). Corners scale to 0.3 with a 4%
- * margin; left/right fill half the frame side by side. Placement targets the visible region (mask box,
- * else crop box, else the whole upright picture), so a masked or cropped item lands where it shows.
- * circle only adds a centred circular mask and keeps the transform. Transform x, y are the picture
- * centre's px offset from the frame centre, as in the web transform box.
- * ponytail: rotation is ignored (the visible box is measured upright); handle it if rotated PIPs matter.
- */
-export function pip(p: Project, item: VideoItem, size: [number, number] | undefined, preset: PipPreset) {
-  const { width: W, height: H } = p.meta;
-  const [vw, vh] = mediaBox(p, item, size).display;
-  if (preset === "circle") {
-    const d = Math.min(vw, vh);
-    const [w, h] = [d / vw, d / vh];
-    return { mask: { shape: "ellipse" as const, x: (1 - w) / 2, y: (1 - h) / 2, w, h } };
-  }
-  const { mask, crop = {} } = item;
-  // An inverted mask shows what is outside its box, so place the crop box instead.
-  const [rx, ry, rw, rh] = mask && !mask.invert
-    ? [mask.x, mask.y, mask.w, mask.h]
-    : [crop.left ?? 0, crop.top ?? 0, 1 - (crop.left ?? 0) - (crop.right ?? 0), 1 - (crop.top ?? 0) - (crop.bottom ?? 0)];
-  const [bw, bh] = [rw * vw, rh * vh]; // visible box at scale 1
-  const [ox, oy] = [(rx + rw / 2 - 0.5) * vw, (ry + rh / 2 - 0.5) * vh]; // its centre relative to the picture's
-  const side = preset === "left" || preset === "right";
-  const scale = side ? Math.min(W / 2 / bw, H / bh) : 0.3;
-  const m = 0.04 * Math.min(W, H);
-  // Where the visible box's centre goes, in px from the frame centre.
-  const cx = side ? (preset === "left" ? -W / 4 : W / 4) : (preset.endsWith("l") ? -1 : 1) * (W / 2 - m - (scale * bw) / 2);
-  const cy = side ? 0 : (preset.startsWith("t") ? -1 : 1) * (H / 2 - m - (scale * bh) / 2);
-  const t = item.transform ?? {};
-  return { transform: { ...t, x: +(cx - scale * ox).toFixed(2), y: +(cy - scale * oy).toFixed(2), scale: +scale.toFixed(4) } };
-}
-
 const SIDES = ["top", "right", "bottom", "left"] as const;
 
 /** Crop as a clip-path on the (rotated) media element: crop sides are the upright picture's, so shift them by the asset's quarter turns. */
@@ -472,19 +421,19 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
   const volume = (v: number) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain;
   // A missing .cube must not take the whole preview down, but a render keeps failing on it (lookEffects throws) rather than writing an ungraded clip.
   const { isRendering } = useRemotionEnvironment();
-  const lutMissing = !!raw.grade?.lut && !luts[raw.grade.lut.assetId];
+  const lutMissing = !!item.grade?.lut && !luts[item.grade.lut.assetId];
   const media = item.reverse && !reverseProxies?.includes(item.assetId) && !isRendering ? (
     <div style={lookOffStyle}>reverse proxy is missing; prepare it in the inspector ({raw.label ?? raw.id})</div>
   ) : lutMissing && !isRendering ? (
     <div style={lookOffStyle}>look off: LUT {raw.grade!.lut!.assetId} unavailable ({raw.label ?? raw.id})</div>
   ) : asset.kind === "image" && animated ? (
-    <div data-look-item-id={raw.id} style={{ display: "contents" }}><AnimatedImage src={staticFile(asset.path)} from={animatedFrom} fit={item.fit ?? "contain"} style={style} effects={(raw.grade || raw.key) ? lookEffects(raw.id, raw.grade, raw.key, luts, sampleItemId === raw.id) : undefined} /></div>
-  ) : asset.kind === "image" && (raw.grade || raw.key) ? (
-    <div data-look-item-id={raw.id} style={{ display: "contents" }}><Img src={staticFile(source)} style={style} effects={lookEffects(raw.id, raw.grade, raw.key, luts, sampleItemId === raw.id)} /></div>
+    <div data-look-item-id={raw.id} style={{ display: "contents" }}><AnimatedImage src={staticFile(asset.path)} from={animatedFrom} fit={item.fit ?? "contain"} style={style} effects={(item.grade || item.key) ? lookEffects(raw.id, item.grade, item.key, luts, sampleItemId === raw.id) : undefined} /></div>
+  ) : asset.kind === "image" && (item.grade || item.key) ? (
+    <div data-look-item-id={raw.id} style={{ display: "contents" }}><Img src={staticFile(source)} style={style} effects={lookEffects(raw.id, item.grade, item.key, luts, sampleItemId === raw.id)} /></div>
   ) : asset.kind === "image" ? (
     <Img src={staticFile(source)} style={style} />
-  ) : raw.key || raw.grade ? (
-    <CanvasVideoPath key={source} itemName={raw.label ?? raw.id} itemId={raw.id} sample={sampleItemId === raw.id} src={staticFile(source)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted || !!raw.audioFx} fit={item.fit} style={style} keyLook={raw.key} grade={raw.grade} luts={luts} />
+  ) : item.key || item.grade ? (
+    <CanvasVideoPath key={source} itemName={raw.label ?? raw.id} itemId={raw.id} sample={sampleItemId === raw.id} src={staticFile(source)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted || !!raw.audioFx} fit={item.fit} style={style} keyLook={item.key} grade={item.grade} luts={luts} />
   ) : (
     // Legacy items stay on OffthreadVideo; only pixel-look items opt into the canvas decoder.
     <OffthreadVideo
@@ -532,6 +481,18 @@ const Sound: React.FC<{ p: Project; t: Track; item: AudioItem; ranges?: Ranges; 
   return <Audio src={src.startsWith("/") ? src : staticFile(src)} trimBefore={Math.round(item.sourceIn * p.meta.fps)} volume={volume} muted={t.muted} />;
 };
 
+const OverlayLayer: React.FC<{ p: Project; item: OverlayItem; from: number; C: React.ComponentType<any> }> = ({ p, item, from, C }) => {
+  const frame = from + useCurrentFrame();
+  const animated = animateOverlay(p, item, frame);
+  let props = animated.props;
+  if (animated.component === "Text")
+    props = { ...props, style: { ...textCss(p, (props.role as FontRole) ?? "title", props.textStyle as TextStyle | undefined, String(props.text ?? "")), ...(props.style as object) } };
+  const { x = 0, y = 0, scale = 1, rotation = 0, opacity = 1 } = animated.transform ?? {};
+  const style: React.CSSProperties = { mixBlendMode: blendOf(animated), opacity, transform: `translate(${x}px, ${y}px) scale(${scale}) rotate(${rotation}deg)` };
+  const layer = <C {...props} />;
+  return <AbsoluteFill style={{ ...style, ...(animated.mask && maskStyle(animated.mask, [p.meta.width, p.meta.height], [p.meta.width, p.meta.height])) }}>{layer}</AbsoluteFill>;
+};
+
 export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, durations = {}, frameRates = {}, reverseProxies, reverseAudioFx, animated = {}, words = {}, luts = {}, audioFx, fontVersions, sampleItemId, components }) => {
   const registry: Record<string, React.ComponentType<any>> = { Text, Image, Sticker, CaptionLayer, ...components };
   const component = (name: string, where: string) => {
@@ -542,14 +503,7 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
   const body = (t: Track, item: Item, from: number, inc?: Transition, out?: Transition) => {
     if ("assetId" in item) return t.kind === "audio" ? <Sound p={p} t={t} item={item as AudioItem} ranges={duck[item.id]} audioFx={audioFx} /> : <Video p={p} item={item as VideoItem} size={sizes[(item as VideoItem).assetId]} animated={animated[(item as VideoItem).assetId]} durations={durations} frameRates={frameRates} reverseProxies={reverseProxies} reverseAudioFx={reverseAudioFx} muted={t.muted} from={from} inc={inc} out={out} luts={luts} audioFx={audioFx} sampleItemId={sampleItemId} />;
     const C = component((item as { component: string }).component, item.id);
-    const { mask } = item as OverlayItem;
-    let props = (item as { props: Record<string, unknown> }).props;
-    // A Text overlay's look: theme role, then textStyle, then the raw `style` escape hatch.
-    if ((item as OverlayItem).component === "Text")
-      props = { ...props, style: { ...textCss(p, (props.role as FontRole) ?? "title", props.textStyle as TextStyle | undefined, String(props.text ?? "")), ...(props.style as object) } };
-    const layer = <C {...props} />;
-    const mixBlendMode = blendOf(item as OverlayItem);
-    return mask || mixBlendMode ? <AbsoluteFill style={{ mixBlendMode, ...(mask && maskStyle(mask, [p.meta.width, p.meta.height], [p.meta.width, p.meta.height])) }}>{layer}</AbsoluteFill> : layer;
+    return <OverlayLayer p={p} item={item as OverlayItem} from={from} C={C} />;
   };
   return (
     <AbsoluteFill className="swr" style={{ backgroundColor: p.meta.background ?? "#000", fontFamily: FONT, lineHeight: 1.5 }}>

@@ -1,11 +1,12 @@
 import React from "react";
+import { fieldLabel } from "./labels.ts";
 import { keyAt, type Animatable, type AudioItem, type OverlayItem, type Project, type VideoItem } from "@splicewright/core";
 import { app, op, playhead } from "../store.ts";
 
 
 /** Text or number input that commits on Enter or blur; empty clears the field. */
 
-export function Field({ label, value, onCommit, type = "text", mark }: { label: string; value: unknown; onCommit: (v: string | number | null) => void; type?: "text" | "number"; mark?: React.ReactNode }) {
+export function Field({ label, value, onCommit, type = "text", mark, control }: { label: string; value: unknown; onCommit: (v: string | number | null) => void; type?: "text" | "number"; mark?: React.ReactNode; control?: string }) {
   const initial = value === undefined || value === null ? "" : String(value);
   const commit = (raw: string) => {
     if (raw === initial) return;
@@ -19,9 +20,9 @@ export function Field({ label, value, onCommit, type = "text", mark }: { label: 
   };
   const id = React.useId();
   return (
-    <label className="field" htmlFor={id}>
+    <label className="field" htmlFor={id} data-ui-control={control ?? label}>
       <span>
-        {label}
+        {fieldLabel(label)}
         {mark}
       </span>
       <input
@@ -104,9 +105,9 @@ export function Slider({ itemId, label, min, max, step, zero, value, patch, mark
   const release = (v: number) => app.get().live?.itemId === itemId && commit(v);
   const id = React.useId();
   return (
-    <label className="field slider" htmlFor={id} title="drag; arrow keys step; double-click resets">
+    <label data-ui-control={label} className="field slider" htmlFor={id} title="drag; arrow keys step; double-click resets">
       <span>
-        {label}
+        {fieldLabel(label)}
         {mark}
       </span>
       <input

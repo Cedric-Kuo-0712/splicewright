@@ -184,3 +184,31 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .curve-reference { stroke: #495057; stroke-width: 1; stroke-dasharray: 3 3; }
 .curve-line { fill: none; stroke: #74c0fc; stroke-width: 2; pointer-events: none; }
 .curve-point { fill: #fff; stroke: #228be6; stroke-width: 2; cursor: grab; }
+
+/* A1: fixed horizontal categories, persistent preview and Inspector. */
+.feature-panel { grid-area: bin; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-right: 1px solid #2a2c31; }
+.feature-categories { display: flex; flex-wrap: wrap; gap: 4px; padding: 8px; border-bottom: 1px solid #2a2c31; }
+.feature-categories button { flex: 1 0 56px; padding: 6px 4px; white-space: nowrap; }
+.operation-search-entry { margin: 8px; text-align: left; padding: 7px; }
+.feature-content { overflow: auto; min-height: 0; flex: 1; }
+.feature-panel .bin { border: 0; overflow: visible; }
+.feature-create, .feature-controls { padding: 10px; }
+.feature-create button { display: block; width: 100%; margin-bottom: 8px; overflow-wrap: anywhere; }
+.feature-control { display: grid; gap: 4px; margin-bottom: 10px; }
+.feature-control button { display: flex; justify-content: space-between; gap: 8px; text-align: left; padding: 6px; }
+.feature-control small, .unavailable { color: #a0a4af; }
+.inspector-section { margin: 14px 0; padding-top: 10px; border-top: 1px solid #353841; }
+.inspector-section > h4 { margin: 0 0 8px; color: #c2cdff; }
+[data-ui-control]:focus, [data-ui-control]:focus-within { outline: 2px solid #8aa1ff; outline-offset: 2px; }
+.search-backdrop { position: fixed; inset: 0; z-index: 100; background: #0009; display: flex; justify-content: center; align-items: flex-start; padding: 7vh 16px; }
+.operation-search { width: min(620px, 100%); max-height: 84vh; display: flex; flex-direction: column; background: #202228; border: 1px solid #555b6a; border-radius: 8px; padding: 16px; box-shadow: 0 10px 50px #000a; }
+.search-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.search-heading h3 { margin: 0; }
+.operation-search > input { width: 100%; padding: 8px; box-sizing: border-box; }
+.search-results { overflow: auto; min-height: 0; }
+.search-result { padding: 5px; border: 1px solid transparent; border-radius: 4px; }
+.search-result.active { border-color: #8aa1ff; background: #3b5bdb22; }
+.search-result button { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px; text-align: left; }
+.search-result small { display: block; margin-top: 4px; }
+.search-result button small { color: #a0a4af; }
+.toolbar { flex-wrap: wrap; }

@@ -6,7 +6,7 @@ import { app, dnd, op, playhead, refresh } from "./store.ts";
 type Material = { path: string; assetId?: string; health: string; errors?: string[]; measurement?: { decode: { status: string }; audio: { status: string; samplePeak?: { dbfs: number | null }; truePeak?: { dbfs: number | null } } } };
 
 
-export function MediaBin({ p }: { p: Project }) {
+export function MediaBin({ p, assetKind }: { p: Project; assetKind?: "audio" }) {
   const uploads = app.use((s) => s.uploads);
   const ingesting = app.use((s) => s.ingesting);
   const reveal = app.use((s) => s.reveal);
@@ -49,10 +49,10 @@ export function MediaBin({ p }: { p: Project }) {
       onDrop={(e) => files(e) && (e.preventDefault(), setOver(false), upload([...e.dataTransfer.files]))}
     >
       <h3>
-        Media{" "}
-        <button disabled={scanning} onClick={() => void scan()} title="Explicit source scan; never starts agent analysis">{scanning ? "Scanning…" : "Scan sources"}</button>
-        <button onClick={() => input.current!.click()} title={`Import files into raw/ (or drop them here or on the timeline) (${KEYS.import})`}>
-          Import…
+        素材{" "}
+        <button disabled={scanning} onClick={() => void scan()} title="Explicit source scan; never starts agent analysis">{scanning ? "掃描中…" : "檢查來源"}</button>
+        <button data-ui-control="import" onClick={() => input.current!.click()} title={`Import files into raw/ (or drop them here or on the timeline) (${KEYS.import})`}>
+          匯入…
         </button>
         <input ref={input} type="file" multiple hidden accept="video/*,audio/*,image/*,.cube" onChange={(e) => (upload([...e.currentTarget.files!]), (e.currentTarget.value = ""))} />
       </h3>
@@ -71,7 +71,7 @@ export function MediaBin({ p }: { p: Project }) {
         <label><input type="checkbox" checked={relink.acceptChanged} onChange={(event) => setRelink({ ...relink, acceptChanged: event.target.checked })} />Accept different or unknown content (ranges must fit)</label>
         <button type="submit">Relink source</button><button type="button" onClick={() => setRelink(null)}>Cancel</button>
       </form>}
-      {Object.values(p.assets).map((a) => (
+      {Object.values(p.assets).filter((a) => !assetKind || a.kind === assetKind).map((a) => (
         <div
           key={a.id}
           data-asset={a.id}
@@ -92,7 +92,7 @@ export function MediaBin({ p }: { p: Project }) {
               { label: "Remove from project (keeps file)", run: () => op("removeAsset", { assetId: a.id }) },
             ])
           }
-          title={a.kind === "lut" ? `${a.id} — choose this LUT in the Color inspector` : `${a.id} — drag onto the timeline`}
+          title={a.kind === "lut" ? `${a.id} — 到「畫面調整」選取色彩風格（LUT）` : `${a.id} — 拖曳到時間軸`}
         >
           {a.kind === "lut" ? <div className="thumb audio">LUT</div> : a.kind === "audio" ? <div className="thumb audio">♪</div> : <img className="thumb" src={`/api/thumb?asset=${a.id}&t=0`} alt="" draggable={false} />}
           <span>{a.path.split("/").pop()}</span>
@@ -106,7 +106,7 @@ export function MediaBin({ p }: { p: Project }) {
           <em className="badge">uploading…</em>
         </div>
       ))}
-      {!Object.keys(p.assets).length && !uploads.length && <p className="dim">No assets yet. Drop files here or use Import….</p>}
+      {!Object.keys(p.assets).length && !uploads.length && <p className="dim">還沒有素材。拖曳檔案到此處，或按「匯入」。</p>}
     </div>
   );
 }

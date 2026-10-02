@@ -35,18 +35,17 @@ export function VideoFields({ p, item, fps, still, set }: { p: Project; item: Vi
   const lumaKey = item.key?.kind === "luma" ? item.key : null;
   return (
     <>
-      <label className="field">
-        <span>fit</span>
+      <label className="field" data-ui-control="fit">
+        <span>畫面填滿方式</span>
         <select value={item.fit ?? ""} onChange={(e) => set({ fit: e.target.value || null })}>
-          <option value="">contain (default)</option>
-          <option value="cover">cover</option>
+          <option value="">完整顯示（預設）</option>
+          <option value="cover">填滿畫面</option>
         </select>
       </label>
-      <Slider itemId={item.id} label="volume" min={0} max={2} step={0.01} zero={1} value={now.volume ?? 1} mark={mark("volume", now.volume ?? 1)} patch={(v) => (keyed("volume") ? keyPatch("volume", v) : { volume: v === 1 ? null : v })} />
       <h4>
-        transform
+        位置與尺寸
         <KeyGroupButton p={p} item={item} frame={frame} props={TF_KEYS.map((k) => [k, (now.transform as Record<string, number> | undefined)?.[k] ?? (k === "scale" || k === "opacity" ? 1 : 0)])} />
-        <button onClick={(e) => openMenu(e, pipEntries(p, item))}>PIP ▾</button>
+        <button onClick={(e) => openMenu(e, pipEntries(p, item))}>子母畫面 ▾</button>
       </h4>
       {TF_KEYS.map((k) => {
         const v = (now.transform as Record<string, number> | undefined)?.[k];
@@ -62,9 +61,9 @@ export function VideoFields({ p, item, fps, still, set }: { p: Project; item: Vi
           />
         );
       })}
-      {!still && <Field label="speed (×)" type="number" value={item.speed ?? 1} onCommit={(v) => Number(v) > 0 && op("setSpeed", { itemId: item.id, speed: Number(v) })} />}
+      {!still && <Field control="speed" label="speed (×)" type="number" value={item.speed ?? 1} onCommit={(v) => Number(v) > 0 && op("setSpeed", { itemId: item.id, speed: Number(v) })} />}
       {!still && <>
-        <label className="field"><span>reverse</span><input type="checkbox" checked={item.reverse ?? false} onChange={(e) => {
+        <label className="field" data-ui-control="reverse"><span>倒放</span><input type="checkbox" checked={item.reverse ?? false} onChange={(e) => {
           const reverse = e.currentTarget.checked;
           set({ reverse: reverse || null });
           if (reverse && !reverseProxies.includes(item.assetId)) void prepareReverse(item.assetId);
@@ -73,8 +72,8 @@ export function VideoFields({ p, item, fps, still, set }: { p: Project; item: Vi
           {ingesting[item.assetId] === "reverse" ? "Preparing reverse proxy…" : <button onClick={() => void prepareReverse(item.assetId)}>Prepare reverse proxy</button>}
         </small>}
       </>}
-      <label className="field">
-        <span>transition out</span>
+      <label className="field" data-ui-control="transition">
+        <span>接到下一段的轉場</span>
         <select value={tr?.kind ?? ""} onChange={(e) => set({ transition: e.target.value ? { kind: e.target.value, duration: tr?.duration ?? Math.round(fps) } : null })}>
           <option value="">none</option>
           {TRANSITIONS.map((k) => <option key={k}>{k}</option>)}
@@ -90,9 +89,9 @@ export function VideoFields({ p, item, fps, still, set }: { p: Project; item: Vi
         </label>
       )}
       <h4>
-        effects
+        畫面效果
         <KeyGroupButton p={p} item={item} frame={frame} props={EFFECTS.map(([k, , , , zero]) => [k, now.effects?.[k] ?? zero])} />
-        <button onClick={(e) => openMenu(e, lookEntries(item))}>Look ▾</button>
+        <button onClick={(e) => openMenu(e, lookEntries(item))}>效果預設 ▾</button>
       </h4>
       {EFFECTS.map(([k, min, max, step, zero]) => (
         <Slider
@@ -108,7 +107,7 @@ export function VideoFields({ p, item, fps, still, set }: { p: Project; item: Vi
           patch={(v) => (keyed(k) ? keyPatch(k, v) : { effects: prune({ ...item.effects, [k]: v }, EFFECT_ZERO) })}
         />
       ))}
-      <h4>color</h4>
+      <h4>色彩調整</h4>
       {(["exposure", "temperature", "tint", "vibrance", "shadows", "highlights"] as const).map((k) => {
         const [min, max, step] = { exposure: [-5, 5, 0.05], temperature: [-1, 1, 0.01], tint: [-1, 1, 0.01], vibrance: [-1, 1, 0.01], shadows: [-1, 1, 0.01], highlights: [-1, 1, 0.01] }[k];
         return <Slider key={k} itemId={item.id} label={k} min={min} max={max} step={step} zero={0} value={now.grade?.[k] ?? 0} mark={mark(k, now.grade?.[k] ?? 0)} patch={(v) => (keyed(k) ? keyPatch(k, v) : { grade: gradeWith(item.grade, k, v) })} />;
@@ -121,17 +120,17 @@ export function VideoFields({ p, item, fps, still, set }: { p: Project; item: Vi
         return <Slider key={k} itemId={item.id} label={`levels ${k}`} {...range} value={levels[k]} patch={(v) => ({ grade: { ...item.grade, levels: { ...levels, [k]: v } } })} />;
       })}
       <CurveEditor key={item.id} itemId={item.id} grade={item.grade} onCommit={(curves) => setGrade("curves", curves)} />
-      <label className="field"><span>LUT <button className={`kf-btn ${item.lutKeyframes?.length ? "keyed" : ""}`} title="Add a discrete LUT switch at the playhead" disabled={!canKey || !item.grade?.lut} onClick={() => op("setLutKeyframe", { itemId: item.id, at: frame, assetId: lutAssetAt(p, item, frame) ?? item.grade?.lut?.assetId })}>◇</button></span><select value={lutAssetAt(p, item, frame) ?? ""} onChange={(e) => { const value = e.target.value; if (value.startsWith("preset:")) void applyLutPreset(item.id, value.slice(7), item.grade?.lut && canKey ? frame : undefined); else if (item.grade?.lut && canKey && value) void op("setLutKeyframe", { itemId: item.id, at: frame, assetId: value }); else setGrade("lut", value ? { assetId: value, strength: item.grade?.lut?.strength ?? 1 } : null); }}><option value="">None</option>{presetCategories.map((category) => <optgroup key={category} label={category}>{LUT_PRESETS.filter((preset) => preset.category === category).map((preset) => <option key={preset.id} value={`preset:${preset.id}`}>{preset.name}</option>)}</optgroup>)}<optgroup label="Project LUT assets">{Object.values(p.assets).filter((a) => a.kind === "lut").map((a) => <option key={a.id} value={a.id}>{lutLabel(a.path)}</option>)}</optgroup></select></label>
-      <small className="muted">Creative SDR look · input profile unspecified</small>
+      <label className="field" data-ui-control="lut"><span>色彩風格（LUT） <button className={`kf-btn ${item.lutKeyframes?.length ? "keyed" : ""}`} title="Add a discrete LUT switch at the playhead" disabled={!canKey || !item.grade?.lut} onClick={() => op("setLutKeyframe", { itemId: item.id, at: frame, assetId: lutAssetAt(p, item, frame) ?? item.grade?.lut?.assetId })}>◇</button></span><select value={lutAssetAt(p, item, frame) ?? ""} onChange={(e) => { const value = e.target.value; if (value.startsWith("preset:")) void applyLutPreset(item.id, value.slice(7), item.grade?.lut && canKey ? frame : undefined); else if (item.grade?.lut && canKey && value) void op("setLutKeyframe", { itemId: item.id, at: frame, assetId: value }); else setGrade("lut", value ? { assetId: value, strength: item.grade?.lut?.strength ?? 1 } : null); }}><option value="">None</option>{presetCategories.map((category) => <optgroup key={category} label={category}>{LUT_PRESETS.filter((preset) => preset.category === category).map((preset) => <option key={preset.id} value={`preset:${preset.id}`}>{preset.name}</option>)}</optgroup>)}<optgroup label="Project LUT assets">{Object.values(p.assets).filter((a) => a.kind === "lut").map((a) => <option key={a.id} value={a.id}>{lutLabel(a.path)}</option>)}</optgroup></select></label>
+      <small className="muted">SDR 色彩風格；未指定來源色彩格式，不作為 Log／HDR 轉換</small>
       {item.grade?.lut && <Slider itemId={item.id} label="LUT strength" min={0} max={1} step={0.01} zero={1} value={now.grade?.lut?.strength ?? 1} mark={mark("lutStrength", now.grade?.lut?.strength ?? 1)} patch={(v) => (keyed("lutStrength") ? keyPatch("lutStrength", v) : { grade: { ...item.grade, lut: { ...item.grade!.lut!, strength: v } } })} />}
-      <h4>key</h4>
-      <label className="field"><span>type</span><select value={item.key?.kind ?? ""} onChange={(e) => set({ key: e.target.value === "chroma" ? { kind: "chroma", color: "#00ff00", similarity: 0.18, smoothness: 0.08 } : e.target.value === "luma" ? { kind: "luma", low: 0.1, high: 0.9 } : null })}><option value="">Off</option><option value="chroma">Chroma</option><option value="luma">Luma</option></select></label>
-      {item.key?.kind === "chroma" && <><Field label="key color" value={item.key.color} onCommit={(v) => set({ key: { ...item.key!, color: v } })} /><button onClick={() => { player.ref?.pause(); app.set({ sampling: item.id }); }}>Eyedropper · click preview</button><Slider itemId={item.id} label="similarity" min={0} max={1} step={0.01} zero={0.45} value={item.key.similarity} patch={(v) => ({ key: { ...item.key!, similarity: v } })} /><Slider itemId={item.id} label="smoothness" min={0} max={1} step={0.01} zero={0.08} value={item.key.smoothness} patch={(v) => ({ key: { ...item.key!, smoothness: v } })} /><Slider itemId={item.id} label="spill" min={0} max={1} step={0.01} zero={0} value={item.key.spill ?? 0} patch={(v) => ({ key: { ...item.key!, spill: v } })} /></>}
+      <h4>去背</h4>
+      <label className="field" data-ui-control="key"><span>去背方式</span><select value={item.key?.kind ?? ""} onChange={(e) => set({ key: e.target.value === "chroma" ? { kind: "chroma", color: "#00ff00", similarity: 0.18, smoothness: 0.08 } : e.target.value === "luma" ? { kind: "luma", low: 0.1, high: 0.9 } : null })}><option value="">關閉</option><option value="chroma">移除指定顏色（色鍵）</option><option value="luma">依亮度去背</option></select></label>
+      {item.key?.kind === "chroma" && <><Field label="key color" value={item.key.color} onCommit={(v) => set({ key: { ...item.key!, color: v } })} /><button onClick={() => { player.ref?.pause(); app.set({ sampling: item.id }); }}>吸取顏色 · 點擊預覽畫面</button><Slider itemId={item.id} label="similarity" min={0} max={1} step={0.01} zero={0.45} value={item.key.similarity} patch={(v) => ({ key: { ...item.key!, similarity: v } })} /><Slider itemId={item.id} label="smoothness" min={0} max={1} step={0.01} zero={0.08} value={item.key.smoothness} patch={(v) => ({ key: { ...item.key!, smoothness: v } })} /><Slider itemId={item.id} label="spill" min={0} max={1} step={0.01} zero={0} value={item.key.spill ?? 0} patch={(v) => ({ key: { ...item.key!, spill: v } })} /></>}
       {lumaKey && <><Slider itemId={item.id} label="luma low" min={0} max={Math.max(0, lumaKey.high - 0.001)} step={0.001} zero={0} value={lumaKey.low} patch={(v) => ({ key: { ...lumaKey, low: Math.min(v, lumaKey.high - 0.001) } })} /><Slider itemId={item.id} label="luma high" min={Math.min(1, lumaKey.low + 0.001)} max={1} step={0.001} zero={1} value={lumaKey.high} patch={(v) => ({ key: { ...lumaKey, high: Math.max(v, lumaKey.low + 0.001) } })} /><label className="field"><span>invert</span><input type="checkbox" checked={lumaKey.invert ?? false} onChange={(e) => set({ key: { ...lumaKey, invert: e.target.checked } })} /></label></>}
-      <h4>
-        crop
+      <h4 data-ui-control="crop">
+        裁切
         <button className={cropping ? "on" : ""} onClick={() => app.set({ cropping: !cropping, masking: false })} title="crop handles on the preview (Shift+C)">
-          on preview
+          在預覽中調整
         </button>
       </h4>
       {(["top", "right", "bottom", "left"] as const).map((k) => (
@@ -220,17 +219,17 @@ export function MaskFields({ p, item, set }: { p: Project; item: VideoItem | Ove
   return (
     <>
       <h4>
-        mask
+        遮罩
         {video && mask && now && <KeyGroupButton p={p} item={video} frame={frame} props={MASK_SLIDERS.map(([k, prop, , , , dflt]) => [prop, now[k] ?? dflt])} />}
         {/* The preview box only follows video items; overlays have no picture box on the player. */}
         {video && mask && (
           <button className={masking ? "on" : ""} onClick={() => app.set({ masking: !masking, cropping: false })} title="mask box on the preview (Shift+K)">
-            on preview
+            在預覽中調整
           </button>
         )}
       </h4>
-      <label className="field">
-        <span>shape</span>
+      <label className="field" data-ui-control="mask">
+        <span>遮罩形狀</span>
         <select value={mask?.shape ?? ""} onChange={(e) => pick(e.target.value)}>
           <option value="">none</option>
           {MASK_SHAPES.map((s) => <option key={s}>{s}</option>)}

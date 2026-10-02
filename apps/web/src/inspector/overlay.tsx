@@ -20,7 +20,7 @@ export function OverlayFields({ p, item, set }: { p: Project; item: OverlayItem;
   const write = (prop: string, value: number) => void op("setKeyframe", { itemId: item.id, prop, at: frame, value });
   const keyed = (prop: string) => !!item.keyframes?.[prop];
   return <>
-    <h4>Overlay transform</h4>
+    <h4>位置與尺寸</h4>
     {TRANSFORM.map((prop) => {
       const value = now.transform?.[prop] ?? (prop === "scale" || prop === "opacity" ? 1 : 0);
       return <Field key={prop} label={prop} type="number" value={value} mark={<KeyButton p={p} item={item} prop={prop} frame={frame} value={value} />}

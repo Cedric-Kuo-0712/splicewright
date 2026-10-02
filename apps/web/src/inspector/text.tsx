@@ -2,6 +2,7 @@ import { FONT_ROLES, FONTS, THEME_IDS, fontAssetFamily, type FontRole, type Over
 import { app, op } from "../store.ts";
 import { effectiveTextValues } from "../style.ts";
 import { Field } from "./fields.tsx";
+import { fieldLabel } from "./labels.ts";
 
 
 /** Text overlay: the string, its role (theme slot) and style fields. Each edit rewrites props (one undo step); anything else stays in the JSON field below. */
@@ -12,7 +13,7 @@ export function TextFields({ p, item, set }: { p: Project; item: OverlayItem; se
     <>
       <Field label="text" value={props.text} onCommit={(v) => put({ text: v ?? "" })} />
       <label className="field">
-        <span>role</span>
+        <span>文字用途（主題樣式）</span>
         <select value={props.role ?? "title"} onChange={(e) => put({ role: e.target.value })}>
           {FONT_ROLES.map((r) => (
             <option key={r}>{r}</option>
@@ -56,21 +57,21 @@ export function StyleFields({ p, role, style = {}, rawStyle = {}, text, onChange
   return (
     <>
       <div className="effective-style" aria-label="Effective rendered text style">
-        <strong>Rendered style</strong>
-        {effectiveValues.map(({ label, value, source }) => <div key={label}><span>{label}</span><code>{String(value)}</code><small>{source}</small></div>)}
+        <strong>目前實際顯示的樣式</strong>
+        {effectiveValues.map(({ label, value, source }) => <div key={label}><span>{fieldLabel(label)}</span><code>{String(value)}</code><small>{source === "raw CSS" ? "進階 CSS 覆寫" : source === "text override" ? "此文字的設定" : source === "renderer default" ? "預設樣式" : source.replace(" theme", " 主題")}</small></div>)}
       </div>
-      <label className="field">
-        <span>font</span>
+      <label className="field" data-ui-control="font">
+        <span>字體</span>
         <select value={style.font ?? ""} onChange={(e) => put("font", e.target.value || null)}>
-          <option value="">(theme)</option>
-          <optgroup label="★ recommended">{FONTS.filter((f) => f.core).map(face)}</optgroup>
-          <optgroup label="more">{FONTS.filter((f) => !f.core).map(face)}</optgroup>
-          {customFonts.length > 0 && <optgroup label="imported fonts">{customFonts.map((a) => <option key={a.id} value={a.id} style={{ fontFamily: `"${fontAssetFamily(a.id)}"` }}>{a.path.split("/").pop()} (raw)</option>)}</optgroup>}
+          <option value="">使用主題設定</option>
+          <optgroup label="★ 建議字體">{FONTS.filter((f) => f.core).map(face)}</optgroup>
+          <optgroup label="其他字體">{FONTS.filter((f) => !f.core).map(face)}</optgroup>
+          {customFonts.length > 0 && <optgroup label="已匯入字體">{customFonts.map((a) => <option key={a.id} value={a.id} style={{ fontFamily: `"${fontAssetFamily(a.id)}"` }}>{a.path.split("/").pop()} (raw)</option>)}</optgroup>}
         </select>
       </label>
       {chosen && !chosen.cjk && CJK.test(text) && <p className="dim">⚠ {chosen.name} has no Chinese glyphs; this text falls back to Noto Sans TC. Pick a 中 font for Chinese.</p>}
       <Field label="weight" type="number" value={style.weight} onCommit={(v) => put("weight", v === null ? null : Number(v))} />
-      <Field label="size (px)" type="number" value={style.size} onCommit={(v) => put("size", v === null ? null : Number(v))} />
+      <Field control="size" label="size (px)" type="number" value={style.size} onCommit={(v) => put("size", v === null ? null : Number(v))} />
       <Field label="color" value={style.color} onCommit={(v) => put("color", v)} />
     </>
   );
@@ -98,7 +99,7 @@ export function CaptionStyleFields({ t, text }: { t: Extract<Track, { kind: "cap
 export function ThemeField({ p }: { p: Project }) {
   return (
     <label className="field" title="Restyles every Text overlay and caption track that uses a role (one undo step)">
-      <span>theme</span>
+      <span>專案文字主題</span>
       <select value={p.meta.theme ?? ""} onChange={(e) => op("setMeta", { theme: e.target.value || null })}>
         <option value="">(none)</option>
         {[...THEME_IDS, ...Object.keys(p.themes ?? {})].map((id) => (

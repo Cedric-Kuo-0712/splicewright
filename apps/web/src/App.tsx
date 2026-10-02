@@ -6,7 +6,9 @@ import { fitZoom, Timeline, zoom } from "./Timeline.tsx";
 import { constrainLayout, DEFAULT_LAYOUT, type PanelLayout } from "./layout.ts";
 import { PanelSeparator } from "./PanelSeparator.tsx";
 import { Inspector } from "./inspector/Inspector.tsx";
-import { MediaBin } from "./MediaBin.tsx";
+import { FeaturePanel } from "./FeaturePanel.tsx";
+import { type SearchAction, type WorkspaceCategory } from "./workspace-search.ts";
+import { focusControl, type ControlLocation } from "./workspace-navigation.ts";
 import { Preview } from "./Preview.tsx";
 
 // Spec §7.3 panels: media bin, player, inspector, timeline.
@@ -16,6 +18,17 @@ export function App() {
   const empty = app.use((s) => s.empty);
   const message = app.use((s) => s.message);
   const io = app.use((s) => s.io);
+  const [category, setCategory] = React.useState<WorkspaceCategory>("素材");
+  const [inspectorLocation, setInspectorLocation] = React.useState<ControlLocation>();
+  const [panelLocation, setPanelLocation] = React.useState<ControlLocation>();
+  const serial = React.useRef(0);
+  const locate = (action: SearchAction) => {
+    setCategory(action.category);
+    const location = { section: action.section, control: action.control, serial: ++serial.current };
+    if (action.destination === "panel") setPanelLocation(location);
+    else if (action.destination === "toolbar") focusControl(document.querySelector<HTMLElement>(".toolbar")!, action.control);
+    else setInspectorLocation(location);
+  };
   const [layout, setLayout] = React.useState<PanelLayout>(() => {
     try { return constrainLayout({ ...DEFAULT_LAYOUT, ...JSON.parse(localStorage.getItem("swr.ui.layout") ?? "{}") }, innerWidth, innerHeight); }
     catch { return DEFAULT_LAYOUT; }
@@ -79,11 +92,11 @@ export function App() {
   return (
     <div className="app" style={{ "--bin-size": `${layout.bin}px`, "--inspector-size": `${layout.inspector}px`, "--timeline-size": `${layout.timeline}px` } as React.CSSProperties}>
       <Toolbar p={p} />
-      <MediaBin p={p} />
+      <FeaturePanel p={p} category={category} onCategory={setCategory} onLocate={locate} location={panelLocation} />
       <PanelSeparator className="bin-split" label="Resize media bin" orientation="vertical" value={layout.bin} min={Math.min(150, Math.round(innerWidth * 0.28))} max={Math.round(innerWidth * 0.28)} onPointerDown={(e) => beginResize("bin", e)} onKeyDown={resizeByKeyboard("bin", 10)} />
       <Preview p={p} />
       <PanelSeparator className="inspector-split" label="Resize inspector" orientation="vertical" value={layout.inspector} min={Math.min(200, Math.round(innerWidth * 0.34))} max={Math.round(innerWidth * 0.34)} onPointerDown={(e) => beginResize("inspector", e)} onKeyDown={resizeByKeyboard("inspector", 10)} />
-      <Inspector p={p} />
+      <Inspector p={p} location={inspectorLocation} />
       <PanelSeparator className="" label="Resize timeline" orientation="horizontal" value={layout.timeline} min={Math.min(140, Math.round(innerHeight * 0.48))} max={Math.round(innerHeight * 0.48)} onPointerDown={(e) => beginResize("timeline", e)} onKeyDown={resizeByKeyboard("timeline", 10)} />
       <Timeline />
       <div className={`status ${message?.error ? "error" : ""}`}>{message?.text ?? ""}</div>
@@ -233,11 +246,11 @@ function Toolbar({ p }: { p: Project }) {
         </span>
       )}
       {range ? (
-        <button onClick={() => split(range)} title="Cut at I and O: the selection, or everything crossing them (S still splits at the playhead)">Split I/O</button>
+        <button data-ui-control="split" onClick={() => split(range)} title="Cut at I and O: the selection, or everything crossing them (S still splits at the playhead)">Split I/O</button>
       ) : (
-        <button onClick={() => split([playhead.get().frame])} title="Split selection at the playhead; all items under it if nothing is selected (S / Cmd+B)">Split</button>
+        <button data-ui-control="split" onClick={() => split([playhead.get().frame])} title="Split selection at the playhead; all items under it if nothing is selected (S / Cmd+B)">分割</button>
       )}
-      <button onClick={() => addText(playhead.get().frame)} title="Add a text overlay at the playhead (T)">+ Text</button>
+      <button onClick={() => addText(playhead.get().frame)} title="Add a text overlay at the playhead (T)">＋文字</button>
       <button
         disabled={!selection.length && !gap && !range}
         onClick={() => rippleDelete(true)}

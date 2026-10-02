@@ -8,17 +8,17 @@ export function StickerFields({ p, item, set }: { p: Project; item: OverlayItem;
   return (
     <>
       <label className="field">
-        <span>image</span>
+        <span>圖片來源</span>
         <select value={props.src ?? ""} onChange={(e) => put({ src: e.target.value })}>
-          <option value="" disabled>Choose imported image</option>
+          <option value="" disabled>選擇已匯入圖片</option>
           {images.map((asset) => <option key={asset.id} value={asset.path}>{asset.path.split("/").pop()}</option>)}
         </select>
       </label>
-      <label className="field">
-        <span>fit</span>
+      <label className="field" data-ui-control="fit">
+        <span>畫面填滿方式</span>
         <select value={props.fit ?? "contain"} onChange={(e) => put({ fit: e.target.value })}>
-          <option value="contain">contain</option>
-          <option value="cover">cover</option>
+          <option value="contain">完整顯示</option>
+          <option value="cover">填滿畫面</option>
         </select>
       </label>
     </>

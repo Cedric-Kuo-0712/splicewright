@@ -19,13 +19,21 @@ it("init writes the agent files once and keeps other MCP servers", () => {
     ".agents/skills/splicewright-animation/scripts/setup_engine.py",
     ".agents/skills/splicewright-animation-style/references/styles.md",
     ".agents/skills/splicewright-editing/SKILL.md",
+    ".agents/skills/splicewright-editing/references/material-review.md",
+    ".agents/skills/splicewright-editing/references/narrative-structures.md",
+    ".agents/skills/splicewright-editing/references/transitions-motion.md",
+    ".agents/skills/splicewright-editing/references/timeline-refinement.md",
+    ".agents/skills/splicewright-editing/references/operation-mechanics.md",
   ]));
   expect(created).toContain(".splicewright/agent-skills.json");
   expect(readFileSync(join(dir, ".agents/skills/splicewright-animation/references/runtime.md"), "utf8"))
     .toBe(readFileSync(join(import.meta.dirname, "../src/skills/splicewright-animation/references/runtime.md"), "utf8"));
   expect(readFileSync(join(dir, ".agents/skills/splicewright-editing/SKILL.md"), "utf8"))
     .toBe(readFileSync(join(import.meta.dirname, "../src/skills/splicewright-editing/SKILL.md"), "utf8"));
+  expect(readFileSync(join(dir, ".agents/skills/splicewright-editing/references/material-review.md"), "utf8"))
+    .toBe(readFileSync(join(import.meta.dirname, "../src/skills/splicewright-editing/references/material-review.md"), "utf8"));
   expect(readFileSync(join(dir, "AGENTS.md"), "utf8")).toContain("# Trip\n\nSplicewright video project, 1920×1080 at 25 fps.");
+  expect(readFileSync(join(dir, "AGENTS.md"), "utf8")).toContain(".agents/skills/splicewright-editing/SKILL.md");
   const { mcpServers } = JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8"));
   expect(Object.keys(mcpServers)).toEqual(["other", "splicewright"]);
   expect(mcpServers.splicewright.args).toEqual([CLI, "mcp"]);
@@ -132,9 +140,8 @@ it("init --refresh-agents rewrites AGENTS.md from meta and the template, keeping
   const text = readFileSync(join(dir, "AGENTS.md"), "utf8");
   expect(text).toMatch(/^# Trip 2\n/);
   expect(text).toContain(brief);
-  expect(text).toContain("`list_materials`");
-  expect(text).toContain("`record_material_review`");
-  expect(text).toContain("Opening the UI does not start this agent workflow.");
+  expect(text).toContain("## Editing reference");
+  expect(text).toContain(".agents/skills/splicewright-editing/SKILL.md");
   expect(text).toContain(fresh.slice(fresh.indexOf("## Workflow"), fresh.indexOf("## Notes")));
   expect(text.endsWith(notes)).toBe(true);
   expect(refresh().created).toEqual([]);

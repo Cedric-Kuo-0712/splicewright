@@ -320,8 +320,12 @@ raw/                  source media; never modified
 out/                  renders and stills
 AGENTS.md CLAUDE.md .mcp.json    agent brief and wiring (from init)
 splicewright.config.ts           optional: custom components and render presets
-.splicewright/        caches (proxies, thumbnails, transcripts, beats) and undo history; safe to delete, ingest rebuilds the caches
+.splicewright/        analysis caches, undo history, and saved material reviews; preserve reviews/history
 ```
+
+Material observations are saved in `.splicewright/material-reviews.json`, tied to the source content version. Optional planning fields record story roles, tags, suitable uses, inspected source ranges, and cautions. `prepare_materials` also caches timestamp candidates from JPEG EXIF `DateTimeOriginal`, media container creation tags, and common dated filenames. Container creation is not proof of recording time; filenames are inferred, unknown timezones stay unknown, and missing metadata is `null`. Filesystem modification/creation times are not used as recording-time fallbacks.
+
+For a small agent overview, use `list_materials` with `view: "compact"`; use `paths` and `view: "full"` to expand chosen sources. The compact view omits detailed ranges and flags truncated summaries. Source hashing still checks the inventory. Parallel readers should return bounded observations to one coordinator, which saves them through `record_material_review`; do not overwrite the shared JSON directly. Derived analysis caches can be rebuilt, but deleting saved reviews loses these observations.
 
 ## Troubleshooting
 

@@ -27,37 +27,11 @@ Op names below are the `splicewright_<op>` tools.
 
 1. **Orient.** `get_summary`, then this file. If the Brief above is empty, ask for it (goal, length, style,
    must-keep, music/captions) before cutting, and write the answers into it.
-2. **Know the materials on request.** When asked to review a materials folder or start a new edit, call
-   `list_materials` to find unreviewed, changed and missing sources. A local correction only needs its relevant sources.
-   Use `prepare_materials` with selected paths and only the needed steps; it registers sources and builds cached analysis,
-   but never marks them reviewed. Read `inspect_asset` for transcripts/contact-sheet paths, `peek` for sampled video frames,
-   and `material_preview` for bounded image previews. Narrow a video range when sparse frames miss fast action.
-   After actually inspecting each source, call `record_material_review` with its listed version, factual summary,
-   useful source-second ranges and optional candidate/include/exclude decision. If the source changed, re-list and inspect
-   it again. Failed preparation or a filename alone is not a review. Missing sources need attention before affected edits.
-   New materials must be considered, but are never automatically inserted into the timeline. Review records persist in
-   `.splicewright/material-reviews.json`; use tools to manage them. Opening the UI does not start this agent workflow.
-3. **Propose, then cut.** Outline the edit in chat (sections, chosen takes, rough timings) and wait for a yes on
-   anything larger than a small fix. Mark sections with `addMarker` so the human can navigate them.
-4. **Rough cut.** Main story on the magnetic V1 track (`insertItem` in a `batch`); B-roll, titles and overlays on
-   tracks above. Cut talking heads from transcript times; remove dead air and retakes.
-5. **Refine** only where it earns it. For rough-cut, transition, picture-in-picture, keyframe, or audio recipes,
-   read `.agents/skills/splicewright-editing/SKILL.md`. Refine with purpose: use GIF/stickers to clarify a point in the Brief; reverse only for an
-   intentional visual/story effect and check its audio; `trim`/`slip` for timing, `setProps` transition on cuts that need one, `setSpeed`,
-   `effects`/`crop`/`transform` to match shots or reframe, `setKeyframe` for moves and fades over time (e.g. a slow
-   push-in: scale keys at the start and end of a clip; a key's optional `ease` shapes the segment leaving it: `linear`,
-   `ease`, or a CSS `[x1, y1, x2, y2]` cubic-bezier with x in 0..1, y beyond it overshoots); `setProps` `mask` + `transform` scale for a circle
-   picture-in-picture (ellipse mask), `blend` (screen, multiply…) for light leaks and overlays; `detachAudio` for
-   J/L-cuts (detach, then trim the audio separately).
-6. **Sound.** Use EQ or FFT denoise for an identified problem, then compare the result; RNNoise requires a supplied model.
-   Music on an audio track with `volume` and fades; `detectBeats` then `fitToBeats` to cut a montage on
-   the beat. `normalizeLoudness` (after `ingest --only loudness`) before mixing dialogue and music; `setKeyframe` on an
-   audio item's `volume` for manual ducking.
-   **Cutting fillers and dead air.** `find_fillers` (add `itemId` for one clip); if it returns `hints`, run
-   `ingest --only transcript` first. Show the user the proposed cuts (`what` and times) and cut with `cutRanges`
-   only after they confirm; then `still` a few cut points or `storyboard` the range to check.
-7. **Captions.** `addCaptionsFromTranscript`, then `editCaption` for names and mishearings.
-8. **Review.** `storyboard` over what changed, `still` on a few key frames, `render` preset `draft` for a full pass.
+2. **Choose an editing route.** For a new assembly or broad source review, use `.agents/skills/splicewright-editing/SKILL.md` and its material-first route. For a local timeline correction, inspect only affected items and use its timeline-refinement route; do not repeat a library-wide review.
+3. **Propose, then cut.** Share the selected sources, story beats or local change, and rough timing. Get agreement before a substantial recut. Material preparation caches analysis but does not count as review. After inspecting a source, record observations against its listed version with `record_material_review`. New sources are candidates, never automatic timeline insertions.
+4. **Edit and refine.** Keep each `batch` to one coherent intent. The editing skill and linked references cover supported motion and creative starting points without requiring a fixed style or effects. For filler cuts, show `find_fillers` suggestions and get agreement before applying `cutRanges`.
+5. **Sound and captions.** Add transcript captions with `addCaptionsFromTranscript`, correct names with `editCaption`, and use audio tools only for an identified need. Generated narration setup and voice handling are in the MCP tool instructions.
+6. **Review.** Re-read the changed range; use `storyboard` or selected `still` frames to check it. Run `lint` before rendering and report changed timecodes.
    Report changes with timecodes so the human can jump to them; run `lint` and fix its errors, then `render` master when they approve.
 
 Rules: one intent per `batch` (one undo step each); re-read on a conflict, never force; don't undo the human's
@@ -87,6 +61,12 @@ theme and any overrides under Notes.
 - `raw/` source media: never modify or move.
 - `project.json` the edit: change it only through the tools.
 - `out/` renders. `.splicewright/` caches: disposable, rebuilt by ingest.
+
+## Editing reference
+
+For exact PIP, keyframe, transition, and validation contracts, load the relevant section of `.agents/skills/splicewright-editing/references/operation-mechanics.md`.
+
+Use `.agents/skills/splicewright-editing/SKILL.md` for the shared workflow. Its bundled references cover [material review](.agents/skills/splicewright-editing/references/material-review.md), [narrative starting points](.agents/skills/splicewright-editing/references/narrative-structures.md), [transitions and motion](.agents/skills/splicewright-editing/references/transitions-motion.md), and [local timeline refinement](.agents/skills/splicewright-editing/references/timeline-refinement.md).
 
 ## Notes
 

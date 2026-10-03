@@ -40,6 +40,9 @@ export interface OpDef<S extends z.ZodType = z.ZodType> {
 
 const def = <S extends z.ZodType>(doc: string, args: S, run: OpDef<S>["run"]): OpDef<S> => ({ doc, args, run });
 
+// Private execution receipts keep preview targets accurate across nested batches.
+const previewInsertTracks = new WeakMap<Ctx, Set<string>>();
+
 // Explicitly typed so TypeScript narrows after `if (...) fail(...)`.
 const fail: (code: string, message: string) => never = (code, message) => {
   throw new OpError(code, message);
@@ -376,6 +379,7 @@ export const ops: Record<string, OpDef<any>> = {
         : (p.tracks.find((t) => t.kind === kind && ((a.ripple ?? t.magnetic) || fits(t, a.at, item.duration))) ??
           addTrack(p, kind));
       if (t.kind !== kind) fail("invalid", `${t.id} is a ${t.kind} track; this item needs ${kind}`);
+      previewInsertTracks.get(ctx)?.add(t.id);
       if (a.ripple ?? t.magnetic) shift(p, t, a.at, item.duration);
       (t.items as Item[]).push(item);
       return `inserted ${item.id} on ${t.id} at ${a.at} (${item.duration}f)`;
@@ -1052,10 +1056,12 @@ export function apply(project: Project, name: string, args: unknown, ctx: Ctx = 
 
 /** Dry-run an atomic operation batch and report timeline starts that would move. */
 export function previewOps(project: Project, operations: Array<{ op: string; args: unknown }>, ctx: Ctx = {}): PreviewOpsResult {
-  const result = apply(project, "batch", { ops: operations }, ctx);
+  const directTracks = new Set<string>();
+  const previewContext = { ...ctx };
+  previewInsertTracks.set(previewContext, directTracks);
+  const result = apply(project, "batch", { ops: operations }, previewContext);
   if ("error" in result) return result;
 
-  const directTracks = new Set<string>();
   const directItems = new Set<string>();
   const collectTargets = (ops: Array<{ op: string; args: unknown }>) => {
     for (const { op, args } of ops) {
@@ -1072,10 +1078,6 @@ export function previewOps(project: Project, operations: Array<{ op: string; arg
   };
   collectTargets(operations);
   const oldItems = new Map(project.tracks.flatMap((track) => track.items.map((item) => [item.id, { track, item }] as const)));
-  // New items reveal the track chosen by core when an insertItem omitted trackId.
-  for (const track of result.project.tracks) {
-    if (track.items.some((item) => !oldItems.has(item.id))) directTracks.add(track.id);
-  }
   for (const id of directItems) {
     const before = oldItems.get(id);
     if (before) directTracks.add(before.track.id);

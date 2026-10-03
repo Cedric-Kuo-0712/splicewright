@@ -697,6 +697,21 @@ describe("opt-in track ripple sync", () => {
     ]));
   });
 
+  it("retains the auto-selected direct track when a batch removes the inserted item", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 120, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+    const preview = previewOps(p, [
+      { op: "insertItem", args: { assetId: "a_clip", at: 90, duration: 10 } },
+      { op: "delete", args: { itemIds: ["i_4"], ripple: false } },
+    ], ctx);
+    if ("error" in preview) throw new Error(preview.error.message);
+    expect(preview.moved).toEqual(expect.arrayContaining([
+      expect.objectContaining({ trackId: "t_1", itemId: "i_2", to: 100, kind: "direct" }),
+      expect.objectContaining({ trackId: "t_2", itemId: "i_3", to: 130, kind: "secondary" }),
+    ]));
+  });
+
   it("keeps defaults independent; shifts dependent free items, beats, and source-time keys once", () => {
     let p = fixture();
     p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 120, duration: 120 }, ctx));

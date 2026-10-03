@@ -14,6 +14,7 @@ const KINDS: Record<string, Asset["kind"]> = {
   ttf: "font", otf: "font", woff: "font", woff2: "font", cube: "lut",
 };
 const PREPARE_STEPS = ["sourceHealth", "analysis", "thumbs", "transcript", "waveform", "loudness"] as const;
+const MAX_CAPTURE_CANDIDATES = 3;
 export type PrepareStep = (typeof PREPARE_STEPS)[number];
 type Review = { version: string; reviewedAt: string; summary: string; segments?: { from: number; to: number; note: string }[]; decision?: "candidate" | "include" | "exclude"; reason?: string; planning?: MaterialReviewPlanning };
 type Ledger = { schemaVersion: 1; reviews: Record<string, Review>; preparedVersions?: Record<string, string>; preparedAssets?: Record<string, string>; failures?: Record<string, { version: string; errors: string[] }>; chronology?: Record<string, { version: string; value: CaptureTime | null }> };
@@ -66,7 +67,7 @@ function readLedger(dir: string): Ledger {
     throw new Error("invalid material review ledger failures");
   const chronology = (parsed as Ledger).chronology;
   if (chronology !== undefined && (!chronology || typeof chronology !== "object" || Array.isArray(chronology) || Object.values(chronology).some((entry) => {
-    if (!entry || typeof entry.version !== "string" || !/^[a-f0-9]{64}$/.test(entry.version) || (entry.value !== null && (!entry.value || typeof entry.value !== "object" || Array.isArray(entry.value) || !ownKeysOnly(entry.value, ["selected", "candidates", "timezoneAmbiguous"]) || typeof entry.value.timezoneAmbiguous !== "boolean" || !Array.isArray(entry.value.candidates) || entry.value.candidates.length > 3))) return true;
+    if (!entry || typeof entry.version !== "string" || !/^[a-f0-9]{64}$/.test(entry.version) || (entry.value !== null && (!entry.value || typeof entry.value !== "object" || Array.isArray(entry.value) || !ownKeysOnly(entry.value, ["selected", "candidates", "timezoneAmbiguous"]) || typeof entry.value.timezoneAmbiguous !== "boolean" || !Array.isArray(entry.value.candidates) || entry.value.candidates.length > MAX_CAPTURE_CANDIDATES))) return true;
     if (entry.value === null) return false;
     return entry.value.candidates.some((candidate) => !candidate || typeof candidate !== "object" || Array.isArray(candidate) || !ownKeysOnly(candidate, ["value", "source", "precision", "timezone", "certainty"]) || typeof candidate.value !== "string" || !timestampCandidate(candidate.value, candidate.source, candidate.certainty) || !["exif-original", "container-creation", "filename"].includes(candidate.source) || !["date", "second"].includes(candidate.precision) || !["explicit", "unknown-local"].includes(candidate.timezone) || !["explicit", "inferred"].includes(candidate.certainty)) || (entry.value.selected !== null && !entry.value.candidates.some((candidate) => candidate.value === entry.value?.selected?.value && candidate.source === entry.value.selected.source));
   }))) throw new Error("invalid material review ledger chronology");
@@ -249,7 +250,8 @@ function captureTime(file: string, path: string): CaptureTime | null {
   const candidates = [exifCapture(file), ...containerCaptures(file), filenameCapture(path)].filter((candidate): candidate is CaptureCandidate => !!candidate);
   const unique = candidates.filter((candidate, index) => candidates.findIndex((other) => other.source === candidate.source && other.value === candidate.value) === index);
   const selected = unique.find((candidate) => candidate.source === "exif-original") ?? unique.find((candidate) => candidate.source === "container-creation") ?? unique.find((candidate) => candidate.source === "filename") ?? null;
-  return unique.length ? { selected, candidates: unique, timezoneAmbiguous: unique.some((candidate) => candidate.precision === "second" && candidate.timezone === "unknown-local") } : null;
+  // Keep the reader's ceiling after deduplication; selection and ambiguity still consider every source.
+  return unique.length ? { selected, candidates: unique.slice(0, MAX_CAPTURE_CANDIDATES), timezoneAmbiguous: unique.some((candidate) => candidate.precision === "second" && candidate.timezone === "unknown-local") } : null;
 }
 
 export type MaterialStoryRole = "establishing" | "process" | "highlight" | "detail" | "ending" | "hook";

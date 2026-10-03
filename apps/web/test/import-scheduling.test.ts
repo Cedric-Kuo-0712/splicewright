@@ -9,7 +9,8 @@ vi.mock("@splicewright/ingest", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@splicewright/ingest")>();
   return {
     ...actual,
-    probe: vi.fn(async (path: string, kind: "video" | "audio" | "image") => {
+    probe: vi.fn(async (path: string, kind: "video" | "audio" | "image" | "font") => {
+      if (kind === "font") return actual.probe(path, kind);
       control.onProbe?.(path);
       return { kind, duration: path.includes("second") ? 2 : 1, fps: 30, audio: false };
     }),
@@ -67,6 +68,24 @@ describe("web import scheduling", () => {
       release?.();
       await server.close();
     }
+  });
+
+  it("still validates and publishes font metadata without queuing media analysis", async () => {
+    const { open } = await import("../server.ts");
+    const { ingest, probe } = await import("@splicewright/ingest");
+    vi.mocked(ingest).mockClear();
+    const dir = mkdtempSync(join(tmpdir(), "swr-font-probe-"));
+    dirs.push(dir);
+    init(dir, { title: "font probe", fps: 30, width: 640, height: 360 });
+    const server = await open(dir, { port: 0 });
+    try {
+      const response = await fetch(`${server.url}api/import?name=font.woff`, { method: "POST", body: Buffer.from("wOFFsynthetic-font") });
+      const body = await response.json();
+      expect(response.status).toBe(200);
+      expect(readAssets(dir)[body.assetId]?.kind).toBe("font");
+      expect(probe).toHaveBeenCalledWith(join(dir, load(dir).assets[body.assetId].path), "font");
+      expect(ingest).not.toHaveBeenCalled();
+    } finally { await server.close(); }
   });
 
   it("preserves matching completed steps without falsely announcing a proxy", async () => {

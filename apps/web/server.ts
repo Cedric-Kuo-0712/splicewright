@@ -333,25 +333,23 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             const asset = Object.values(r.project.assets).find((a) => a.path === path) ?? r.project.assets[/as (\S+)/.exec(r.changes.summary)![1]];
             if (asset.path !== path) unlinkSync(join(dir, path));
             if (asset.kind !== "lut") {
-              if (asset.kind !== "font") {
-                try {
-                  const before = fingerprint(join(dir, asset.path));
-                  const value = await limited(() => probe(join(dir, asset.path), asset.kind));
-                  const fp = fingerprint(join(dir, asset.path));
-                  if (!closed && fp && fp === before && load(dir).assets[asset.id]?.path === asset.path) {
-                    // No await between read and write: same-process cache saves cannot interleave.
-                    // Retain completed steps only when they still describe this exact source.
-                    const disk = readAssets(dir);
-                    const cached = disk[asset.id];
-                    disk[asset.id] = { ...(cached?.path === asset.path && cached.fingerprint === fp ? cached : {}),
-                      ...value, path: asset.path, fingerprint: fp };
-                    mkdirSync(cacheDir(dir), { recursive: true });
-                    writeAtomic(cacheDir(dir, "assets.json"), disk);
-                  }
-                } catch { /* The serialized ingest reports probe failures through the existing event. */ }
-                if (!closed) {
-                  background(asset.id);
+              try {
+                const before = fingerprint(join(dir, asset.path));
+                const value = await limited(() => probe(join(dir, asset.path), asset.kind));
+                const fp = fingerprint(join(dir, asset.path));
+                if (!closed && fp && fp === before && load(dir).assets[asset.id]?.path === asset.path) {
+                  // No await between read and write: same-process cache saves cannot interleave.
+                  // Retain completed steps only when they still describe this exact source.
+                  const disk = readAssets(dir);
+                  const cached = disk[asset.id];
+                  disk[asset.id] = { ...(cached?.path === asset.path && cached.fingerprint === fp ? cached : {}),
+                    ...value, path: asset.path, fingerprint: fp };
+                  mkdirSync(cacheDir(dir), { recursive: true });
+                  writeAtomic(cacheDir(dir, "assets.json"), disk);
                 }
+              } catch { /* The serialized ingest reports probe failures through the existing event. */ }
+              if (!closed && asset.kind !== "font") {
+                background(asset.id);
               }
             }
             return send(res, 200, { assetId: asset.id, summary: r.changes.summary, ...snapshot() });

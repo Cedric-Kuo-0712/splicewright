@@ -312,6 +312,14 @@ splicewright migrate video-cut <path> [--out <dir>] [--force]
 `splicewright op setKeyframe '{"itemId":"i_4","prop":"opacity","at":40,"value":0}'`. The
 operations are listed in [SPEC.md §5](SPEC.md).
 
+## Track synchronization
+
+Track synchronization is opt-in. In the track controls, choose **同步主軌** to let a track follow a magnetic video track, or **固定時間（不跟隨）** to keep independent timing. Existing projects keep their current behavior. This synchronizes downstream ripple movement; it does not attach arbitrary audio to a particular shot or automatically align edits to music beats.
+
+Ripple edits on the primary track move eligible free items on linked tracks by the same frame delta. Source-anchored captions and attached overlays retain their anchor behavior and do not move twice. A free item crossing the edit boundary is ambiguous and refuses the edit; split it or remove the link explicitly first. Locked affected tracks, invalid links, and invalid overlaps also refuse the entire edit. A continuous background song can stay unlinked while a later scene-specific music track follows the scene.
+
+CLI and MCP share the core rules. Set track `syncTo` with `setTrack`; set it to `null` to detach. Use the read-only MCP `preview_edit` tool or CLI `preview-edit '<ops-json-array>' --base <revision>` to inspect direct and secondary movements. Preview does not reserve the project: the approved write must use the same revision and will fail if another edit intervenes. UI edits on linked projects preview cross-track movements before committing.
+
 ## Project folder
 
 ```

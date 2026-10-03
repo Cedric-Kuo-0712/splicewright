@@ -676,12 +676,24 @@ const KIND_NAME: Record<TrackKind, string> = { video: "video", audio: "audio", c
 export function trackMenu(p: Project, t: Track): MenuEntry[] {
   const i = p.tracks.indexOf(t);
   const flag = (key: "muted" | "hidden" | "locked" | "magnetic", label: string) => ({ label: `${t[key] ? "✓ " : ""}${label}`, run: () => op("setTrack", { trackId: t.id, patch: { [key]: t[key] ? null : true } }) });
+  const syncTo = "syncTo" in t && typeof t.syncTo === "string" ? t.syncTo : undefined;
+  const syncSource = syncTo ? p.tracks.find((source) => source.id === syncTo) : undefined;
+  const syncTargets = p.tracks.filter((source) => source.id !== t.id && source.kind === "video" && source.magnetic && !("syncTo" in source && source.syncTo));
   return [
     { label: "Rename", hint: "double-click", run: () => app.set({ editing: { kind: "track", id: t.id } }) },
     ...(t.kind === "caption" || t.kind === "overlay" ? [] : [flag("muted", "Mute")]),
     flag("hidden", "Hide"),
     flag("locked", "Lock"),
     flag("magnetic", "Magnetic (ripple edits)"),
+    "-",
+    { label: syncTo ? `同步主軌：${syncSource?.name ?? syncTo}` : "同步主軌", hint: syncTo ? "目前已設定同步來源" : "選擇後續跟隨的未同步磁性影片軌", disabled: t.locked || !syncTargets.length, run: () => {} },
+    ...syncTargets.map((source) => ({
+      label: `${syncTo === source.id ? "✓ " : ""}同步主軌：${source.name}`,
+      hint: source.id,
+      disabled: t.locked,
+      run: () => op("setTrack", { trackId: t.id, patch: { syncTo: source.id } }),
+    })),
+    { label: "固定時間（不跟隨）", hint: syncTo ? `目前來源：${syncSource?.name ?? syncTo}` : "此軌道維持原時間位置", disabled: t.locked || !syncTo, run: () => op("setTrack", { trackId: t.id, patch: { syncTo: null } }) },
     "-",
     { label: "Select all on track", run: () => selectItems(itemsAfter(p, [t])) },
     { label: "Remove all gaps", run: () => removeGaps(t), disabled: t.locked },

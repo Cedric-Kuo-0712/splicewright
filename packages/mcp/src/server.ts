@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { find, findFillers, getItem, getRange, getSummary, lint, LUT_PRESETS, ops, type OpResult, type VideoItem } from "@splicewright/core";
+import { find, findFillers, getItem, getRange, getSummary, lint, LUT_PRESETS, ops, previewOps, type OpResult, type VideoItem } from "@splicewright/core";
 import { applyEditReview, applyLutPreset, getEditReview, load, loadCtx, readAssets, sizesOf, redo, run, undo } from "@splicewright/core/node";
 import { breezyVoiceStatus, deleteBreezyVoice, generateAndInsertBreezyVoice, listBreezyVoices, registerBreezyVoice, setupBreezyVoice, setupTTS, validateBreezyVoiceRequest, checkOutput, generateAndInsertTTS, ingest, scanMaterials, relinkMaterial, listMaterials, prepareMaterials, recordMaterialReview, materialPreview, peek, sourceFrame, STEPS, stamp, TRANSCRIPT_FORMAT, TTS_LANGUAGES, TTS_VOICES, ttsStatus } from "@splicewright/ingest";
 import { pip, type PipPreset } from "@splicewright/render/geometry";
@@ -60,6 +60,18 @@ export function createServer(dir: string): McpServer {
     const r = applyEditReview(dir, reviewOps, { label, summary, baseRevision: revision });
     if ("error" in r) return { ...json(r.error), isError: true };
     return json({ revision: r.project.revision, summary: r.changes.summary, review: (r as any).review });
+  });
+  server.registerTool("preview_edit", {
+    description: "Dry-run an atomic edit without writing project, history, or review snapshots. Returns bounded item movements including secondary track sync. Apply approved operations with the same baseRevision; preview does not reserve the timeline.",
+    inputSchema: { ops: z.array(z.object({ op: z.string().min(1), args: z.unknown() })).min(1).max(200), baseRevision },
+  }, async ({ ops: proposed, baseRevision: revision }) => {
+    try {
+      const project = load(dir);
+      if (project.revision !== revision) return { ...json({ code: "conflict", message: `preview base revision ${revision} differs from current ${project.revision}` }), isError: true };
+      const result = previewOps(project, proposed, loadCtx(dir));
+      if ("error" in result) return { ...json(result.error), isError: true };
+      return json({ ...result, moved: result.moved.slice(0, 50), truncated: result.truncated || result.moved.length > 50, limit: 50 });
+    } catch (error) { return failed("preview_failed", error); }
   });
   server.registerTool("get_edit_review", {
     description: "Read the latest agent edit review metadata and concise summary. Full project snapshots are returned only when includeSnapshots is explicitly true.",

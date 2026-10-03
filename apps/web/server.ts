@@ -10,7 +10,7 @@ import { handleTtsRequest } from "./tts-api.ts";
 import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { addRecent, applyEditReview, applyLutPreset, fingerprint, getEditReview, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, revertEditReview, run, setEditReviewStatus, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
-import { ASPECTS, captionWords, FPS_CHOICES, sourceAt, type Project } from "@splicewright/core";
+import { ASPECTS, captionWords, FPS_CHOICES, previewOps, sourceAt, type Project } from "@splicewright/core";
 import { scanMaterials, relinkMaterial, prepareMaterials, audioFxPath, displayable, ensureAudioFx, ffmpeg, ingest, limiter, loudness, reverseAudioPath, reverseProjectAudio, thumb, waveform, type Step } from "@splicewright/ingest";
 import { cancelRender, renderStatus, startRender, duckRanges, fontVersionsOf, lutsOf, lutVersion, reverseProxiesOf } from "@splicewright/render/node";
 
@@ -260,6 +260,19 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             const task = queue.then(() => prepareMaterials(dir, { paths: b.paths, steps: b.steps ?? ["sourceHealth", "thumbs", "waveform", "loudness"] }));
             queue = task.then(() => {}, () => {});
             return send(res, 200, await task);
+          }
+          if (route === "POST /api/op/preview") {
+            const b = await body(req);
+            if (!Number.isSafeInteger(b.baseRevision) || b.baseRevision < 0 || !Array.isArray(b.ops) || !b.ops.length || b.ops.length > 200)
+              return send(res, 400, { error: { code: "invalid_args", message: "a nonnegative baseRevision and 1–200 operations are required" } });
+            const project = load(dir);
+            if (project.revision !== b.baseRevision)
+              return send(res, 409, { error: { code: "conflict", message: `project changed: expected revision ${b.baseRevision}, found ${project.revision}` } });
+            const preview = previewOps(project, b.ops, loadCtx(dir, project));
+            if ("error" in preview) return send(res, preview.error.code === "conflict" ? 409 : 400, preview);
+            const MAX_MOVEMENTS = 100;
+            const total = preview.movedTotal;
+            return send(res, 200, { ...preview, summary: preview.summary.slice(0, 1000), summaryTruncated: preview.summaryTruncated || preview.summary.length > 1000, moved: preview.moved.slice(0, MAX_MOVEMENTS), movedTotal: total, limit: MAX_MOVEMENTS, truncated: preview.truncated || preview.moved.length > MAX_MOVEMENTS });
           }
           if (route === "POST /api/op") {
             const b = await body(req);

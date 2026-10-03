@@ -490,6 +490,14 @@ archives are pinned with SHA-256 checks; generation verifies model hashes before
 Core/API/runtime checks are automated; browser interaction and subjective voice quality remain
 human validation.
 
+Opt-in track synchronization increment: `syncTo` links free downstream items to an unsynced
+magnetic video primary. Ripple operations share one core helper across UI/CLI/MCP; source anchors
+retain their existing behavior. Straddling free items, affected locks, and invalid links/collisions
+refuse the edit. Read-only previews report bounded direct/secondary movement and retain the input
+revision for approved writes. UI track menus and confirmation are implemented; live drag ghosts
+and per-clip audio attachment are outside this increment. Automated core/API checks pass;
+interactive browser wiring and feel remain manual validation.
+
 ## 13. Roadmap (M7–M11, in build order) and later candidates
 
 Each milestone is a core op and/or schema extension, then render, then UI, then MCP/CLI exposure

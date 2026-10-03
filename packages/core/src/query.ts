@@ -33,6 +33,7 @@ export function getSummary(p: Project) {
       kind: t.kind,
       items: t.items.length,
       ...(t.magnetic ? { magnetic: true } : {}),
+      ...(t.syncTo ? { syncTo: t.syncTo } : {}),
       ...(t.locked ? { locked: true } : {}),
       ...(t.muted ? { muted: true } : {}),
       ...(t.hidden ? { hidden: true } : {}),
@@ -48,10 +49,10 @@ export function getRange(p: Project, from: number, to: number) {
       .map((i) => visible(p, i))
       .filter((i): i is Item => i !== null && i.start < to && end(i) > from)
       .map((i) => {
-        if (!("beats" in i && i.beats)) return { track: t.id, ...i };
+        if (!("beats" in i && i.beats)) return { track: t.id, ...(t.syncTo ? { trackSyncTo: t.syncTo } : {}), ...i };
         const { beats, downbeats, ...rest } = i as AudioItem;
         const inRange = (times?: number[]) => beatFrames(p, i as AudioItem, times).filter((f) => f >= from && f < to);
-        return { track: t.id, ...rest, beatFrames: inRange(beats), ...(downbeats && { downbeatFrames: inRange(downbeats) }) };
+        return { track: t.id, ...(t.syncTo ? { trackSyncTo: t.syncTo } : {}), ...rest, beatFrames: inRange(beats), ...(downbeats && { downbeatFrames: inRange(downbeats) }) };
       }),
   );
 }

@@ -85,6 +85,27 @@ it("cutRanges is one undo step", () => {
   expect(load(dir).tracks).toEqual(before);
 });
 
+it("synced ripple events in an atomic batch take one undo step", () => {
+  const dir = project();
+  writeFileSync(join(dir, "raw/song.mp3"), "audio fixture");
+  run(dir, "importAsset", { path: "raw/clip.mp4" });
+  run(dir, "importAsset", { path: "raw/song.mp3" });
+  run(dir, "insertItem", { assetId: "a_clip", at: 0, duration: 90 });
+  run(dir, "insertItem", { assetId: "a_clip", at: 90, duration: 60, sourceIn: 2 });
+  run(dir, "insertItem", { trackId: "t_2", assetId: "a_song", at: 180, duration: 30 });
+  expect(run(dir, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } })).not.toHaveProperty("error");
+  const before = load(dir).tracks;
+  const undoCount = historyList(dir).undo.length;
+  expect(run(dir, "batch", { ops: [
+    { op: "delete", args: { itemIds: ["i_1"] } },
+    { op: "insertItem", args: { trackId: "t_1", assetId: "a_clip", at: 60, duration: 10 } },
+  ] })).not.toHaveProperty("error");
+  expect(load(dir).tracks.find((t) => t.id === "t_2")?.items[0].start).toBe(100);
+  expect(historyList(dir).undo).toHaveLength(undoCount + 1);
+  expect(undo(dir)).not.toHaveProperty("error");
+  expect(load(dir).tracks).toEqual(before);
+});
+
 it("reverse is persisted and undoable as one video-item edit", () => {
   const dir = project();
   run(dir, "importAsset", { path: "raw/clip.mp4" });

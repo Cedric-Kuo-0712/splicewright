@@ -2,7 +2,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { ASPECTS, FONT_PAIRS, FONTS, getSummary, lint, LUT_PRESETS, THEME_IDS } from "@splicewright/core";
+import { ASPECTS, FONT_PAIRS, FONTS, getSummary, lint, LUT_PRESETS, previewOps, THEME_IDS } from "@splicewright/core";
 import { applyEditReview, applyLutPreset, getEditReview, init, load, loadCtx, rawPath, redo, revertEditReview, setEditReviewStatus, run, undo } from "@splicewright/core/node";
 import { breezyVoiceStatus, deleteBreezyVoice, generateAndInsertBreezyVoice, listBreezyVoices, registerBreezyVoice, setupBreezyVoice, checkOutput, generateAndInsertTTS, scanMaterials, relinkMaterial, displayable, ingest, setupTTS, STEPS, ttsStatus, validateTTSRequest, type Step, type TtsLanguage } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
@@ -28,6 +28,7 @@ const USAGE = `usage: splicewright <command>
   lut-presets
   apply-lut-preset <itemId> <presetId> [--base <revision>] [--at <timelineFrame>]
   apply-edit-review '<json {ops,label?,summary?}>' [--base <revision>]
+  preview-edit '<ops-json-array>' --base <revision>
   edit-review show [--snapshots] | edit-review keep|dismiss <id> | edit-review revert <id> [--base <revision>]
   undo | redo [--base <revision>]
   still --at <frame|[hh:]mm:ss[.s]> [-o out/still-<frame>.jpg]
@@ -240,6 +241,18 @@ switch (cmd) {
     const [itemId, presetId] = args;
     if (!itemId || !presetId) out({ error: { code: "usage", message: "apply-lut-preset <itemId> <presetId> [--base <revision>]" } });
     out(opResult(applyLutPreset(dir, itemId, presetId, flags.base === undefined ? undefined : Number(flags.base), flags.at === undefined ? undefined : Number(flags.at))));
+  }
+  case "preview-edit": {
+    const revision = flags.base === undefined ? NaN : Number(flags.base);
+    if (!Number.isSafeInteger(revision) || revision < 0) out({ error: { code: "usage", message: "preview-edit requires --base <nonnegative revision>" } });
+    let proposed: unknown;
+    try { proposed = JSON.parse(args[0] ?? ""); }
+    catch { out({ error: { code: "invalid", message: "preview-edit expects a JSON array of {op,args}" } }); }
+    if (!Array.isArray(proposed) || !proposed.length || proposed.length > 200 || proposed.some((op) => !op || typeof op !== "object" || typeof op.op !== "string" || !op.op.trim() || !("args" in op)))
+      out({ error: { code: "invalid", message: "preview-edit expects 1–200 operations with op and args" } });
+    const project = load(dir);
+    if (project.revision !== revision) out({ error: { code: "conflict", message: `preview base revision ${revision} differs from current ${project.revision}` } });
+    out(previewOps(project, proposed, loadCtx(dir)));
   }
   case "apply-edit-review": {
     let parsed: any;

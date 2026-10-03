@@ -74,6 +74,18 @@ it("applies ops against the client's revision", async () => {
   expect(await post({ op: "addMarker", args: { label: "y", start: 6 }, baseRevision: project.revision })).toMatchObject({ status: 409, data: { error: { code: "conflict" } } });
 });
 
+it("previews against an exact revision without changing project or history", async () => {
+  const getJson = (path: string) => fetch(`${server.url}${path}`).then((r) => r.json());
+  const post = (body: unknown) => fetch(`${server.url}api/op/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, data: await r.json() }));
+  const before = await getJson("api/project");
+  const historyBefore = await getJson("api/history");
+  const preview = await post({ baseRevision: before.project.revision, ops: [{ op: "addMarker", args: { label: "preview only", start: 9 } }] });
+  expect(preview).toMatchObject({ status: 200, data: { revision: before.project.revision, moved: [] } });
+  expect((await getJson("api/project")).project).toEqual(before.project);
+  expect(await getJson("api/history")).toEqual(historyBefore);
+  expect(await post({ baseRevision: before.project.revision - 1, ops: [{ op: "addMarker", args: { label: "stale", start: 10 } }] })).toMatchObject({ status: 409, data: { error: { code: "conflict" } } });
+});
+
 it("manages export jobs and refuses to reveal an incomplete output", async () => {
   const post = (path: string, body: unknown) => fetch(`${server.url}${path}`, { method: "POST", body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, data: await r.json() }));
   expect(await post("api/export", { preset: "unknown" })).toMatchObject({ status: 400, data: { error: { code: "invalid" } } });

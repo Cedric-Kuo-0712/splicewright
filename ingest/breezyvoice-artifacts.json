@@ -1,0 +1,38 @@
+{
+  "micromamba": {
+    "release": "2.9.0-0",
+    "binaryVersion": "2.9.0",
+    "archives": {
+      "darwin-arm64": {
+        "url": "https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/micromamba-osx-arm64.tar.bz2",
+        "sha256": "500f5074feb8d02c4296ef9921c3650ed2874171805a9fbb8fbb53896433646b"
+      },
+      "darwin-x86_64": {
+        "url": "https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/micromamba-osx-64.tar.bz2",
+        "sha256": "0426ecdc41636d369f57b8fe6acbf4385a69eca45b56d9ee7d3a840a9965d44f"
+      },
+      "linux-aarch64": {
+        "url": "https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/micromamba-linux-aarch64.tar.bz2",
+        "sha256": "e705ffeed90ce0659eb546e4b1e1028c9eaf0bc9cc854867b19ac5ce0ba5852f"
+      },
+      "linux-x86_64": {
+        "url": "https://github.com/mamba-org/micromamba-releases/releases/download/2.9.0-0/micromamba-linux-64.tar.bz2",
+        "sha256": "8761c382127e6363bd9e0a2451aa3ef90d071a79133f736e2f759a3bf13040dd"
+      }
+    }
+  },
+  "model": {
+    "repository": "MediaTek-Research/BreezyVoice",
+    "revision": "e33b502e0ac21c16b0ee0d00df66ac3fa737393d",
+    "files": {
+      "cosyvoice.yaml": {"size": 6402, "sha256": "5bcbc8cd884a89e921eee20b6c478393b942fe5f007d05846e992be54842b43d"},
+      "configuration.json": {"size": 47, "sha256": "c502b6328c67638b401df8dd05de89e9e8d1cff9cd0ada10dfbdbe13556c20de"},
+      "campplus.onnx": {"size": 28303423, "sha256": "a6ac6a63997761ae2997373e2ee1c47040854b4b759ea41ec48e4e42df0f4d73"},
+      "speech_tokenizer_v1.onnx": {"size": 522624269, "sha256": "23b5a723ed9143aebfd9ffda14ac4c21231f31c35ef837b6a13bb9e5488abb1e"},
+      "spk2info.pt": {"size": 1317821, "sha256": "652d571b2efec1be6dc14345c2bae52eb41affe4b5d3fa4174548e059bd633b4"},
+      "llm.pt": {"size": 1243027089, "sha256": "310c74da4315729c6069c0d0efdfb5bc9b433dc75c890f6ebaf0d18373bda52f"},
+      "flow.pt": {"size": 419900943, "sha256": "fd80b089444a95e52956c57cdf177d7f6017a5af13b8a697717628a1d2be6b55"},
+      "hift.pt": {"size": 81896716, "sha256": "91e679b6ca1eff71187ffb4f3ab0444935594cdcc20a9bd12afad111ef8d6012"}
+    }
+  }
+}

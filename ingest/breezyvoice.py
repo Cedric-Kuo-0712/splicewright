@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -18,6 +19,7 @@ SETUP_COMMAND = "splicewright tts setup --engine breezyvoice"
 MAX_TEXT = 300
 MODEL_FILES = ("cosyvoice.yaml", "configuration.json", "campplus.onnx", "speech_tokenizer_v1.onnx", "spk2info.pt", "llm.pt", "flow.pt", "hift.pt")
 REQUIRED_MODULES = ("torch", "torchaudio", "whisper", "opencc", "hyperpyyaml", "huggingface_hub", "g2pw", "transformers", "onnxruntime")
+ARTIFACTS_PATH = Path(__file__).with_name("breezyvoice-artifacts.json")
 
 
 def default_root() -> Path:
@@ -159,12 +161,28 @@ def status(root: Path) -> dict:
             raise ValueError(f"invalid backend.json: {error}") from error
     missing_models = [name for name in MODEL_FILES if not (model / name).is_file() or (model / name).is_symlink() or (model / name).stat().st_size == 0]
     manifest = root / "model-manifest.json"
-    if manifest.is_file():
-        try:
-            sizes = json.loads(manifest.read_text(encoding="utf-8"))["files"]
-            missing_models.extend(name for name in MODEL_FILES if not isinstance(sizes.get(name), int) or sizes[name] <= 0 or not (model / name).is_file() or (model / name).stat().st_size != sizes[name])
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            missing_models.append("invalid model manifest")
+    try:
+        pinned = json.loads(ARTIFACTS_PATH.read_text(encoding="utf-8"))["model"]
+        installed = json.loads(manifest.read_text(encoding="utf-8"))
+        expected = pinned["files"]
+        if (set(expected) != set(MODEL_FILES) or installed.get("revision") != pinned["revision"]
+                or installed.get("files") != expected):
+            raise ValueError("installed model manifest does not match pinned artifacts")
+        for name in MODEL_FILES:
+            path = model / name
+            metadata = expected[name]
+            if path.is_symlink() or not path.is_file():
+                if name not in missing_models:
+                    missing_models.append(name)
+                continue
+            digest = hashlib.sha256()
+            with path.open("rb") as source_file:
+                for block in iter(lambda: source_file.read(1024 * 1024), b""):
+                    digest.update(block)
+            if path.stat().st_size != metadata["size"] or digest.hexdigest() != metadata["sha256"]:
+                missing_models.append(f"checksum mismatch: {name}")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError):
+        missing_models.append("invalid model manifest")
     missing_source = not source.is_dir() or not (source / "single_inference.py").is_file()
     missing_config = not config_path.is_file()
     missing_dependencies = list(REQUIRED_MODULES)

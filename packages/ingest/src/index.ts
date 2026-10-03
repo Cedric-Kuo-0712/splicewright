@@ -195,6 +195,7 @@ export async function reverseFile(src: string, out: string) {
       if (audio) args.push("-map", "0:a:0", "-af", "areverse", "-c:a", "pcm_s16le");
       args.push("-f", "matroska", path);
       await ffmpeg(args);
+      rmSync(join(tmp, name));
       reversed.push(path);
     }
     const list = join(tmp, "concat.txt");

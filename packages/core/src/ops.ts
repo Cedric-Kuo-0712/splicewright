@@ -553,7 +553,7 @@ export const ops: Record<string, OpDef<any>> = {
       const gap = gapAt(t, a.at);
       if (!gap) fail("invalid", `frame ${a.at} on ${t.id} is not in a gap with items after it`);
       const [from, to] = gap;
-      for (const i of t.items) if (!anchorOf(i) && i.start >= to) i.start -= to - from;
+      shift(p, t, to, from - to);
       return `closed gap [${from}, ${to}) on ${t.id} (${to - from}f)`;
     },
   ),
@@ -1072,6 +1072,10 @@ export function previewOps(project: Project, operations: Array<{ op: string; arg
   };
   collectTargets(operations);
   const oldItems = new Map(project.tracks.flatMap((track) => track.items.map((item) => [item.id, { track, item }] as const)));
+  // New items reveal the track chosen by core when an insertItem omitted trackId.
+  for (const track of result.project.tracks) {
+    if (track.items.some((item) => !oldItems.has(item.id))) directTracks.add(track.id);
+  }
   for (const id of directItems) {
     const before = oldItems.get(id);
     if (before) directTracks.add(before.track.id);

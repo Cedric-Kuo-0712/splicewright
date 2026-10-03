@@ -162,6 +162,24 @@ describe("ops", () => {
     expect(err(apply(locked, "closeGap", { trackId: "t_2", at: 60 }, ctx))).toBe("invalid");
   });
 
+  it("closeGap shifts items on tracks synced to the magnetic primary", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_1", assetId: "a_clip", at: 180, duration: 30 }, ctx));
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 210, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+
+    const result = apply(p, "closeGap", { trackId: "t_1", at: 160 }, ctx);
+    expect(result).toMatchObject({ changes: { summary: "closed gap [150, 180) on t_1 (30f)" } });
+    const closed = ok(result);
+    expect(item(closed, "i_3").start).toBe(150);
+    expect(item(closed, "i_4").start).toBe(180);
+
+    const locked = ok(apply(p, "setTrack", { trackId: "t_2", patch: { locked: true } }, ctx));
+    const before = JSON.stringify(locked);
+    expect(apply(locked, "closeGap", { trackId: "t_1", at: 160 }, ctx)).toMatchObject({ error: { code: "conflict" } });
+    expect(JSON.stringify(locked)).toBe(before);
+  });
+
   it("setProps and setTrack enforce whitelists; null unsets", () => {
     const p = fixture();
     const v = ok(apply(p, "setProps", { itemId: "i_1", patch: { volume: 0.5, fit: "cover" } }, ctx));
@@ -666,6 +684,19 @@ describe("ops", () => {
 });
 
 describe("opt-in track ripple sync", () => {
+  it("classifies auto-selected insertItem ripple as direct and synced-track ripple as secondary", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 120, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+
+    const preview = previewOps(p, [{ op: "insertItem", args: { assetId: "a_clip", at: 90, duration: 10 } }], ctx);
+    if ("error" in preview) throw new Error(preview.error.message);
+    expect(preview.moved).toEqual(expect.arrayContaining([
+      expect.objectContaining({ trackId: "t_1", itemId: "i_2", from: 90, to: 100, kind: "direct" }),
+      expect.objectContaining({ trackId: "t_2", itemId: "i_3", from: 120, to: 130, kind: "secondary" }),
+    ]));
+  });
+
   it("keeps defaults independent; shifts dependent free items, beats, and source-time keys once", () => {
     let p = fixture();
     p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 120, duration: 120 }, ctx));

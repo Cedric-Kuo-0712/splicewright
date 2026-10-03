@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { availableParallelism, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HEIF, type Asset } from "@splicewright/core";
 import { cacheDir, fingerprint, load, rawPath, readAssets, writeAtomic, type Probe, type SourceHealth } from "@splicewright/core/node";
 import { audioFxPath, ensureAudioFx } from "./audio-fx.ts";
+import { createIngestLimiter, limiter } from "./resource.ts";
 import { measureFinalMix, measureSourceHealth } from "./source-health.ts";
 
 // Spec §8. ffmpeg steps run here; transcript and beats need Python libraries and run ingest/*.py.
@@ -24,21 +25,7 @@ export const stamp = (fingerprint: string, step: Step) => step === "transcript" 
 
 const pyDir = join(dirname(fileURLToPath(import.meta.url)), "../../../ingest");
 
-/** FIFO limit on concurrent jobs. */
-export function limiter(n: number) {
-  let running = 0;
-  const waiting: (() => void)[] = [];
-  return async <T>(fn: () => Promise<T>): Promise<T> => {
-    if (running >= n) await new Promise<void>((r) => waiting.push(r));
-    running++;
-    try {
-      return await fn();
-    } finally {
-      running--;
-      waiting.shift()?.();
-    }
-  };
-}
+export { limiter } from "./resource.ts";
 
 function exec(cmd: string, args: string[], onData?: (b: Buffer) => void, onErr?: (b: Buffer) => void): Promise<string> {
   return new Promise((ok, fail) => {
@@ -327,7 +314,7 @@ export interface IngestOptions {
   only?: Step[];
   /** Asset ids; default all. */
   assets?: string[];
-  /** Concurrent ffmpeg jobs; default cores − 2 (§8). */
+  /** Concurrent ffmpeg jobs; defaults to max(1, min(2, cores − 2)); positive integer only. */
   jobs?: number;
   log?: (line: string) => void;
 }
@@ -337,7 +324,7 @@ type Tally = { ran: number; cached: number; skipped: number; failed: number };
 /** Probe every asset, then run the requested steps on whatever changed since they last ran. */
 export async function ingest(dir: string, opts: IngestOptions = {}) {
   const log = opts.log ?? (() => {});
-  const run = limiter(opts.jobs ?? Math.max(1, availableParallelism() - 2));
+  const run = createIngestLimiter(opts.jobs);
   const steps = new Set(opts.only ?? STEPS);
   const project = load(dir);
   const assets = Object.values(project.assets).filter((a) => a.kind !== "lut" && (!opts.assets || opts.assets.includes(a.id)));

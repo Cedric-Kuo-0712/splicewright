@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { HEIF, type Asset } from "@splicewright/core";
 import { cacheDir, fingerprint, load, rawPath, readAssets, writeAtomic, type Probe, type SourceHealth } from "@splicewright/core/node";
 import { audioFxPath, ensureAudioFx } from "./audio-fx.ts";
-import { createIngestLimiter, limiter } from "./resource.ts";
+import { createIngestLimiter, limiter, withFfmpegResourceLimits } from "./resource.ts";
 import { measureFinalMix, measureSourceHealth } from "./source-health.ts";
 export { TTS_LANGUAGES, TTS_VOICES, generateAndInsertTTS, setupTTS, ttsStatus, validateTTSRequest, type TtsLanguage, type TtsRequest, type TtsStatus } from "./tts.ts";
 
@@ -40,7 +40,8 @@ function exec(cmd: string, args: string[], onData?: (b: Buffer) => void, onErr?:
   });
 }
 
-export const ffmpeg = (args: string[], onData?: (b: Buffer) => void) => exec("ffmpeg", ["-loglevel", "error", "-y", ...args], onData);
+/** Apply a per-process codec/filter thread ceiling; SPLICEWRIGHT_FFMPEG_THREADS tunes it for measurement. */
+export const ffmpeg = (args: string[], onData?: (b: Buffer) => void) => exec("ffmpeg", ["-loglevel", "error", "-y", ...withFfmpegResourceLimits(args)], onData);
 
 /** The path to import for a project-relative `path`: HEIC/HEIF becomes a JPEG in raw/ (the original stays), anything else is itself. */
 export async function displayable(dir: string, path: string): Promise<string> {
@@ -285,7 +286,7 @@ export async function waveform(dir: string, assetId: string, path: string, run =
 /** Integrated loudness in LUFS from ebur128's summary; undefined when the audio is silent (ebur128 floors it at -70, sometimes prints -inf). */
 export async function loudness(file: string): Promise<number | undefined> {
   let tail = "";
-  await exec("ffmpeg", ["-hide_banner", "-nostats", "-i", file, "-vn", "-af", "ebur128", "-f", "null", "-"], undefined, (d) => (tail = (tail + d).slice(-2000)));
+  await exec("ffmpeg", withFfmpegResourceLimits(["-hide_banner", "-nostats", "-i", file, "-vn", "-af", "ebur128", "-f", "null", "-"]), undefined, (d) => (tail = (tail + d).slice(-2000)));
   const m = /Integrated loudness:\s+I:\s+(\S+) LUFS/.exec(tail);
   if (!m) throw new Error("ebur128 printed no summary");
   return +m[1] > -70 ? +m[1] : undefined;

@@ -1,6 +1,6 @@
 import { STEPS, type Step } from "@splicewright/ingest";
 
-const EDITING_STEPS: Step[] = ["proxy", "reverse", "thumbs", "waveform"];
+const EDITING_STEPS: Step[] = ["proxy", "thumbs", "waveform"];
 const ALL_STEPS: Step[] = [...STEPS];
 
 type Run = (assetId: string, steps: Step[]) => Promise<void>;

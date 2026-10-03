@@ -10,7 +10,7 @@ import { handleTtsRequest } from "./tts-api.ts";
 import { BackgroundIngestScheduler } from "./background-ingest.ts";
 import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
-import { addRecent, applyEditReview, applyLutPreset, fingerprint, getEditReview, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, revertEditReview, run, setEditReviewStatus, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
+import { addRecent, applyEditReview, applyLutPreset, cacheDir, fingerprint, getEditReview, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, revertEditReview, run, setEditReviewStatus, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
 import { ASPECTS, captionWords, FPS_CHOICES, previewOps, sourceAt, type Project } from "@splicewright/core";
 import { scanMaterials, relinkMaterial, prepareMaterials, audioFxPath, displayable, ensureAudioFx, ffmpeg, ingest, limiter, loudness, probe, reverseAudioPath, reverseProjectAudio, thumb, waveform, type Step } from "@splicewright/ingest";
 import { cancelRender, renderStatus, startRender, duckRanges, fontVersionsOf, lutsOf, lutVersion, reverseProxiesOf } from "@splicewright/render/node";
@@ -127,13 +127,11 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     }
     return { sources, reverseSources, processing, errors };
   };
-  // Cache-writing ingest calls stay serialized; the route's quick ffprobe result is held in memory
-  // until this queue persists it, so imports need not wait behind unrelated expensive work.
-  const probeOverrides = new Map<string, { path: string; fingerprint: string; value: Awaited<ReturnType<typeof probe>> }>();
+  // Expensive ingest stays serialized. Quick metadata saves merge synchronously in the route,
+  // so the shared core context can use a new asset before unrelated background work finishes.
   let closed = false;
   const scheduler = new BackgroundIngestScheduler(async (id, steps) => {
     const result = await ingest(dir, { assets: [id], only: steps, log: (line) => { if (!closed) broadcast({ ingest: { id, step: line.split(" ")[0] } }); } });
-    probeOverrides.delete(id);
     if (result.errors?.length) throw new Error(result.errors.join("; "));
   }, (id, error) => broadcast({ ingest: { id, step: null, ...(error && { error }) } }));
   const background = (id: string, only?: Step[]) => only ? scheduler.enqueueOnly(id, only) : scheduler.enqueueFull(id);
@@ -153,12 +151,6 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
       const asset = project.assets[id];
       return asset && probe.path === asset.path && probe.fingerprint === fingerprint(join(dir, asset.path));
     }));
-    for (const [id, cached] of probeOverrides) {
-      const asset = project.assets[id];
-      if (asset && cached.path === asset.path && cached.fingerprint === fingerprint(join(dir, asset.path)))
-        probes[id] = { ...cached.value, path: cached.path, fingerprint: cached.fingerprint };
-      else probeOverrides.delete(id);
-    }
     const proxies = Object.keys(project.assets).filter((id) => {
       const probe = probes[id];
       return probe && probe.done?.proxy === probe.fingerprint
@@ -336,9 +328,19 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             if (asset.kind !== "lut") {
               if (asset.kind !== "font") {
                 try {
+                  const before = fingerprint(join(dir, asset.path));
                   const value = await limited(() => probe(join(dir, asset.path), asset.kind));
                   const fp = fingerprint(join(dir, asset.path));
-                  if (!closed && fp) probeOverrides.set(asset.id, { path: asset.path, fingerprint: fp, value });
+                  if (!closed && fp && fp === before && load(dir).assets[asset.id]?.path === asset.path) {
+                    // No await between read and write: same-process cache saves cannot interleave.
+                    // Retain completed steps only when they still describe this exact source.
+                    const disk = readAssets(dir);
+                    const cached = disk[asset.id];
+                    disk[asset.id] = { ...(cached?.path === asset.path && cached.fingerprint === fp ? cached : {}),
+                      ...value, path: asset.path, fingerprint: fp };
+                    mkdirSync(cacheDir(dir), { recursive: true });
+                    writeAtomic(cacheDir(dir, "assets.json"), disk);
+                  }
                 } catch { /* The serialized ingest reports probe failures through the existing event. */ }
                 if (!closed) {
                   background(asset.id);

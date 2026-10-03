@@ -13,7 +13,7 @@ export function ffmpegThreadCount(cores = availableParallelism(), override: stri
     if (!Number.isSafeInteger(value) || value < 1 || value > 32) throw new RangeError("SPLICEWRIGHT_FFMPEG_THREADS must be an integer from 1 to 32");
     return value;
   }
-  return cores === 1 ? 1 : Math.min(4, Math.max(2, Math.floor(cores / 2)));
+  return cores === 1 ? 1 : Math.min(8, Math.max(2, cores - 2));
 }
 
 /** Add thread limits at FFmpeg's per-input and per-output option boundaries. */

@@ -6,7 +6,7 @@ import { ffmpeg } from "../src/index.ts";
 import { ffmpegThreadCount, withFfmpegResourceLimits } from "../src/resource.ts";
 
 describe("FFmpeg resource budget", () => {
-  it.each([[1, 1], [2, 2], [4, 2], [8, 4], [10, 4], [64, 4]])("selects %i thread(s) on a %i-core host", (cores, expected) => {
+  it.each([[1, 1], [2, 2], [4, 2], [8, 6], [10, 8], [64, 8]])("a %i-core host gets %i threads per pool", (cores, expected) => {
     expect(ffmpegThreadCount(cores, null)).toBe(expected);
   });
 

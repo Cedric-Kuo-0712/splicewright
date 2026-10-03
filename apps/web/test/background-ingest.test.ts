@@ -26,9 +26,9 @@ describe("background ingest scheduling", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(calls.map(([id, steps]) => [id, steps])).toEqual([
       ["old", ["transcript"]],
-      ["new", ["proxy", "reverse", "thumbs", "waveform"]],
+      ["new", ["proxy", "thumbs", "waveform"]],
       ["backlog", ["beats"]],
-      ["new", ["sourceHealth", "analysis", "transcript", "beats", "loudness", "audioFx"]],
+      ["new", ["sourceHealth", "reverse", "analysis", "transcript", "beats", "loudness", "audioFx"]],
     ]);
     expect(finalized.filter((id) => id === "new")).toHaveLength(1);
     scheduler.close();

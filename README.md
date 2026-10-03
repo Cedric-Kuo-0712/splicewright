@@ -44,6 +44,18 @@ splicewright render                     # master quality
 You can also skip the `cp`/`import` step and drop files onto the media bin or the timeline in the
 editor. They are copied into `raw/` and ingested in the background.
 
+Web imports probe metadata before responding, without waiting for unrelated background ingest.
+Queued editing proxies, thumbnails, and waveforms run before reverse/analysis work; an ingest
+already running finishes its current phase. All existing preparation steps still run, and a
+proxy is reported ready only when its cache and output are available.
+
+Ingest FFmpeg codec and filter pools default to `max(2, min(8, available CPU cores - 2))`
+threads, or one thread on a single-core host. This is a per-pool ceiling, not a total CPU limit;
+the separate ingest `jobs` option still controls concurrent work. For calibration, set
+`SPLICEWRIGHT_FFMPEG_THREADS` to an integer from 1 to 32. Proxy resolution, source FPS, GOP,
+and quality settings are unchanged. The optional `scripts/benchmark-ingest.mjs` runner records
+real import API/proxy/background timings or an ingest workload in a fresh experiment folder.
+
 ## Offline narration
 
 Kokoro runs locally through ONNX Runtime's CPU provider. Install only the languages you need; US

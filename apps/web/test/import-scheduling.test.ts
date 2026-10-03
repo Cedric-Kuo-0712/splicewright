@@ -1,15 +1,18 @@
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { init } from "@splicewright/core/node";
+import { cacheDir, fingerprint, init, load, readAssets, writeAtomic } from "@splicewright/core/node";
 
-const control = vi.hoisted(() => ({ blockNext: false, started: undefined as (() => void) | undefined, release: undefined as (() => void) | undefined }));
+const control = vi.hoisted(() => ({ blockNext: false, started: undefined as (() => void) | undefined, release: undefined as (() => void) | undefined, onProbe: undefined as ((path: string) => void) | undefined }));
 vi.mock("@splicewright/ingest", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@splicewright/ingest")>();
   return {
     ...actual,
-    probe: vi.fn(async (path: string, kind: "video" | "audio" | "image") => ({ kind, duration: path.includes("second") ? 2 : 1, fps: 30, audio: false })),
+    probe: vi.fn(async (path: string, kind: "video" | "audio" | "image") => {
+      control.onProbe?.(path);
+      return { kind, duration: path.includes("second") ? 2 : 1, fps: 30, audio: false };
+    }),
     ingest: vi.fn(async () => {
       if (!control.blockNext) return { errors: [] };
       control.blockNext = false;
@@ -28,6 +31,7 @@ describe("web import scheduling", () => {
     control.started = undefined;
     control.release?.();
     control.release = undefined;
+    control.onProbe = undefined;
   });
 
   it("returns a new import probe while an earlier serialized ingest is blocked", async () => {
@@ -46,16 +50,61 @@ describe("web import scheduling", () => {
       const first = await upload("first");
       expect(first.status).toBe(200);
       await started;
+      release = control.release!;
       const second = await Promise.race([
         upload("second"),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error("second import waited for background ingest")), 500)),
       ]);
       expect(second.status).toBe(200);
       expect(second.body.durations).toMatchObject({ [second.body.assetId]: 2 });
-      release = control.release!;
+      expect(readAssets(dir)[second.body.assetId]?.duration).toBe(2);
+      const inserted = await fetch(`${server.url}api/op`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: "insertItem", args: { assetId: second.body.assetId, at: 0 } }),
+      });
+      expect(inserted.status).toBe(200);
     } finally {
       release?.();
       await server.close();
     }
+  });
+
+  it("preserves matching completed steps without falsely announcing a proxy", async () => {
+    const { open } = await import("../server.ts");
+    const dir = mkdtempSync(join(tmpdir(), "swr-probe-merge-"));
+    dirs.push(dir);
+    init(dir, { title: "probe merge", fps: 30, width: 640, height: 360 });
+    const server = await open(dir, { port: 0 });
+    control.onProbe = (path) => {
+      const asset = Object.values(load(dir).assets).find((asset) => join(dir, asset.path) === path)!;
+      const stamp = fingerprint(path)!;
+      writeAtomic(cacheDir(dir, "assets.json"), { [asset.id]: {
+        kind: asset.kind, path: asset.path, fingerprint: stamp, duration: 1, done: { proxy: stamp },
+      } });
+    };
+    try {
+      const response = await fetch(`${server.url}api/import?name=first.mp4`, { method: "POST", body: Buffer.from("synthetic") });
+      const body = await response.json();
+      expect(response.status).toBe(200);
+      const entry = readAssets(dir)[body.assetId];
+      expect(entry.done?.proxy).toBe(entry.fingerprint);
+      expect(body.proxies).not.toContain(body.assetId);
+    } finally { await server.close(); }
+  });
+
+  it("does not publish metadata measured across a source change", async () => {
+    const { open } = await import("../server.ts");
+    const dir = mkdtempSync(join(tmpdir(), "swr-probe-changed-"));
+    dirs.push(dir);
+    init(dir, { title: "changed probe", fps: 30, width: 640, height: 360 });
+    const server = await open(dir, { port: 0 });
+    control.onProbe = (path) => appendFileSync(path, "changed");
+    try {
+      const response = await fetch(`${server.url}api/import?name=first.mp4`, { method: "POST", body: Buffer.from("synthetic") });
+      const body = await response.json();
+      expect(response.status).toBe(200);
+      expect(readAssets(dir)[body.assetId]).toBeUndefined();
+      expect(body.durations[body.assetId]).toBeUndefined();
+    } finally { await server.close(); }
   });
 });

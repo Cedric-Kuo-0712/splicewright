@@ -167,6 +167,11 @@ def setup_unlocked(root: Path, languages: list[str]) -> dict:
 
 
 def generate(root: Path, request: dict) -> dict:
+    with setup_lock(root):
+        return generate_unlocked(root, request)
+
+
+def generate_unlocked(root: Path, request: dict) -> dict:
     state = status(root)
     language = request["language"]
     if language not in state["installedLanguages"]:

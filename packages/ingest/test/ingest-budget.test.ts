@@ -49,7 +49,30 @@ describe("ingest resource budget", () => {
     expect(secondStarted).toBe(true);
   });
 
-  it.each([0, -1, 1.5, NaN, Infinity, -Infinity])("rejects invalid concurrency limit %s immediately", (n) => {
+  it("reserves a released slot for the queued job before accepting a new arrival", async () => {
+    const run = limiter(1);
+    const firstGate = deferred();
+    const queuedGate = deferred();
+    const started: string[] = [];
+    const first = run(() => firstGate.promise);
+    const queued = run(() => { started.push("queued"); return queuedGate.promise; });
+    let arrival!: Promise<void>;
+    firstGate.resolve();
+    await new Promise<void>((done) => queueMicrotask(() => {
+      arrival = run(() => { started.push("arrival"); return queuedGate.promise; });
+      done();
+    }));
+    try {
+      await first;
+      expect(started).toEqual(["queued"]);
+    } finally {
+      queuedGate.resolve();
+      await Promise.all([queued, arrival]);
+    }
+    expect(started).toEqual(["queued", "arrival"]);
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1])("rejects invalid concurrency limit %s immediately", (n) => {
     expect(() => limiter(n)).toThrow(RangeError);
   });
 });

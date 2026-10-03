@@ -1,5 +1,3 @@
-import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,9 +20,7 @@ vi.mock("node:child_process", async (importOriginal) => {
   return {
     ...original,
     spawn: vi.fn((command: string, args: string[]) => {
-      const child = new EventEmitter() as EventEmitter & { stdout: PassThrough; stderr: PassThrough };
-      child.stdout = new PassThrough();
-      child.stderr = new PassThrough();
+      const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough() });
       queueMicrotask(() => {
         let code = 0;
         if (command === "ffprobe") {
@@ -48,7 +44,8 @@ vi.mock("node:child_process", async (importOriginal) => {
             }
           } else if (args.includes("concat")) {
             const list = readFileSync(args[args.indexOf("-i") + 1], "utf8");
-            fake.concatSourcesExist = fake.sourcePaths.map((path) => list.includes(path) && existsSync(path));
+            fake.concatSourcesExist = fake.sourcePaths.map((path) => existsSync(path));
+            if (!list.includes("reverse-")) throw new Error("concat must use reversed chunks");
             writeFileSync(args.at(-1)!, "output");
           }
         }

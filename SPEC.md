@@ -381,7 +381,7 @@ ids or paths), and invokes them from the CLI. Steps, each cached by fingerprint:
 | beats | `beats/*.json` | audio assets only; see §15.3 |
 | loudness | `assets.json` (`loudness`, LUFS) | ffmpeg `ebur128` integrated loudness; assets with an audio stream. Silent assets (−70 LUFS gate floor) get no value. Runs by default on import (it is in `STEPS`) and decodes the whole audio once per asset. Read by `normalizeLoudness`. |
 
-Concurrency is configurable (default: cores − 2). Hardware acceleration is detected, not assumed,
+Concurrency is configurable (default: max(1, min(2, cores − 2)); explicit positive-integer jobs overrides are retained). This limits concurrent ingest jobs, not FFmpeg internal threads or total CPU usage. Hardware acceleration is detected, not assumed,
 so the tool also runs on Linux.
 
 ---
@@ -467,7 +467,7 @@ explained, not hidden.
 | M2 | `cli` + `mcp` over core; `migrate video-cut` | agent can split/trim the migrated project via MCP; `validate` passes | ✅ done |
 | M3 | `render`: generic composition, config loader, captions, ducking | §11 acceptance comparison | ✅ done (frames; audio not compared) |
 | M4 | `apps/web` ported to core ops, file watching, edit proxies, thumbs/waveforms; adaptive ruler + snapping (§15.1–15.2) | manual pass over §7.3 checklist; `rulerTicks`/`snap` unit tests | ✅ done (UI plays edit proxies if present; generating them is M5) |
-| M5 | `ingest` generic port | fresh project from raw files → first render with no manual steps | ✅ done (no `scenes` step) |
+| M5 | `ingest` generic port | fresh project from raw files → first render with no manual steps | ✅ done (no `scenes` step; default ingest concurrency capped at two; reverse source chunks released progressively) |
 | M6 | Beat detection + beat ops (§15.3–15.4) | synthetic click track within ±1 frame; `fitToBeats` on a photo slideshow | ✅ done (real-music F-measure: tool `ingest/beat_eval.py` ready; number pending a hand-tapped reference) |
 | M7 | New-project flow + aspect presets (§13.1) | `open` in an empty folder → form → project renders; recent list only opens listed paths | ✅ done (browser pass by hand; switch fallback path untested) |
 | M8 | Masks + blend modes (§13.2) | still-frame snapshots per shape, feather, invert; mask keyframes survive split/trim | ✅ done (pixel probes on an ellipse, an inverted feathered rect and blend; other shapes by `maskStyle` string tests; player mask box (Shift+K) for video items, not overlays; 90°/270° assets unrendered) |

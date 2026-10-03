@@ -22,7 +22,7 @@ export function limiter(n: number) {
   };
 }
 
-/** Preserve two CPUs for other work while limiting default ingest fan-out to two jobs. */
+/** Use up to cores − 2 concurrent jobs, with a default ceiling of two; FFmpeg threads are unchanged. */
 export function createIngestLimiter(jobs?: number, cores = availableParallelism()) {
   return limiter(jobs ?? Math.max(1, Math.min(2, cores - 2)));
 }

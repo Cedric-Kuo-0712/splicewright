@@ -13,6 +13,29 @@ function project() {
   return dir;
 }
 
+function exifOriginalSegment() {
+  const tiff = Buffer.alloc(96);
+  tiff.write("II", 0, "ascii"); tiff.writeUInt16LE(42, 2); tiff.writeUInt32LE(8, 4);
+  tiff.writeUInt16LE(1, 8);
+  tiff.writeUInt16LE(0x8769, 10); tiff.writeUInt16LE(4, 12); tiff.writeUInt32LE(1, 14); tiff.writeUInt32LE(26, 18);
+  tiff.writeUInt32LE(0, 22);
+  tiff.writeUInt16LE(2, 26);
+  tiff.writeUInt16LE(0x9003, 28); tiff.writeUInt16LE(2, 30); tiff.writeUInt32LE(20, 32); tiff.writeUInt32LE(56, 36);
+  tiff.writeUInt16LE(0x9011, 40); tiff.writeUInt16LE(2, 42); tiff.writeUInt32LE(7, 44); tiff.writeUInt32LE(76, 48);
+  tiff.writeUInt32LE(0, 52);
+  tiff.write("2021:03:04 05:06:07\0", 56, "ascii");
+  tiff.write("+01:00\0", 76, "ascii");
+  const payload = Buffer.concat([Buffer.from("Exif\0\0", "binary"), tiff]);
+  const segment = Buffer.alloc(payload.length + 4);
+  segment[0] = 0xff; segment[1] = 0xe1; segment.writeUInt16BE(payload.length + 2, 2); payload.copy(segment, 4);
+  return segment;
+}
+
+function addExifOriginal(file: string) {
+  const jpeg = readFileSync(file);
+  writeFileSync(file, Buffer.concat([jpeg.subarray(0, 2), exifOriginalSegment(), jpeg.subarray(2)]));
+}
+
 it("lists raw additions read-only, detects modifications and missing registered files", async () => {
   const dir = project();
   const image = join(dir, "raw", "poster.jpg");
@@ -60,6 +83,53 @@ it("refuses stale and malformed review records without overwriting the ledger", 
   await expect(listMaterials(dir)).rejects.toThrow("invalid material review ledger JSON");
   await expect(recordMaterialReview(dir, { path: item.path, version: item.version!, summary: "No overwrite." })).rejects.toThrow("invalid material review ledger JSON");
   expect(readFileSync(ledger, "utf8")).toBe("{broken");
+});
+
+it("stores bounded planning fields and rejects coverage outside the media duration", async () => {
+  const dir = project();
+  const file = join(dir, "raw", "planning.wav");
+  execFileSync("ffmpeg", ["-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.3", file]);
+  await prepareMaterials(dir, { paths: ["raw/planning.wav"], steps: [] });
+  const material = (await listMaterials(dir)).materials[0];
+  expect(material.captureTime).toBeNull(); // Filesystem dates are not a recording-time fallback.
+  const planning = { storyRoles: ["process" as const, "detail" as const], tags: ["workshop"], coverage: { method: "sampled playback", extent: "partial" as const, ranges: [{ from: 0.05, to: 0.2 }] }, suitableUses: ["live-audio" as const], cautions: ["Room tone is audible."] };
+  await recordMaterialReview(dir, { path: material.path, version: material.version!, summary: "Workshop ambience.", planning });
+  expect((await listMaterials(dir)).materials[0].review?.planning).toEqual(planning);
+  await expect(recordMaterialReview(dir, { path: material.path, version: material.version!, summary: "Too long.", planning: { coverage: { method: "sampled", extent: "partial", ranges: [{ from: 0, to: 2 }] } } })).rejects.toThrow("duration");
+  await expect(recordMaterialReview(dir, { path: material.path, version: material.version!, summary: "Unknown field.", planning: { extra: { arbitrary: true } } as never })).rejects.toThrow("planning fields");
+});
+
+it("extracts EXIF original time and filename guesses during prepare, retaining timezone ambiguity", async () => {
+  const dir = project();
+  const relative = "raw/2024-03-05_06-07-08.jpg";
+  const file = join(dir, relative);
+  execFileSync("ffmpeg", ["-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=blue:s=64x64", "-frames:v", "1", file]);
+  addExifOriginal(file);
+  expect((await listMaterials(dir)).materials[0].captureTime).toBeNull();
+  const prepared = await prepareMaterials(dir, { paths: [relative], steps: [] });
+  expect(prepared.errors).toEqual([]);
+  expect((await listMaterials(dir)).materials[0].captureTime).toEqual({
+    selected: { value: "2021-03-04T05:06:07+01:00", source: "exif-original", precision: "second", timezone: "explicit", certainty: "explicit" },
+    candidates: [
+      { value: "2021-03-04T05:06:07+01:00", source: "exif-original", precision: "second", timezone: "explicit", certainty: "explicit" },
+      { value: "2024-03-05T06:07:08", source: "filename", precision: "second", timezone: "unknown-local", certainty: "inferred" },
+    ],
+    timezoneAmbiguous: true,
+  });
+});
+
+it("keeps container creation provenance and invalidates chronology when the source changes", async () => {
+  const dir = project();
+  const relative = "raw/20240101_120000.mov";
+  const file = join(dir, relative);
+  execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "color=blue:s=32x32", "-t", "0.2", "-c:v", "mpeg4", "-metadata", "creation_time=2022-06-07T08:09:10Z", file]);
+  await prepareMaterials(dir, { paths: [relative], steps: [] });
+  const material = (await listMaterials(dir)).materials[0];
+  expect(material.captureTime?.selected).toMatchObject({ value: "2022-06-07T08:09:10Z", source: "container-creation" });
+  expect(material.captureTime?.candidates).toContainEqual(expect.objectContaining({ source: "filename", certainty: "inferred" }));
+  // A stale timestamp must not be presented as evidence for replaced media.
+  writeFileSync(file, "changed source");
+  expect((await listMaterials(dir)).materials[0].captureTime).toBeNull();
 });
 
 it("ignores raw symlinks escaping raw and prepares selected unregistered sources without reviewing them", async () => {

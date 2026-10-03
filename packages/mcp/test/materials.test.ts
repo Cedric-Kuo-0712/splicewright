@@ -35,8 +35,20 @@ it("an agent prepares and reviews only explicitly requested materials through MC
     const preview = await call("material_preview", { path: first.path, version: first.version });
     expect(preview.body).toMatchObject({ type: "image", mimeType: "image/jpeg" });
     const revision = load(dir).revision;
-    expect((await call("record_material_review", { path: first.path, version: first.version, summary: "Red image", decision: "candidate" })).result.isError).not.toBe(true);
-    expect((await call("list_materials")).body.materials[0].status).toBe("reviewed");
+    const planning = { storyRoles: ["hook", "detail"], tags: ["red"], coverage: { method: "still-preview", extent: "full" }, suitableUses: ["photo-montage"], cautions: ["Static image"] };
+    // Pre-existing summaries had no length limit; the additive schema must still read them.
+    const summary = "Red image " + "x".repeat(1700);
+    expect((await call("record_material_review", { path: first.path, version: first.version, summary, decision: "candidate", planning })).result.isError).not.toBe(true);
+    expect((await call("list_materials")).body.materials[0]).toMatchObject({ status: "reviewed", review: { planning } });
+    expect((await call("record_material_review", { path: first.path, version: first.version, summary: "Bad coverage", planning: { coverage: { method: "peek", extent: "partial", ranges: [{ from: 5, to: 2 }] } } })).result.isError).toBe(true);
+    expect((await call("list_materials")).body.materials[0].review.planning).toEqual(planning);
+    expect((await call("list_materials", { paths: [first.path], view: "compact" })).body.materials).toHaveLength(1);
+    const compact = (await call("list_materials", { paths: [first.path], view: "compact" })).body.materials[0];
+    expect(compact.review.summaryTruncated).toBe(true);
+    expect(compact.review.summary.length).toBeLessThanOrEqual(600);
+    expect(compact.review.planning.storyRoles).toEqual(planning.storyRoles);
+    expect((await call("list_materials", { paths: [first.path], view: "full" })).body.materials[0].review.summary).toBe(summary);
+    expect((await call("list_materials", { paths: ["raw/not-present.png"], view: "compact" })).body.materials).toEqual([]);
     expect(load(dir).revision).toBe(revision);
     copyFileSync(join(dir, first.path), join(dir, "raw/z_photo.png"));
     const added = (await call("list_materials")).body.materials.find((m: { path: string }) => m.path === "raw/z_photo.png");

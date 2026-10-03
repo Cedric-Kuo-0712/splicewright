@@ -562,7 +562,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
 
 export { audioFxPath, ensureAudioFx, measureFinalMix };
 export type { AudioMeasurement, AudioPeak, FinalMixMeasurement, SourceHealth } from "@splicewright/core/node";
-export { scanMaterials, relinkMaterial, listMaterials, prepareMaterials, recordMaterialReview, materialPreview, type ListedMaterial, type MaterialReview, type PrepareStep } from "./materials.ts";
+export { scanMaterials, relinkMaterial, listMaterials, prepareMaterials, recordMaterialReview, materialPreview, type ListedMaterial, type MaterialReview, type MaterialReviewPlanning, type MaterialCoverage, type MaterialStoryRole, type MaterialSuitableUse, type CaptureTime, type CaptureCandidate, type PrepareStep } from "./materials.ts";
 export { sourceFrame } from "./source-frame.ts";
 
 export { checkOutput } from "./output-health.ts";

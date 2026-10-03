@@ -112,8 +112,33 @@ export function createServer(dir: string): McpServer {
 
   server.registerTool(
     "list_materials",
-    { description: "Read-only inventory of raw/ and registered assets, with source versions and unreviewed/reviewed/changed/missing states. No STT, import or review writes.", inputSchema: {} },
-    async () => { try { return json(await listMaterials(dir)); } catch (e) { return failed("materials_failed", e); } },
+    {
+      description: "Read-only inventory with exact source versions and review states. Use compact for an overview, then paths + full for chosen sources; compact omits segment/coverage ranges and bounds summaries. Filtering reduces returned context, not source hashing. No STT, import or review writes.",
+      inputSchema: { paths: z.array(z.string().min(1)).max(200).optional(), view: z.enum(["compact", "full"]).optional() },
+    },
+    async ({ paths, view }) => {
+      try {
+        const inventory = await listMaterials(dir);
+        const selected = paths ? new Set(paths) : undefined;
+        const materials = inventory.materials.filter((m) => !selected || selected.has(m.path)).map((m) => {
+          if (view !== "compact" || !m.review) return m;
+          const { segments, planning, ...review } = m.review;
+          return {
+            ...m,
+            review: {
+              ...review, summary: review.summary.slice(0, 600),
+              ...(review.summary.length > 600 && { summaryTruncated: true }),
+              ...(segments?.length || planning?.coverage?.ranges?.length ? { detailsOmitted: true } : {}),
+              ...(planning && { planning: {
+                ...planning,
+                ...(planning.coverage && { coverage: { method: planning.coverage.method, extent: planning.coverage.extent } }),
+              } }),
+            },
+          };
+        });
+        return json({ materials });
+      } catch (e) { return failed("materials_failed", e); }
+    },
   );
   server.registerTool(
     "prepare_materials",
@@ -131,11 +156,22 @@ export function createServer(dir: string): McpServer {
   server.registerTool(
     "record_material_review",
     {
-      description: "After actually inspecting a source, persist observations for its exact listed version. Stale versions are refused. Review status is separate from candidate/include/exclude decisions; this does not edit the timeline.",
+      description: "After actually inspecting a source, persist bounded observations and optional story-planning evidence for its exact listed version. Stale versions are refused. Review status is separate from candidate/include/exclude decisions; this does not edit the timeline. Source-second coverage records what was inspected, not proof that the whole source was watched.",
       inputSchema: {
         path: z.string().min(1), version: z.string().min(1), summary: z.string().trim().min(1),
         segments: z.array(z.object({ from: z.number().min(0), to: z.number().positive(), note: z.string().trim().min(1) })).optional(),
         decision: z.enum(["candidate", "include", "exclude"]).optional(), reason: z.string().trim().min(1).optional(),
+        planning: z.object({
+          storyRoles: z.array(z.enum(["establishing", "process", "highlight", "detail", "ending", "hook"])).max(6).optional(),
+          tags: z.array(z.string().trim().min(1).max(80)).max(20).optional(),
+          coverage: z.object({
+            method: z.string().trim().min(1).max(80),
+            extent: z.enum(["partial", "full"]),
+            ranges: z.array(z.object({ from: z.number().min(0), to: z.number().positive() }).strict()).max(50).optional(),
+          }).strict().optional(),
+          suitableUses: z.array(z.enum(["b-roll", "photo-montage", "live-audio"])).max(3).optional(),
+          cautions: z.array(z.string().trim().min(1).max(300)).max(10).optional(),
+        }).strict().optional(),
       },
     },
     async (args) => { try { return json(await recordMaterialReview(dir, args)); } catch (e) { return failed("review_failed", e); } },

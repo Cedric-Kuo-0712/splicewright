@@ -79,6 +79,10 @@ try {
             const line = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
             if (!line.startsWith('data: ')) continue;
             const event = { ms: performance.now() - start, ...JSON.parse(line.slice(6)) };
+            if (event.ingest && ['proxy', 'thumbs', 'waveform', null].includes(event.ingest.step)) {
+              const state = await fetch(new URL('/api/project', server.url), { signal: deadline }).then((reply) => reply.json());
+              if (state.proxies?.includes(event.ingest.id)) event.apiProxyReadyMs = performance.now() - start;
+            }
             record.events.push(event);
             for (const waiter of waiters) if (waiter.predicate(event)) waiter.resolveEvent(event);
           }
@@ -95,9 +99,9 @@ try {
       };
       record.imports = [await upload(input, 'first.mp4'), await upload(second, 'second.mp4')];
       for (const imported of record.imports) {
-        const proxy = await waitFor((event) => event.ingest?.id === imported.assetId && event.ingest.step === 'proxy');
+        const proxy = await waitFor((event) => event.ingest?.id === imported.assetId && event.apiProxyReadyMs !== undefined);
         const done = await waitFor((event) => event.ingest?.id === imported.assetId && event.ingest.step === null);
-        imported.proxyReadyMs = proxy.ms - imported.startedMs;
+        imported.proxyReadyMs = proxy.apiProxyReadyMs - imported.startedMs;
         imported.backgroundDoneMs = done.ms - imported.startedMs;
         if (done.ingest.error) throw new Error(done.ingest.error);
       }

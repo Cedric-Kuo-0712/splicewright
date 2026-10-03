@@ -131,7 +131,14 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
   // so the shared core context can use a new asset before unrelated background work finishes.
   let closed = false;
   const scheduler = new BackgroundIngestScheduler(async (id, steps) => {
-    const result = await ingest(dir, { assets: [id], only: steps, log: (line) => { if (!closed) broadcast({ ingest: { id, step: line.split(" ")[0] } }); } });
+    const readySteps: string[] = [];
+    const result = await ingest(dir, { assets: [id], only: steps, log: (line) => {
+      const step = line.split(" ")[0];
+      if (["proxy", "thumbs", "waveform"].includes(step)) readySteps.push(step);
+      else if (!closed) broadcast({ ingest: { id, step } });
+    } });
+    // These existing milestones now mean the cache is published, so a UI refresh can use it.
+    for (const step of readySteps) if (!closed) broadcast({ ingest: { id, step } });
     if (result.errors?.length) throw new Error(result.errors.join("; "));
   }, (id, error) => broadcast({ ingest: { id, step: null, ...(error && { error }) } }));
   const background = (id: string, only?: Step[]) => only ? scheduler.enqueueOnly(id, only) : scheduler.enqueueFull(id);

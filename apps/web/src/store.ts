@@ -380,8 +380,8 @@ export function listen() {
         return { ingesting: next };
       });
       if (error) app.set({ message: { text: `Ingest ${id} failed: ${error}`, error: true } });
-      // Probe results bring durations; the end brings proxies.
-      if (!step || step === "probe") refresh();
+      // Editing milestones are sent after cache publication; analysis may still be queued.
+      if (!step || ["probe", "proxy", "thumbs", "waveform"].includes(step)) refresh();
       return;
     }
     if (m.revision !== app.get().project?.revision) refresh();

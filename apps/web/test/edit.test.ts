@@ -78,3 +78,23 @@ it("key menu presets set the ease of every key on that frame in one setProps", a
   expect(patch.scale[0].ease).toEqual([0.42, 0, 0.58, 1]);
   vi.unstubAllGlobals();
 });
+
+it("track settings select an explicit primary or keep the track fixed", async () => {
+  const { trackMenu, store, posted } = await setup({});
+  const p = { ...createProject(meta), tracks: [
+    { id: "t_primary", name: "主影片", kind: "video", magnetic: true, items: [] },
+    { id: "t_alt", name: "另一影片", kind: "video", magnetic: true, items: [] },
+    { id: "t_music", name: "音樂", kind: "audio", magnetic: true, items: [] },
+  ] } as any;
+  store.app.set({ project: p });
+  const settings = trackMenu(p, p.tracks[2]) as any[];
+  expect(settings.map((entry) => entry.label)).toContain("同步主軌：主影片");
+  expect(settings.map((entry) => entry.label)).toContain("固定時間（不跟隨）");
+  await settings.find((entry) => entry.label === "同步主軌：主影片").run();
+  expect(posted.at(-1)).toMatchObject({ op: "setTrack", args: { trackId: "t_music", patch: { syncTo: "t_primary" } } });
+  await settings.find((entry) => entry.label === "固定時間（不跟隨）").run();
+  expect(posted.at(-1)).toMatchObject({ op: "setTrack", args: { trackId: "t_music", patch: { syncTo: null } } });
+  const locked = trackMenu(p, { ...p.tracks[2], locked: true }) as any[];
+  expect(locked.find((entry) => entry.label === "同步主軌：主影片").disabled).toBe(true);
+  vi.unstubAllGlobals();
+});

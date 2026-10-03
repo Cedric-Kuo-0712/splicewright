@@ -10,9 +10,9 @@ Write down the target item or cut, the intended change, and its exit condition. 
 
 Identify direct targets by item IDs at the revision you read, not only their clock times. Separate direct content edits from permitted secondary timing changes: shortening 20–30 seconds may legitimately shift later items earlier, but does not authorize changing their source ranges, order, effects, or duration. State the permitted downstream movement and fixed music/section anchors before editing.
 
-Ripple behavior is track-local. A ripple trim or speed change can move later items on that same track; attached overlays and anchored captions follow their video anchor. Independent music or sound items on other tracks do not automatically follow. After any timing change, read the affected range on every track that matters and check music, captions, and section markers.
+Ripple behavior is track-local by default. Optional track `syncTo` links let free downstream items follow an unsynced magnetic video primary track; inspect those links in the summary before a timing edit. Attached overlays and anchored captions still follow their video anchor. Unlinked music and sound items do not automatically follow. A linked free item spanning a splice boundary is ambiguous and refuses the edit; never silently split or unlink it. After timing changes, inspect every relevant track, music, captions, and section markers.
 
-The following is a coordination choice for the edit plan, not an enforced API policy:
+Choose a timing policy in the edit plan; track sync enforces configured downstream movement, but does not enforce an entire creative edit-scope contract:
 
 - **Preserve later timing:** request no ripple for a local trim when later items should stay at their timeline frames. Check for gaps or overlaps that result.
 - **Ripple later items:** use ripple when the downstream items on that track should close or follow the change. Review the moved items and decide explicitly whether independent music or other tracks should move too.
@@ -20,6 +20,8 @@ The following is a coordination choice for the edit plan, not an enforced API po
 Do not assume one policy for the whole project. State which anchors must stay fixed before applying a change that can shift later items.
 
 ## Apply and review one round
+
+Use `preview_edit` with proposed operations and the current `baseRevision` to inspect direct and secondary movement without writing. Submit the approved round with that same revision. If anything changed since preview, re-read and re-plan; preview does not reserve the timeline.
 
 After agreement on a substantial change, submit one coherent atomic round with `apply_edit_review`; it records one revision/undo step and before/after snapshots. Use `splicewright_batch` for an ordinary atomic edit where a review record is not needed. Pass the revision you read. If it is stale, re-read and re-plan. Do not silently unlock a track, overwrite a human edit, or undo a newer human revision.
 

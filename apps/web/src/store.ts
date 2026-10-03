@@ -273,7 +273,41 @@ export async function revertEditReview() {
 
 const fail = (text: string) => app.set({ message: { text, error: true } });
 
+const TIMING_OPS = new Set(["move", "trim", "slip", "delete", "cutRanges", "closeGap", "insertItem", "setSpeed", "attach", "fitToBeats"]);
+let projectSession = 0;
+
+function previewOperations(name: string, args: unknown) {
+  const operations = name === "batch" && args && typeof args === "object" && Array.isArray((args as { ops?: unknown }).ops)
+    ? (args as { ops: unknown[] }).ops
+    : [{ op: name, args }];
+  const hasTiming = (operations: unknown[]): boolean => operations.some((operation) => {
+    if (!operation || typeof operation !== "object") return false;
+    const opName = (operation as { op?: unknown }).op;
+    const args = (operation as { args?: unknown }).args;
+    if (opName === "batch" && args && typeof args === "object" && Array.isArray((args as { ops?: unknown }).ops))
+      return hasTiming((args as { ops: unknown[] }).ops);
+    return typeof opName === "string" && TIMING_OPS.has(opName);
+  });
+  return operations.length > 0 && hasTiming(operations) ? operations : null;
+}
+
+async function confirmSyncMovements(ops: unknown[], baseRevision: number) {
+  const { status, data } = await call("/api/op/preview", { ops, baseRevision });
+  if (status === 409) { await refresh(); fail(`Preview: ${data.error?.message ?? "Project changed; preview again."}`); return false; }
+  if (data.error) { fail(`Preview: ${data.error.message}`); return false; }
+  if (!data.moved?.length || (data.secondaryTotal === 0 || (data.secondaryTotal === undefined && !data.truncated && !data.moved.some((m: { kind: string }) => m.kind === "secondary")))) return true;
+  const project = app.get().project;
+  const lines = data.moved.map((m: { trackId: string; itemId: string; from: number; to: number; kind: "direct" | "secondary" }) => {
+    const track = project?.tracks.find((t) => t.id === m.trackId);
+    return `${m.kind === "direct" ? "直接" : "連動"}${track ? ` ${track.name}` : ` ${m.trackId}`} / ${m.itemId}：${m.from} → ${m.to}`;
+  });
+  const omitted = data.truncated ? "\n…（另有未列出的項目）" : "";
+  const detail = lines.join("\n");
+  return confirm(`此操作會移動 ${data.movedTotal ?? data.moved.length} 個同步項目：\n${detail}${omitted}\n\n確定後套用？`);
+}
+
 export async function newProject(form: { title: string; preset: string; fps: number }) {
+  projectSession++;
   const { data } = await call("/api/init", form);
   if (data.error) return fail(data.error.message);
   location.reload();
@@ -281,6 +315,7 @@ export async function newProject(form: { title: string; preset: string; fps: num
 
 /** The server restarts on the chosen folder; wait until it answers from there, then reload. */
 export async function switchProject(path: string) {
+  projectSession++;
   const { data } = await call("/api/switch", { path });
   if (data.error) return fail(data.error.message);
   for (let k = 0; k < 50; k++) {
@@ -295,6 +330,15 @@ export async function switchProject(path: string) {
 export async function op(name: string, args: unknown) {
   if (app.get().reviewProject) { fail("Snapshot preview is read-only. Switch to Current to edit."); return false; }
   const base = app.get().project?.revision;
+  const session = projectSession;
+  const project = app.get().project;
+  const configuredSync = project?.tracks.some((track) => "syncTo" in track && track.syncTo);
+  const ops = configuredSync ? previewOperations(name, args) : null;
+  if (ops && typeof base === "number" && !(await confirmSyncMovements(ops, base))) return false;
+  if (ops && (session !== projectSession || app.get().reviewProject || app.get().project?.revision !== base)) {
+    fail("Project or revision changed during preview; preview again.");
+    return false;
+  }
   const { status, data } = await call("/api/op", { op: name, args, baseRevision: base });
   if (status === 409) await refresh();
   if (data.error) return app.set({ message: { text: `${name}: ${data.error.message}`, error: true } }), false;

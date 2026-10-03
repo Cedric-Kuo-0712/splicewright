@@ -21,6 +21,8 @@ const trackBase = {
   hidden: z.boolean().optional(),
   locked: z.boolean().optional(),
   magnetic: z.boolean().optional(),
+  /** Follow downstream ripple shifts from an unsynced primary magnetic video track. */
+  syncTo: Id.optional(),
 };
 
 export const Transform = z.object({

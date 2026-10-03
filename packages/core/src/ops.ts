@@ -19,6 +19,19 @@ export type OpResult =
   | { project: Project; changes: { summary: string } }
   | { error: { code: string; message: string } };
 
+export type PreviewOpsResult =
+  | {
+      revision: number;
+      summary: string;
+      summaryTruncated: boolean;
+      moved: Array<{ trackId: string; itemId: string; from: number; to: number; delta: number; kind: "direct" | "secondary" }>;
+      movedTotal: number;
+      secondaryTotal: number;
+      truncated: boolean;
+      limit: 500;
+    }
+  | { error: { code: string; message: string } };
+
 export interface OpDef<S extends z.ZodType = z.ZodType> {
   doc: string;
   args: S;
@@ -26,6 +39,9 @@ export interface OpDef<S extends z.ZodType = z.ZodType> {
 }
 
 const def = <S extends z.ZodType>(doc: string, args: S, run: OpDef<S>["run"]): OpDef<S> => ({ doc, args, run });
+
+// Private execution receipts keep preview targets accurate across nested batches.
+const previewInsertTracks = new WeakMap<Ctx, Set<string>>();
 
 // Explicitly typed so TypeScript narrows after `if (...) fail(...)`.
 const fail: (code: string, message: string) => never = (code, message) => {
@@ -66,10 +82,10 @@ const ITEM_PROPS: Record<TrackKind, string[]> = {
 };
 
 const TRACK_PROPS: Record<TrackKind, string[]> = {
-  video: ["name", "muted", "hidden", "locked", "magnetic"],
-  audio: ["name", "muted", "hidden", "locked", "magnetic", "volume"],
-  caption: ["name", "muted", "hidden", "locked", "magnetic", "style", "textStyle", "highlight"],
-  overlay: ["name", "muted", "hidden", "locked", "magnetic"],
+  video: ["name", "muted", "hidden", "locked", "magnetic", "syncTo"],
+  audio: ["name", "muted", "hidden", "locked", "magnetic", "syncTo", "volume"],
+  caption: ["name", "muted", "hidden", "locked", "magnetic", "syncTo", "style", "textStyle", "highlight"],
+  overlay: ["name", "muted", "hidden", "locked", "magnetic", "syncTo"],
 };
 
 // ---------- helpers ----------
@@ -132,9 +148,26 @@ function newId(p: Project, prefix: string): string {
   return id;
 }
 
-/** Ripple: shift every item on `t` starting at or after `from`. */
-function shift(t: Track, from: number, delta: number) {
+/**
+ * Track-level downstream sync: a clip moved out of/into a primary emits its usual ripple splice.
+ * This is not per-clip audio attachment; source-relative keys and beats remain intrinsic to items.
+ */
+function shift(p: Project, t: Track, from: number, delta: number) {
+  if (delta === 0) return;
+  const dependents = t.kind === "video" && t.magnetic && !t.syncTo
+    ? p.tracks.filter((candidate) => candidate.syncTo === t.id)
+    : [];
+  for (const dependent of dependents) {
+    const moving = dependent.items.filter((item) => !anchorOf(item) && item.start >= from);
+    const straddling = dependent.items.find((item) => !anchorOf(item) && item.start < from && end(item) > from);
+    if (straddling)
+      fail("conflict", `cannot ripple ${t.id} at ${from}: ${straddling.id} on synced track ${dependent.id} straddles the edit; split it or unlink the track first`);
+    if (dependent.locked && moving.length)
+      fail("conflict", `cannot ripple ${t.id} at ${from}: locked synced track ${dependent.id} has item ${moving[0].id} that would move; unlock or unlink it first`);
+  }
   for (const i of t.items) if (i.start >= from) i.start += delta;
+  for (const dependent of dependents) for (const item of dependent.items)
+    if (!anchorOf(item) && item.start >= from) item.start += delta;
 }
 
 /** After items `ids` are gone: drop captions anchored to them, and detach overlays in place (those are hand-authored). */
@@ -346,7 +379,8 @@ export const ops: Record<string, OpDef<any>> = {
         : (p.tracks.find((t) => t.kind === kind && ((a.ripple ?? t.magnetic) || fits(t, a.at, item.duration))) ??
           addTrack(p, kind));
       if (t.kind !== kind) fail("invalid", `${t.id} is a ${t.kind} track; this item needs ${kind}`);
-      if (a.ripple ?? t.magnetic) shift(t, a.at, item.duration);
+      previewInsertTracks.get(ctx)?.add(t.id);
+      if (a.ripple ?? t.magnetic) shift(p, t, a.at, item.duration);
       (t.items as Item[]).push(item);
       return `inserted ${item.id} on ${t.id} at ${a.at} (${item.duration}f)`;
     },
@@ -418,14 +452,14 @@ export const ops: Record<string, OpDef<any>> = {
           item.sourceIn -= delta * secPerFrame(p, item as VideoItem);
           if (item.sourceIn < 0) fail("invalid", `reverse trim moves ${item.id} before source time 0`);
         }
-        if (ripple) shift(t, oldEnd, delta);
+        if (ripple) shift(p, t, oldEnd, delta);
       } else {
         // The right edge stays put (or, with ripple, the left edge stays and later items follow).
         const delta = a.to - item.start;
         item.duration -= delta;
         if ("sourceIn" in item && !(t.kind === "video" && (item as VideoItem).reverse)) item.sourceIn += delta * secPerFrame(p, item as VideoItem);
         if (t.kind === "overlay") advanceOverlayKeys(item as OverlayItem, delta / p.meta.fps);
-        if (ripple) shift(t, oldEnd, -delta);
+        if (ripple) shift(p, t, oldEnd, -delta);
         else {
           item.start = a.to;
         }
@@ -442,6 +476,8 @@ export const ops: Record<string, OpDef<any>> = {
       const { track: src, item } = locate(p, a.itemId);
       const dst = a.trackId ? findTrack(p, a.trackId) : src;
       if (dst.kind !== src.kind) fail("invalid", `cannot move a ${src.kind} item to ${dst.kind} track ${dst.id}`);
+      if (src === dst && !anchorOf(item) && a.to === item.start)
+        return `moved ${item.id} to ${dst.id} at ${a.to}`;
       src.items.splice(src.items.indexOf(item as never), 1);
       (dst.items as Item[]).push(item);
       const anchor = anchorOf(item);
@@ -452,8 +488,8 @@ export const ops: Record<string, OpDef<any>> = {
         return `re-anchored ${item.id} on ${dst.id} → ${spanText(p, item)}`;
       }
       // With ripple, `to` is read after the source gap has closed.
-      if (a.ripple ?? src.magnetic) shift(src, end(item), -item.duration);
-      if (a.ripple ?? dst.magnetic) shift(dst, a.to, item.duration);
+      if (a.ripple ?? src.magnetic) shift(p, src, end(item), -item.duration);
+      if (a.ripple ?? dst.magnetic) shift(p, dst, a.to, item.duration);
       item.start = a.to;
       return `moved ${item.id} to ${dst.id} at ${a.to}`;
     },
@@ -468,7 +504,7 @@ export const ops: Record<string, OpDef<any>> = {
       const targets = ids.map((id) => locate(p, id)).sort((x, y) => y.item.start - x.item.start);
       for (const { track: t, item } of targets) {
         t.items.splice(t.items.indexOf(item as never), 1);
-        if (a.ripple ?? t.magnetic) shift(t, end(item), -item.duration);
+        if (a.ripple ?? t.magnetic) shift(p, t, end(item), -item.duration);
       }
       return `deleted ${ids.join(", ")}` + dropAnchored(p, ids);
     },
@@ -521,7 +557,7 @@ export const ops: Record<string, OpDef<any>> = {
       const gap = gapAt(t, a.at);
       if (!gap) fail("invalid", `frame ${a.at} on ${t.id} is not in a gap with items after it`);
       const [from, to] = gap;
-      for (const i of t.items) if (!anchorOf(i) && i.start >= to) i.start -= to - from;
+      shift(p, t, to, from - to);
       return `closed gap [${from}, ${to}) on ${t.id} (${to - from}f)`;
     },
   ),
@@ -592,7 +628,7 @@ export const ops: Record<string, OpDef<any>> = {
       v.duration = Math.max(1, Math.round((v.duration * (v.speed ?? 1)) / a.speed));
       if (a.speed === 1) delete v.speed;
       else v.speed = a.speed;
-      if (a.ripple ?? t.magnetic) shift(t, oldEnd, end(v) - oldEnd);
+      if (a.ripple ?? t.magnetic) shift(p, t, oldEnd, end(v) - oldEnd);
       return `${item.id} at ${a.speed}× → ${v.duration}f`;
     },
   ),
@@ -937,7 +973,7 @@ export const ops: Record<string, OpDef<any>> = {
         const delta = beats[j] - oldEnd;
         if (delta) {
           item.duration += delta;
-          shift(t, oldEnd, delta);
+          shift(p, t, oldEnd, delta);
           changed.push(item.id);
         }
         k = j;
@@ -1016,6 +1052,54 @@ export function apply(project: Project, name: string, args: unknown, ctx: Ctx = 
     if (e instanceof OpError) return { error: { code: e.code, message: e.message } };
     throw e;
   }
+}
+
+/** Dry-run an atomic operation batch and report timeline starts that would move. */
+export function previewOps(project: Project, operations: Array<{ op: string; args: unknown }>, ctx: Ctx = {}): PreviewOpsResult {
+  const directTracks = new Set<string>();
+  const previewContext = { ...ctx };
+  previewInsertTracks.set(previewContext, directTracks);
+  const result = apply(project, "batch", { ops: operations }, previewContext);
+  if ("error" in result) return result;
+
+  const directItems = new Set<string>();
+  const collectTargets = (ops: Array<{ op: string; args: unknown }>) => {
+    for (const { op, args } of ops) {
+      if (!args || typeof args !== "object") continue;
+      const a = args as Record<string, unknown>;
+      if (op === "batch" && Array.isArray(a.ops)) {
+        collectTargets(a.ops as Array<{ op: string; args: unknown }>);
+        continue;
+      }
+      if (typeof a.trackId === "string") directTracks.add(a.trackId);
+      if (typeof a.itemId === "string") directItems.add(a.itemId);
+      if (Array.isArray(a.itemIds)) for (const id of a.itemIds) if (typeof id === "string") directItems.add(id);
+    }
+  };
+  collectTargets(operations);
+  const oldItems = new Map(project.tracks.flatMap((track) => track.items.map((item) => [item.id, { track, item }] as const)));
+  for (const id of directItems) {
+    const before = oldItems.get(id);
+    if (before) directTracks.add(before.track.id);
+  }
+  const moved: NonNullable<Extract<PreviewOpsResult, { moved: unknown }>["moved"]> = [];
+  for (const track of result.project.tracks) for (const item of track.items) {
+    const before = oldItems.get(item.id);
+    if (!before || before.item.start === item.start) continue;
+    const direct = directItems.has(item.id) || directTracks.has(before.track.id) || directTracks.has(track.id);
+    moved.push({ trackId: track.id, itemId: item.id, from: before.item.start, to: item.start, delta: item.start - before.item.start, kind: direct ? "direct" : "secondary" });
+  }
+  moved.sort((a, b) => a.from - b.from || a.trackId.localeCompare(b.trackId) || a.itemId.localeCompare(b.itemId));
+  return {
+    revision: project.revision,
+    summary: result.changes.summary.slice(0, 2000),
+    summaryTruncated: result.changes.summary.length > 2000,
+    moved: moved.slice(0, 500),
+    movedTotal: moved.length,
+    secondaryTotal: moved.filter((item) => item.kind === "secondary").length,
+    truncated: moved.length > 500,
+    limit: 500,
+  };
 }
 
 export function createProject(meta: Project["meta"]): Project {

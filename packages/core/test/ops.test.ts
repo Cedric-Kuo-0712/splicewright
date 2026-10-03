@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { animate, animateOverlay, apply, bezier, Keyframes, badFont, builtinTheme, captionWords, createProject, itemSpan, sourceAt, textCss, THEME_IDS, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
+import { animate, animateOverlay, apply, bezier, Keyframes, badFont, builtinTheme, captionWords, createProject, getRange, getSummary, itemSpan, previewOps, sourceAt, textCss, THEME_IDS, validate, valueAt, type Ctx, type OpResult, type Project } from "../src/index.ts";
 
 const ctx: Ctx = {
   assetDurations: { a_clip: 10, a_song: 60 },
@@ -25,6 +25,21 @@ function fixture(): Project {
 
 const items = (p: Project, trackId: string) => p.tracks.find((t) => t.id === trackId)!.items;
 const item = (p: Project, id: string) => p.tracks.flatMap((t) => t.items as { id: string }[]).find((i) => i.id === id) as any;
+
+it("bounds movement previews while reporting all affected linked items", () => {
+  let p = fixture();
+  p = ok(apply(p, "importAsset", { path: "song.mp3" }, ctx));
+  const track = p.tracks.find((t) => t.id === "t_2")!;
+  if (track.kind !== "audio") throw new Error("fixture audio track missing");
+  track.syncTo = "t_1";
+  track.items = Array.from({ length: 500 }, (_, i) => ({ id: `i_audio_${i}`, assetId: "a_song", start: 150 + i * 2, duration: 1, sourceIn: 0 }));
+  const preview = previewOps(p, [{ op: "trim", args: { itemId: "i_1", edge: "end", to: 100 } }], ctx);
+  if ("error" in preview) throw new Error(preview.error.message);
+  expect(preview.movedTotal).toBe(501);
+  expect(preview.secondaryTotal).toBe(500);
+  expect(preview.truncated).toBe(true);
+  expect(preview.moved).toHaveLength(500);
+});
 
 describe("ops", () => {
   it("bumps revision, never mutates input, and leaves a valid project", () => {
@@ -145,6 +160,24 @@ describe("ops", () => {
     expect(err(apply(p, "closeGap", { trackId: "t_2", at: 200 }, ctx))).toBe("invalid"); // nothing after
     const locked = ok(apply(p, "setTrack", { trackId: "t_2", patch: { locked: true } }, ctx));
     expect(err(apply(locked, "closeGap", { trackId: "t_2", at: 60 }, ctx))).toBe("invalid");
+  });
+
+  it("closeGap shifts items on tracks synced to the magnetic primary", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_1", assetId: "a_clip", at: 180, duration: 30 }, ctx));
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 210, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+
+    const result = apply(p, "closeGap", { trackId: "t_1", at: 160 }, ctx);
+    expect(result).toMatchObject({ changes: { summary: "closed gap [150, 180) on t_1 (30f)" } });
+    const closed = ok(result);
+    expect(item(closed, "i_3").start).toBe(150);
+    expect(item(closed, "i_4").start).toBe(180);
+
+    const locked = ok(apply(p, "setTrack", { trackId: "t_2", patch: { locked: true } }, ctx));
+    const before = JSON.stringify(locked);
+    expect(apply(locked, "closeGap", { trackId: "t_1", at: 160 }, ctx)).toMatchObject({ error: { code: "conflict" } });
+    expect(JSON.stringify(locked)).toBe(before);
   });
 
   it("setProps and setTrack enforce whitelists; null unsets", () => {
@@ -647,6 +680,158 @@ describe("ops", () => {
     expect(err(apply(withLut, "setProps", { itemId: "i_1", patch: { grade: { lut: { assetId: "missing" } } } }, lutCtx))).toBe("invalid");
     expect(err(apply(p, "setProps", { itemId: "i_1", patch: { key: { kind: "luma", low: 0.5, high: 0.5 } } }, ctx))).toBe("invalid");
     expect(err(apply(p, "setProps", { itemId: "i_1", patch: { grade: { curves: { r: [[0,0],[0,1],[1,1]] } } } }, ctx))).toBe("invalid");
+  });
+});
+
+describe("opt-in track ripple sync", () => {
+  it("classifies auto-selected insertItem ripple as direct and synced-track ripple as secondary", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 120, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+
+    const preview = previewOps(p, [{ op: "insertItem", args: { assetId: "a_clip", at: 90, duration: 10 } }], ctx);
+    if ("error" in preview) throw new Error(preview.error.message);
+    expect(preview.moved).toEqual(expect.arrayContaining([
+      expect.objectContaining({ trackId: "t_1", itemId: "i_2", from: 90, to: 100, kind: "direct" }),
+      expect.objectContaining({ trackId: "t_2", itemId: "i_3", from: 120, to: 130, kind: "secondary" }),
+    ]));
+  });
+
+  it("retains the auto-selected direct track when a batch removes the inserted item", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 120, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+    const preview = previewOps(p, [
+      { op: "insertItem", args: { assetId: "a_clip", at: 90, duration: 10 } },
+      { op: "delete", args: { itemIds: ["i_4"], ripple: false } },
+    ], ctx);
+    if ("error" in preview) throw new Error(preview.error.message);
+    expect(preview.moved).toEqual(expect.arrayContaining([
+      expect.objectContaining({ trackId: "t_1", itemId: "i_2", to: 100, kind: "direct" }),
+      expect.objectContaining({ trackId: "t_2", itemId: "i_3", to: 130, kind: "secondary" }),
+    ]));
+  });
+
+  it("keeps defaults independent; shifts dependent free items, beats, and source-time keys once", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 120, duration: 120 }, ctx));
+    const audio = item(p, "i_3");
+    audio.beats = [0, 1];
+    audio.downbeats = [0];
+    audio.keyframes = { volume: [{ t: 1, v: 0.5 }] };
+    const independent = ok(apply(p, "delete", { itemIds: ["i_1"] }, ctx));
+    expect(item(independent, "i_3").start).toBe(120);
+
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+    expect(getSummary(p).tracks.find((track) => track.id === "t_2")).toMatchObject({ syncTo: "t_1" });
+    expect(getRange(p, 120, 130).find((entry) => entry.track === "t_2")).toMatchObject({ trackSyncTo: "t_1" });
+    const preview = previewOps(p, [{ op: "delete", args: { itemIds: ["i_1"] } }], ctx);
+    expect(preview).toMatchObject({ revision: p.revision, movedTotal: 2, truncated: false });
+    if ("error" in preview) throw new Error(preview.error.message);
+    expect(preview.moved).toEqual(expect.arrayContaining([
+      expect.objectContaining({ trackId: "t_1", itemId: "i_2", from: 90, to: 0, kind: "direct" }),
+      expect.objectContaining({ trackId: "t_2", itemId: "i_3", from: 120, to: 30, kind: "secondary" }),
+    ]));
+    const edited = ok(apply(p, "delete", { itemIds: ["i_1"] }, ctx));
+    expect(item(edited, "i_3")).toMatchObject({ start: 30, beats: [0, 1], downbeats: [0], keyframes: { volume: [{ t: 1, v: 0.5 }] } });
+    expect(validate(edited, p, ctx)).toEqual([]);
+  });
+
+  it("does not shift anchored dependents twice and keeps ripple:false independent", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_3", text: "linked", at: 100, duration: 20 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_3", patch: { syncTo: "t_1" } }, ctx));
+    p = ok(apply(p, "attach", { itemId: "c_1", to: "i_2" }, ctx));
+    p = ok(apply(p, "delete", { itemIds: ["i_1"] }, ctx));
+    expect(item(p, "c_1").start).toBe(10); // derived from i_2's source time, not shifted again
+
+    let q = fixture();
+    q = ok(apply(q, "insertItem", { trackId: "t_2", assetId: "a_song", at: 120, duration: 30 }, ctx));
+    q = ok(apply(q, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+    q = ok(apply(q, "delete", { itemIds: ["i_1"], ripple: false }, ctx));
+    expect(item(q, "i_2").start).toBe(90);
+    expect(item(q, "i_3").start).toBe(120);
+  });
+
+  it("processes multiple splice events in one batch and reports one revision", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 180, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+    const ops = [
+      { op: "delete", args: { itemIds: ["i_1"] } },
+      { op: "insertItem", args: { trackId: "t_1", assetId: "a_clip", at: 60, duration: 10 } },
+    ];
+    const preview = previewOps(p, ops, ctx);
+    expect(preview).toMatchObject({ revision: p.revision, movedTotal: 2 });
+    if ("error" in preview) throw new Error(preview.error.message);
+    expect(preview.moved).toEqual(expect.arrayContaining([
+      expect.objectContaining({ itemId: "i_2", from: 90, to: 0, kind: "direct" }),
+      expect.objectContaining({ itemId: "i_3", from: 180, to: 100, delta: -80, kind: "secondary" }),
+    ]));
+    const result = ok(apply(p, "batch", { ops }, ctx));
+    expect(result.revision).toBe(p.revision + 1);
+    expect(item(result, "i_3").start).toBe(100);
+  });
+
+  it("propagates fitToBeats ripple shifts to dependent tracks", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 0, duration: 300 }, ctx));
+    item(p, "i_3").beats = [1, 2, 3, 4];
+    p = ok(apply(p, "addTrack", { kind: "audio" }, ctx));
+    const dependent = p.tracks.find((t) => t.kind === "audio" && t.id !== "t_2")!;
+    p = ok(apply(p, "insertItem", { trackId: dependent.id, assetId: "a_song", at: 120, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: dependent.id, patch: { syncTo: "t_1" } }, ctx));
+    p = ok(apply(p, "fitToBeats", { trackId: "t_1", audioItemId: "i_3" }, ctx));
+    expect(item(p, "i_1").duration).toBe(30);
+    expect(item(p, "i_2").start).toBe(30);
+    expect(item(p, "i_4").start).toBe(60);
+  });
+
+  it("refuses straddlers, locked moving items, and collisions atomically", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 80, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+    const before = JSON.stringify(p);
+    const straddle = apply(p, "delete", { itemIds: ["i_1"] }, ctx);
+    expect(straddle).toMatchObject({ error: { code: "conflict" } });
+    if ("error" in straddle) expect(straddle.error.message).toContain("straddles");
+    expect(JSON.stringify(p)).toBe(before);
+
+    p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 120, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1", locked: true } }, ctx));
+    expect(apply(p, "delete", { itemIds: ["i_1"] }, ctx)).toMatchObject({ error: { code: "conflict" } });
+
+    p = fixture();
+    p = ok(apply(p, "addTrack", { kind: "video", magnetic: true }, ctx));
+    const linkedVideo = p.tracks.find((t) => t.kind === "video" && t.id !== "t_1")!.id;
+    p = ok(apply(p, "insertItem", { trackId: linkedVideo, assetId: "a_clip", at: 0, duration: 30 }, ctx));
+    p = ok(apply(p, "insertItem", { trackId: linkedVideo, assetId: "a_clip", at: 100, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: linkedVideo, patch: { syncTo: "t_1" } }, ctx));
+    expect(apply(p, "delete", { itemIds: ["i_1"] }, ctx)).toMatchObject({ error: { code: "invalid" } });
+  });
+
+  it("allows no-op duration edits when a synced item straddles the pivot", () => {
+    let p = fixture();
+    p = ok(apply(p, "insertItem", { trackId: "t_2", assetId: "a_song", at: 80, duration: 30 }, ctx));
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+    p = ok(apply(p, "setSpeed", { itemId: "i_1", speed: 1 }, ctx));
+    p = ok(apply(p, "move", { itemId: "i_1", to: 0 }, ctx));
+    expect(item(p, "i_3").start).toBe(80);
+  });
+
+  it("validates direct primary links, supports atomic detach, and refuses live target changes", () => {
+    let p = fixture();
+    p = ok(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_1" } }, ctx));
+    expect(apply(p, "removeTrack", { trackId: "t_1" }, ctx)).toMatchObject({ error: { code: "invalid" } });
+    expect(apply(p, "setTrack", { trackId: "t_1", patch: { magnetic: false } }, ctx)).toMatchObject({ error: { code: "invalid" } });
+    expect(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_2" } }, ctx)).toMatchObject({ error: { code: "invalid" } });
+    expect(apply(p, "setTrack", { trackId: "t_2", patch: { syncTo: "t_3" } }, ctx)).toMatchObject({ error: { code: "invalid" } });
+    const detached = ok(apply(p, "batch", { ops: [
+      { op: "setTrack", args: { trackId: "t_2", patch: { syncTo: null } } },
+      { op: "removeTrack", args: { trackId: "t_1" } },
+    ] }, ctx));
+    expect(detached.tracks.find((t) => t.id === "t_2")?.syncTo).toBeUndefined();
   });
 });
 

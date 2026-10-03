@@ -115,6 +115,17 @@ export function validate(project: unknown, prev?: Project, ctx: Ctx = {}): strin
     }
   }
 
+  for (const dependent of p.tracks) {
+    if (!dependent.syncTo) continue;
+    const target = p.tracks.find((track) => track.id === dependent.syncTo);
+    if (!target) errs.push(`${dependent.id}: syncTo target ${dependent.syncTo} does not exist; detach or retarget this track`);
+    else if (target.id === dependent.id) errs.push(`${dependent.id}: syncTo cannot target the same track`);
+    else if (target.kind !== "video" || !target.magnetic)
+      errs.push(`${dependent.id}: syncTo target ${target.id} must be a magnetic video track`);
+    else if (target.syncTo)
+      errs.push(`${dependent.id}: syncTo target ${target.id} is itself synced; syncTo must target a primary track`);
+  }
+
   if (prev) {
     for (const before of prev.tracks) {
       if (!before.locked) continue;

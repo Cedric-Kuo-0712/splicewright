@@ -7,11 +7,12 @@ import { basename, dirname, extname, join, relative, resolve, sep } from "node:p
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { handleTtsRequest } from "./tts-api.ts";
+import { BackgroundIngestScheduler } from "./background-ingest.ts";
 import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
-import { addRecent, applyEditReview, applyLutPreset, fingerprint, getEditReview, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, revertEditReview, run, setEditReviewStatus, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
+import { addRecent, applyEditReview, applyLutPreset, cacheDir, fingerprint, getEditReview, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, revertEditReview, run, setEditReviewStatus, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
 import { ASPECTS, captionWords, FPS_CHOICES, previewOps, sourceAt, type Project } from "@splicewright/core";
-import { scanMaterials, relinkMaterial, prepareMaterials, audioFxPath, displayable, ensureAudioFx, ffmpeg, ingest, limiter, loudness, reverseAudioPath, reverseProjectAudio, thumb, waveform, type Step } from "@splicewright/ingest";
+import { scanMaterials, relinkMaterial, prepareMaterials, audioFxPath, displayable, ensureAudioFx, ffmpeg, ingest, limiter, loudness, probe, reverseAudioPath, reverseProjectAudio, thumb, waveform, type Step } from "@splicewright/ingest";
 import { cancelRender, renderStatus, startRender, duckRanges, fontVersionsOf, lutsOf, lutVersion, reverseProxiesOf } from "@splicewright/render/node";
 
 // Spec §7.3. `splicewright open` runs this: a Vite dev server for the UI (open question 5, the simple
@@ -126,19 +127,21 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     }
     return { sources, reverseSources, processing, errors };
   };
-  // One ingest at a time: concurrent runs would each rewrite assets.json from their own snapshot.
-  let queue = Promise.resolve();
-  const background = (id: string, only?: Step[]) =>
-    (queue = queue.then(async () => {
-      let error: string | undefined;
-      try {
-        const result = await ingest(dir, { assets: [id], ...(only && { only }), log: (line) => broadcast({ ingest: { id, step: line.split(" ")[0] } }) });
-        error = result.errors?.join("; ");
-      } catch (e) {
-        error = (e as Error).message;
-      }
-      broadcast({ ingest: { id, step: null, ...(error && { error }) } });
-    }));
+  // Expensive ingest stays serialized. Quick metadata saves merge synchronously in the route,
+  // so the shared core context can use a new asset before unrelated background work finishes.
+  let closed = false;
+  const scheduler = new BackgroundIngestScheduler(async (id, steps) => {
+    const readySteps: string[] = [];
+    const result = await ingest(dir, { assets: [id], only: steps, log: (line) => {
+      const step = line.split(" ")[0];
+      if (["proxy", "thumbs", "waveform"].includes(step)) readySteps.push(step);
+      else if (!closed) broadcast({ ingest: { id, step } });
+    } });
+    // These existing milestones now mean the cache is published, so a UI refresh can use it.
+    for (const step of readySteps) if (!closed) broadcast({ ingest: { id, step } });
+    if (result.errors?.length) throw new Error(result.errors.join("; "));
+  }, (id, error) => broadcast({ ingest: { id, step: null, ...(error && { error }) } }));
+  const background = (id: string, only?: Step[]) => only ? scheduler.enqueueOnly(id, only) : scheduler.enqueueFull(id);
   let timer: NodeJS.Timeout | undefined;
   // project.json is replaced by rename, so watch the folder, not the file.
   const watcher = watch(dir, (_, name) => {
@@ -179,7 +182,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
     load: (id) => (id === "\0swr-config" ? (existsSync(config) ? `export { default } from ${JSON.stringify(config)};` : "export default {};") : undefined),
     configureServer(server) {
       // A switch starts a new server on another folder; this one's watcher must not outlive it.
-      server.httpServer?.on("close", () => (clearTimeout(timer), watcher.close()));
+      server.httpServer?.on("close", () => { closed = true; scheduler.close(); clearTimeout(timer); watcher.close(); });
       server.middlewares.use(async (req, res, next) => {
         const url = new URL(req.url ?? "/", "http://x");
         try {
@@ -257,9 +260,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
           if (route === "GET /api/materials/scan") return send(res, 200, await scanMaterials(dir));
           if (route === "POST /api/materials/prepare") {
             const b = await body(req);
-            const task = queue.then(() => prepareMaterials(dir, { paths: b.paths, steps: b.steps ?? ["sourceHealth", "thumbs", "waveform", "loudness"] }));
-            queue = task.then(() => {}, () => {});
-            return send(res, 200, await task);
+            return send(res, 200, await scheduler.runExclusive(() => prepareMaterials(dir, { paths: b.paths, steps: b.steps ?? ["sourceHealth", "thumbs", "waveform", "loudness"] })));
           }
           if (route === "POST /api/op/preview") {
             const b = await body(req);
@@ -331,10 +332,25 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             // "already imported as <id>" when another file in the project has the same content.
             const asset = Object.values(r.project.assets).find((a) => a.path === path) ?? r.project.assets[/as (\S+)/.exec(r.changes.summary)![1]];
             if (asset.path !== path) unlinkSync(join(dir, path));
-            await queue;
             if (asset.kind !== "lut") {
-              await ingest(dir, { assets: [asset.id], only: [] }); // probe now, so the answer carries the duration
-              if (asset.kind !== "font") background(asset.id);
+              try {
+                const before = fingerprint(join(dir, asset.path));
+                const value = await limited(() => probe(join(dir, asset.path), asset.kind));
+                const fp = fingerprint(join(dir, asset.path));
+                if (!closed && fp && fp === before && load(dir).assets[asset.id]?.path === asset.path) {
+                  // No await between read and write: same-process cache saves cannot interleave.
+                  // Retain completed steps only when they still describe this exact source.
+                  const disk = readAssets(dir);
+                  const cached = disk[asset.id];
+                  disk[asset.id] = { ...(cached?.path === asset.path && cached.fingerprint === fp ? cached : {}),
+                    ...value, path: asset.path, fingerprint: fp };
+                  mkdirSync(cacheDir(dir), { recursive: true });
+                  writeAtomic(cacheDir(dir, "assets.json"), disk);
+                }
+              } catch { /* The serialized ingest reports probe failures through the existing event. */ }
+              if (!closed && asset.kind !== "font") {
+                background(asset.id);
+              }
             }
             return send(res, 200, { assetId: asset.id, summary: r.changes.summary, ...snapshot() });
           }

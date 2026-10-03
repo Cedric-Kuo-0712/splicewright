@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { AudioMeasurement, FinalMixMeasurement, SourceHealth } from "@splicewright/core/node";
+import { withFfmpegResourceLimits } from "./resource.ts";
 
 const AUDIO_FILTER = "astats=metadata=1:reset=1,ametadata=print,ebur128=metadata=1:peak=true,ametadata=print";
 
@@ -77,12 +78,12 @@ async function ffprobeHasAudio(file: string): Promise<boolean> {
 
 async function decode(file: string, hasAudio: boolean): Promise<AudioMeasurement | undefined> {
   const capture = audioLog(() => {});
-  const tail = await run("ffmpeg", [
+  const tail = await run("ffmpeg", withFfmpegResourceLimits([
     "-hide_banner", "-loglevel", "info", "-nostats", "-xerror", "-i", file,
     "-map", "0:v?", "-map", "0:a?",
     ...(hasAudio ? ["-filter:a", AUDIO_FILTER] : []),
     "-f", "null", "-",
-  ], capture.take);
+  ]), capture.take);
   if (!hasAudio) return undefined;
   const integrated = /Integrated loudness:\s*I:\s*([^\s]+) LUFS/.exec(tail);
   if (!integrated) throw new Error("ebur128 printed no integrated loudness summary");

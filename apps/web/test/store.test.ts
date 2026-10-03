@@ -7,6 +7,28 @@ const payload = (lutVersions: Record<string, string>) => ({
 });
 const useLook = (grade = { lut: { assetId: "a_lut", strength: 1 } }) => (luts: object) => lookEffects("item", grade as any, undefined, luts as any, false);
 
+it.each(["proxy", "thumbs", "waveform"])("refreshes published %s while background ingest remains active", async (step) => {
+  let source: { onmessage: ((event: { data: string }) => void) | null };
+  vi.stubGlobal("EventSource", class {
+    onmessage = null;
+    constructor() { source = this; }
+  });
+  const requests: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    requests.push(url);
+    if (url === "/api/project") return { status: 200, json: async () => ({ ...payload({}), proxies: ["a_clip"] }) };
+    return { ok: false, status: 404, json: async () => ({}) };
+  }));
+  vi.stubGlobal("location", { hash: "" });
+  const { app, listen } = await import("../src/store.ts");
+  app.set({ project: null, review: null, reviewProject: null, reviewMedia: null, proxies: [], ingesting: {} });
+  listen();
+  source!.onmessage!({ data: JSON.stringify({ ingest: { id: "a_clip", step } }) });
+  await vi.waitFor(() => expect(app.get().proxies).toContain("a_clip"));
+  expect(app.get().ingesting.a_clip).toBe(step);
+  expect(requests.filter((url) => url === "/api/project")).toHaveLength(1);
+});
+
 /** `/api/project` answers with the queued snapshots; `/api/lut` with `tables` (or 404 when absent). */
 function server(snapshots: ReturnType<typeof payload>[], tables: Record<string, unknown> = { a_lut: lut }) {
   const queue = [...snapshots];

@@ -498,6 +498,12 @@ revision for approved writes. UI track menus and confirmation are implemented; l
 and per-clip audio attachment are outside this increment. Automated core/API checks pass;
 interactive browser wiring and feel remain manual validation.
 
+Import performance increment: web metadata probes no longer wait for unrelated background
+ingest; editing preparation precedes queued reverse/analysis phases without dropping steps.
+Ingest FFmpeg codec/filter pools use CPU-aware thread budgets, preserving proxy format and
+quality. API scheduling/cache correctness is automated; latency/resource comparisons are
+recorded separately on fixed inputs and do not establish a universal performance optimum.
+
 ## 13. Roadmap (M7–M11, in build order) and later candidates
 
 Each milestone is a core op and/or schema extension, then render, then UI, then MCP/CLI exposure

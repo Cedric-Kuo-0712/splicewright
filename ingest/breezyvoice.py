@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import hashlib
 import json
 import math
 import os
@@ -14,6 +13,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from setup_breezyvoice import file_identity, sha256_file
 
 SETUP_COMMAND = "splicewright tts setup --engine breezyvoice"
 MAX_TEXT = 300
@@ -145,7 +145,7 @@ def register(root: Path, request: dict) -> dict:
     return profile_view(profile)
 
 
-def status(root: Path) -> dict:
+def status(root: Path, *, verify_model: bool = False) -> dict:
     source = root / "source"
     env_python = root / "env" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     model = root / "model"
@@ -175,11 +175,10 @@ def status(root: Path) -> dict:
                 if name not in missing_models:
                     missing_models.append(name)
                 continue
-            digest = hashlib.sha256()
-            with path.open("rb") as source_file:
-                for block in iter(lambda: source_file.read(1024 * 1024), b""):
-                    digest.update(block)
-            if path.stat().st_size != metadata["size"] or digest.hexdigest() != metadata["sha256"]:
+            # A verified install receipt avoids rereading gigabytes for UI status polling.
+            # Receipts are only a readiness hint: generation always verifies the full hashes.
+            unchanged = installed.get("fileStats", {}).get(name) == file_identity(path)
+            if path.stat().st_size != metadata["size"] or ((verify_model or not unchanged) and sha256_file(path) != metadata["sha256"]):
                 missing_models.append(f"checksum mismatch: {name}")
     except (OSError, ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError):
         missing_models.append("invalid model manifest")
@@ -257,7 +256,7 @@ def _generate(root: Path, request: dict) -> dict:
         with profile_lock(root):
             profile, saved_prompt = select_profile(root, request.get("voiceId"))
             shutil.copyfile(saved_prompt, prompt_audio)
-        state = status(root)
+        state = status(root, verify_model=True)
         if not state["ready"]:
             raise RuntimeError("BreezyVoice is not configured; run setup first")
         source, model = root / "source", root / "model"

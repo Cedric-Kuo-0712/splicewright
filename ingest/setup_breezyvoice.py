@@ -84,6 +84,11 @@ def verify_model_files(directory: Path, manifest: dict) -> None:
             raise RuntimeError(f"model snapshot checksum mismatch: {name}")
 
 
+def file_identity(path: Path) -> list[int]:
+    stat = path.stat()
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+
+
 def install_model_snapshot(root: Path, py: Path, source: Path) -> str:
     model = root / "model"
     staging = root / "model.part"
@@ -114,7 +119,8 @@ def install_model_snapshot(root: Path, py: Path, source: Path) -> str:
             model.replace(backup)
         staging.replace(model)
         published = True
-        write_json(manifest_path, {"revision": revision, "files": pinned["files"]})
+        write_json(manifest_path, {"revision": revision, "files": pinned["files"],
+                                  "fileStats": {name: file_identity(model / name) for name in MODEL_FILES}})
         if backup.exists():
             shutil.rmtree(backup)
         return revision
@@ -195,7 +201,7 @@ def resolve_micromamba(root: Path) -> Path:
                 shutil.copyfileobj(source, out)
         staged_manager.chmod(0o755)
         version = subprocess.run([str(staged_manager), "--version"], capture_output=True, text=True, check=True, timeout=30).stdout.strip()
-        if manager_info.get("binaryVersion") not in version:
+        if manager_info.get("binaryVersion") != version:
             raise RuntimeError(f"micromamba version mismatch: expected {manager_info.get('binaryVersion')}, got {version}")
         staged_manager.replace(manager)
     finally:

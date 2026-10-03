@@ -485,6 +485,8 @@ The Narration panel supports engine selection, explicit installation, and saved 
 Source installation has an optional TTS wizard; BreezyVoice uses CPU LLM/HiFT with MPS flow on
 supported Apple Silicon, CPU on Linux/WSL2. Native Windows BreezyVoice uses WSL2. Setup and
 BreezyVoice MCP generation expose jobs via `tts_job_status`; synthesis does not download models.
+Setup and generation share per-engine exclusion. BreezyVoice model revisions and micromamba
+archives are pinned with SHA-256 checks; generation verifies model hashes before loading.
 Core/API/runtime checks are automated; browser interaction and subjective voice quality remain
 human validation.
 

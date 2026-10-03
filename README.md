@@ -74,6 +74,11 @@ distribution package manager and rerun.
 node scripts/install.mjs
 ```
 
+BreezyVoice model files and the bundled micromamba archive use repository-pinned versions and
+SHA-256 checks. Setup verifies downloads before extraction or publishing; synthesis verifies
+every model file before loading it. Unchanged files use an installation receipt for status
+queries. Setup and generation cannot overlap for the same TTS engine.
+
 Choose `none`, `kokoro`, `breezyvoice`, or both when prompted. It downloads only the selected TTS
 runtime and models. Kokoro's default is US English; select the desired `en-us`, `en-gb`, or `zh`
 languages in the wizard. For automation, make the selection explicit:

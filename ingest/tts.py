@@ -106,13 +106,13 @@ def setup_lock(root: Path):
             try:
                 msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
             except OSError as error:
-                raise RuntimeError("another Kokoro setup is already running") from error
+                raise RuntimeError("another Kokoro setup or generation is already running") from error
         else:
             import fcntl
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as error:
-                raise RuntimeError("another Kokoro setup is already running") from error
+                raise RuntimeError("another Kokoro setup or generation is already running") from error
         try:
             yield
         finally:

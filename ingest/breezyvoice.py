@@ -13,11 +13,13 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from setup_breezyvoice import file_identity, sha256_file
 
 SETUP_COMMAND = "splicewright tts setup --engine breezyvoice"
 MAX_TEXT = 300
 MODEL_FILES = ("cosyvoice.yaml", "configuration.json", "campplus.onnx", "speech_tokenizer_v1.onnx", "spk2info.pt", "llm.pt", "flow.pt", "hift.pt")
 REQUIRED_MODULES = ("torch", "torchaudio", "whisper", "opencc", "hyperpyyaml", "huggingface_hub", "g2pw", "transformers", "onnxruntime")
+ARTIFACTS_PATH = Path(__file__).with_name("breezyvoice-artifacts.json")
 
 
 def default_root() -> Path:
@@ -143,7 +145,7 @@ def register(root: Path, request: dict) -> dict:
     return profile_view(profile)
 
 
-def status(root: Path) -> dict:
+def status(root: Path, *, verify_model: bool = False) -> dict:
     source = root / "source"
     env_python = root / "env" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     model = root / "model"
@@ -159,12 +161,27 @@ def status(root: Path) -> dict:
             raise ValueError(f"invalid backend.json: {error}") from error
     missing_models = [name for name in MODEL_FILES if not (model / name).is_file() or (model / name).is_symlink() or (model / name).stat().st_size == 0]
     manifest = root / "model-manifest.json"
-    if manifest.is_file():
-        try:
-            sizes = json.loads(manifest.read_text(encoding="utf-8"))["files"]
-            missing_models.extend(name for name in MODEL_FILES if not isinstance(sizes.get(name), int) or sizes[name] <= 0 or not (model / name).is_file() or (model / name).stat().st_size != sizes[name])
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            missing_models.append("invalid model manifest")
+    try:
+        pinned = json.loads(ARTIFACTS_PATH.read_text(encoding="utf-8"))["model"]
+        installed = json.loads(manifest.read_text(encoding="utf-8"))
+        expected = pinned["files"]
+        if (set(expected) != set(MODEL_FILES) or installed.get("revision") != pinned["revision"]
+                or installed.get("files") != expected):
+            raise ValueError("installed model manifest does not match pinned artifacts")
+        for name in MODEL_FILES:
+            path = model / name
+            metadata = expected[name]
+            if path.is_symlink() or not path.is_file():
+                if name not in missing_models:
+                    missing_models.append(name)
+                continue
+            # A verified install receipt avoids rereading gigabytes for UI status polling.
+            # Receipts are only a readiness hint: generation always verifies the full hashes.
+            unchanged = installed.get("fileStats", {}).get(name) == file_identity(path)
+            if path.stat().st_size != metadata["size"] or ((verify_model or not unchanged) and sha256_file(path) != metadata["sha256"]):
+                missing_models.append(f"checksum mismatch: {name}")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError):
+        missing_models.append("invalid model manifest")
     missing_source = not source.is_dir() or not (source / "single_inference.py").is_file()
     missing_config = not config_path.is_file()
     missing_dependencies = list(REQUIRED_MODULES)
@@ -239,7 +256,7 @@ def _generate(root: Path, request: dict) -> dict:
         with profile_lock(root):
             profile, saved_prompt = select_profile(root, request.get("voiceId"))
             shutil.copyfile(saved_prompt, prompt_audio)
-        state = status(root)
+        state = status(root, verify_model=True)
         if not state["ready"]:
             raise RuntimeError("BreezyVoice is not configured; run setup first")
         source, model = root / "source", root / "model"

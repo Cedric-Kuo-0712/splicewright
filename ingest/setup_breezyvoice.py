@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ MODEL_FILES = (
     "cosyvoice.yaml", "configuration.json", "campplus.onnx",
     "speech_tokenizer_v1.onnx", "spk2info.pt", "llm.pt", "flow.pt", "hift.pt",
 )
+ARTIFACTS_PATH = Path(__file__).with_name("breezyvoice-artifacts.json")
 DEFAULT_ROOT = Path("~/.splicewright/breezyvoice").expanduser().resolve()
 ROOT = Path(os.environ.get("SPLICEWRIGHT_BREEZYVOICE_HOME", DEFAULT_ROOT)).expanduser().resolve()
 
@@ -45,6 +47,92 @@ def write_json(path: Path, value: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def artifact_manifest() -> dict:
+    manifest = json.loads(ARTIFACTS_PATH.read_text(encoding="utf-8"))
+    files = manifest["model"]["files"]
+    if set(files) != set(MODEL_FILES):
+        raise RuntimeError("BreezyVoice artifact manifest does not cover the expected model files")
+    for name, metadata in files.items():
+        if (not isinstance(metadata.get("size"), int) or metadata["size"] <= 0
+                or not isinstance(metadata.get("sha256"), str)
+                or len(metadata["sha256"]) != 64
+                or any(char not in "0123456789abcdef" for char in metadata["sha256"])):
+            raise RuntimeError(f"invalid BreezyVoice artifact metadata: {name}")
+    return manifest
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def verify_model_files(directory: Path, manifest: dict) -> None:
+    expected = manifest["model"]["files"]
+    if set(expected) != set(MODEL_FILES):
+        raise RuntimeError("BreezyVoice model manifest does not cover all expected files")
+    for name in MODEL_FILES:
+        path = directory / name
+        metadata = expected[name]
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"model snapshot is missing or unsafe: {name}")
+        if path.stat().st_size != metadata["size"] or sha256_file(path) != metadata["sha256"]:
+            raise RuntimeError(f"model snapshot checksum mismatch: {name}")
+
+
+def file_identity(path: Path) -> list[int]:
+    stat = path.stat()
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+
+
+def install_model_snapshot(root: Path, py: Path, source: Path) -> str:
+    model = root / "model"
+    staging = root / "model.part"
+    backup = root / "model.previous"
+    manifest_path = root / "model-manifest.json"
+    pinned = artifact_manifest()["model"]
+    revision = pinned["revision"]
+    if staging.is_symlink():
+        staging.unlink()
+    elif staging.exists():
+        shutil.rmtree(staging)
+    if backup.is_symlink():
+        backup.unlink()
+    elif backup.exists():
+        shutil.rmtree(backup)
+    stage(root, f"downloading pinned model snapshot {revision}")
+    code = ("from huggingface_hub import snapshot_download; "
+            f"snapshot_download({pinned['repository']!r}, revision={revision!r}, "
+            f"local_dir={str(staging)!r}, allow_patterns={list(MODEL_FILES)!r}, max_workers=2)")
+    published = False
+    try:
+        run([py, "-c", code], cwd=source, timeout=7200)
+        verify_model_files(staging, {"model": pinned})
+        if model.is_symlink():
+            raise RuntimeError("refusing to replace a symlinked BreezyVoice model directory")
+        manifest_path.unlink(missing_ok=True)
+        if model.exists():
+            model.replace(backup)
+        staging.replace(model)
+        published = True
+        write_json(manifest_path, {"revision": revision, "files": pinned["files"],
+                                  "fileStats": {name: file_identity(model / name) for name in MODEL_FILES}})
+        if backup.exists():
+            shutil.rmtree(backup)
+        return revision
+    except Exception:
+        if published and model.exists() and not manifest_path.exists():
+            shutil.rmtree(model, ignore_errors=True)
+        if backup.exists() and not model.exists():
+            backup.replace(model)
+        raise
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def run(args: list[str | Path], *, cwd: Path | None = None, timeout: int = 1800) -> subprocess.CompletedProcess:
@@ -76,30 +164,32 @@ def run(args: list[str | Path], *, cwd: Path | None = None, timeout: int = 1800)
 
 
 def resolve_micromamba(root: Path) -> Path:
-    for name in ("micromamba", "mamba", "conda"):
-        found = shutil.which(name)
-        if found:
-            return Path(found)
-
     system = platform.system().lower()
     machine = platform.machine().lower()
     if system == "darwin":
-        os_tag = "osx"
-        arch = "arm64" if machine in ("arm64", "aarch64") else "64"
+        platform_key = "darwin-arm64" if machine in ("arm64", "aarch64") else "darwin-x86_64" if machine in ("x86_64", "amd64") else None
     elif system == "linux":
-        os_tag = "linux"
-        arch = "aarch64" if machine in ("arm64", "aarch64") else "64"
+        platform_key = "linux-aarch64" if machine in ("arm64", "aarch64") else "linux-x86_64" if machine in ("x86_64", "amd64") else None
     else:
         raise RuntimeError("BreezyVoice setup supports macOS and Linux/WSL2 only; use WSL2 on Windows")
+    if platform_key is None:
+        raise RuntimeError(f"BreezyVoice setup has no pinned micromamba archive for {system}/{machine}")
+    manager_info = artifact_manifest()["micromamba"]
+    archive_info = manager_info["archives"].get(platform_key)
+    if not archive_info:
+        raise RuntimeError(f"BreezyVoice setup has no pinned micromamba archive for {platform_key}")
     manager = root / "bin" / "micromamba"
     manager.parent.mkdir(parents=True, exist_ok=True)
-    url = f"https://micro.mamba.pm/api/micromamba/{os_tag}-{arch}/latest"
+    url = archive_info["url"]
     stage(root, f"downloading local micromamba from {url}")
     archive = manager.parent / "micromamba.tar.bz2.part"
+    staged_manager = manager.with_suffix(".part")
     request = urllib.request.Request(url, headers={"User-Agent": "Splicewright/1"})
-    with urllib.request.urlopen(request, timeout=60) as response, archive.open("wb") as out:
-        shutil.copyfileobj(response, out)
     try:
+        with urllib.request.urlopen(request, timeout=60) as response, archive.open("wb") as out:
+            shutil.copyfileobj(response, out)
+        if sha256_file(archive) != archive_info["sha256"]:
+            raise RuntimeError("micromamba archive checksum mismatch")
         with tarfile.open(archive, "r:bz2") as bundle:
             member = next((item for item in bundle.getmembers() if item.name == "bin/micromamba" and item.isfile()), None)
             if member is None:
@@ -107,11 +197,16 @@ def resolve_micromamba(root: Path) -> Path:
             source = bundle.extractfile(member)
             if source is None:
                 raise RuntimeError("could not extract micromamba executable")
-            with source, manager.open("wb") as out:
+            with source, staged_manager.open("wb") as out:
                 shutil.copyfileobj(source, out)
+        staged_manager.chmod(0o755)
+        version = subprocess.run([str(staged_manager), "--version"], capture_output=True, text=True, check=True, timeout=30).stdout.strip()
+        if manager_info.get("binaryVersion") != version:
+            raise RuntimeError(f"micromamba version mismatch: expected {manager_info.get('binaryVersion')}, got {version}")
+        staged_manager.replace(manager)
     finally:
         archive.unlink(missing_ok=True)
-    manager.chmod(0o755)
+        staged_manager.unlink(missing_ok=True)
     return manager
 
 
@@ -195,7 +290,7 @@ def setup(request: dict) -> dict:
 
 
 def _install(paths: dict[str, Path]) -> None:
-    root, source, model = paths["root"], paths["source"], paths["model"]
+    root, source = paths["root"], paths["source"]
     stage(root, "checking managed BreezyVoice source")
     prepare_source(root, source)
 
@@ -225,23 +320,7 @@ def _install(paths: dict[str, Path]) -> None:
     run([py, source / "single_inference.py", "--help"], cwd=source)
     run([py, "-c", "import sys; sys.path.insert(0, 'third_party/Matcha-TTS'); import cosyvoice.flow.flow_matching; import cosyvoice.hifigan.generator"], cwd=source)
 
-    stage(root, "resolving and downloading pinned model snapshot")
-    with urllib.request.urlopen(f"https://huggingface.co/api/models/{MODEL_ID}", timeout=30) as response:
-        revision = json.load(response).get("sha")
-    if not revision or len(revision) != 40:
-        raise RuntimeError("Hugging Face did not return a pinned model revision")
-    files = list(MODEL_FILES)
-    code = ("from huggingface_hub import HfApi,snapshot_download; import json; from pathlib import Path; "
-            f"info=HfApi().model_info({MODEL_ID!r},revision={revision!r},files_metadata=True); "
-            f"sizes={{f.rfilename:f.size for f in info.siblings if f.rfilename in {files!r}}}; "
-            f"assert all(isinstance(sizes.get(f),int) and sizes[f]>0 for f in {files!r}), 'model size metadata missing'; "
-            f"snapshot_download({MODEL_ID!r}, revision={revision!r}, local_dir={str(model)!r}, allow_patterns={files!r}, max_workers=2); "
-            f"assert all((Path({str(model)!r})/f).stat().st_size==sizes[f] for f in {files!r}), 'model download size mismatch'; "
-            f"Path({str(root / 'model-manifest.json')!r}).write_text(json.dumps({{'revision':{revision!r},'files':sizes}}),encoding='utf-8')")
-    run([py, "-c", code], cwd=root, timeout=7200)
-    for filename in MODEL_FILES:
-        if not (model / filename).is_file() or (model / filename).stat().st_size == 0:
-            raise RuntimeError(f"model snapshot is missing or empty: {filename}")
+    revision = install_model_snapshot(root, py, source)
 
     stage(root, "warming pronunciation and text normalization assets")
     run([py, "-c", "from g2pw import G2PWConverter; g=G2PWConverter(); g('你好，欢迎。'); from tn.chinese.normalizer import Normalizer as Zh; from tn.english.normalizer import Normalizer as En; Zh(remove_erhua=False, full_to_half=False).normalize('你好。'); En().normalize('Hello.')"], cwd=source, timeout=1800)

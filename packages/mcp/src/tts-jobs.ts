@@ -7,7 +7,7 @@ export function createTtsJobs() {
   const jobs = new Map<string, TtsJob>();
   return {
     start(kind: TtsJob["kind"], engine: TtsJob["engine"], work: (progress: (line: string) => void) => Promise<unknown>): TtsJob {
-      if ([...jobs.values()].some((job) => job.state === "running" && job.kind === kind && job.engine === engine)) throw Object.assign(new Error(`a ${engine} ${kind} job is already running`), { code: "busy" });
+      if ([...jobs.values()].some((job) => job.state === "running" && job.engine === engine)) throw Object.assign(new Error(`a ${engine} TTS job is already running`), { code: "busy" });
       if (jobs.size >= 100) {
         const completed = [...jobs.values()].find((job) => job.state !== "running");
         if (!completed) throw Object.assign(new Error("too many TTS jobs are running"), { code: "busy" });

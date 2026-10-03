@@ -1,4 +1,5 @@
 import json
+import hashlib
 import tempfile
 import unittest
 import sys
@@ -92,6 +93,19 @@ class BreezyVoiceTests(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertIn("cosyvoice.yaml", result["detail"])
         self.assertIn("Python environment", result["detail"])
+
+    def test_status_rejects_same_size_model_corruption(self):
+        (self.root / "model").mkdir()
+        (self.root / "model" / "tiny.bin").write_bytes(b"evil")
+        expected = {"tiny.bin": {"size": 4, "sha256": hashlib.sha256(b"good").hexdigest()}}
+        revision = "a" * 40
+        artifact_path = Path(self.temp.name) / "artifacts.json"
+        artifact_path.write_text(json.dumps({"model": {"revision": revision, "files": expected}}), encoding="utf-8")
+        (self.root / "model-manifest.json").write_text(json.dumps({"revision": revision, "files": expected}), encoding="utf-8")
+        with patch.object(breezyvoice, "MODEL_FILES", ("tiny.bin",)), patch.object(breezyvoice, "ARTIFACTS_PATH", artifact_path):
+            result = breezyvoice.status(self.root)
+        self.assertFalse(result["ready"])
+        self.assertIn("checksum mismatch: tiny.bin", result["detail"])
 
     def test_failed_generation_removes_partial_output(self):
         out_dir = Path(self.temp.name) / "swr-breezyvoice-test"

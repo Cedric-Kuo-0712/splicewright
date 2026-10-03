@@ -4,7 +4,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { ASPECTS, FONT_PAIRS, FONTS, getSummary, lint, LUT_PRESETS, THEME_IDS } from "@splicewright/core";
 import { applyEditReview, applyLutPreset, getEditReview, init, load, loadCtx, rawPath, redo, revertEditReview, setEditReviewStatus, run, undo } from "@splicewright/core/node";
-import { checkOutput, scanMaterials, relinkMaterial, displayable, ingest, STEPS, type Step } from "@splicewright/ingest";
+import { breezyVoiceStatus, deleteBreezyVoice, generateAndInsertBreezyVoice, listBreezyVoices, registerBreezyVoice, setupBreezyVoice, checkOutput, generateAndInsertTTS, scanMaterials, relinkMaterial, displayable, ingest, setupTTS, STEPS, ttsStatus, validateTTSRequest, type Step, type TtsLanguage } from "@splicewright/ingest";
 import { serve } from "@splicewright/mcp";
 import { render, still } from "@splicewright/render/node";
 import { provisionAgentSkills } from "./agent-skills.ts";
@@ -16,6 +16,10 @@ const USAGE = `usage: splicewright <command>
   init [--title T] [--fps 30] [--size 1920x1080 | --preset 16:9|9:16|1:1|4:5] [--refresh-agents]
   import <paths...> [--no-ingest]
   ingest [--only sourceHealth,proxy,reverse,analysis,thumbs,waveform,transcript,beats,loudness,audioFx] [--jobs N]
+  tts status [--engine kokoro|breezyvoice]
+  tts setup --engine kokoro|breezyvoice [--language en-us,zh]
+  tts voices | voice-add --name NAME --audio FILE (--transcript TEXT | --transcript-file FILE) | voice-delete --voice-id ID
+  tts generate [--engine kokoro|breezyvoice] (--text T | --text-file FILE) --at FRAME [--language en-us|en-gb|zh --voice ID | --voice-id ID] [--speed 0.5..2] [--track ID] [--base REVISION]
   status
   scan-materials
   check-output <project-relative-output>
@@ -57,8 +61,25 @@ const { values: flags, positionals } = parseArgs({
     "no-ingest": { type: "boolean" },
     "refresh-agents": { type: "boolean" },
     snapshots: { type: "boolean" },
+    text: { type: "string" },
+    "text-file": { type: "string" },
+    language: { type: "string" },
+    voice: { type: "string" },
+    engine: { type: "string" },
+    "voice-id": { type: "string" },
+    name: { type: "string" },
+    audio: { type: "string" },
+    transcript: { type: "string" },
+    "transcript-file": { type: "string" },
+    speed: { type: "string" },
+    track: { type: "string" },
+    help: { type: "boolean", short: "h" },
   },
 });
+if (flags.help) {
+  console.log(USAGE);
+  process.exit(0);
+}
 const [cmd, ...args] = positionals;
 const dir = process.cwd();
 const fail = (e: Error): never => out({ error: { code: "render_failed", message: e.message } });
@@ -168,6 +189,46 @@ switch (cmd) {
     const bad = only?.filter((s) => !STEPS.includes(s));
     if (bad?.length) out({ error: { code: "usage", message: `unknown step ${bad.join(", ")}; one of ${STEPS.join(", ")}` } });
     out(await ingest(dir, { only, jobs, log }));
+  }
+  case "tts": {
+    const action = args[0];
+    const engine = flags.engine ?? "kokoro";
+    if (engine !== "kokoro" && engine !== "breezyvoice") out({ error: { code: "invalid_args", message: "engine must be kokoro or breezyvoice" } });
+    try {
+      if (action === "status") {
+        if (flags.engine) out(await (engine === "breezyvoice" ? breezyVoiceStatus() : ttsStatus()));
+        const [kokoro, breezyvoice] = await Promise.all([ttsStatus(), breezyVoiceStatus()]);
+        out({ ...kokoro, engines: { kokoro, breezyvoice } });
+      }
+      if (action === "setup") {
+        const progress = (line: string) => process.stderr.write(line);
+        if (engine === "breezyvoice") out(await setupBreezyVoice(progress));
+        out(await setupTTS((flags.language ?? "en-us").split(",") as TtsLanguage[], progress));
+      }
+      if (action === "voices") out({ voices: await listBreezyVoices() });
+      if (action === "voice-add") {
+        if (!flags.name || !flags.audio || (!flags.transcript && !flags["transcript-file"])) out({ error: { code: "usage", message: "tts voice-add requires --name, --audio, and --transcript or --transcript-file" } });
+        const transcript = flags["transcript-file"] ? readFileSync(resolve(flags["transcript-file"]), "utf8") : flags.transcript!;
+        out(await registerBreezyVoice({ name: flags.name!, audioPath: resolve(flags.audio!), transcript }));
+      }
+      if (action === "voice-delete") {
+        if (!flags["voice-id"]) out({ error: { code: "usage", message: "tts voice-delete requires --voice-id" } });
+        out(await deleteBreezyVoice(flags["voice-id"]!));
+      }
+      if (action === "generate") {
+        if ((flags.text === undefined && flags["text-file"] === undefined) || flags.at === undefined) out({ error: { code: "usage", message: "tts generate requires --text or --text-file, and --at <frame>" } });
+        const text = flags["text-file"] ? readFileSync(resolve(flags["text-file"]), "utf8") : flags.text!;
+        const placement = { text, at: Number(flags.at), trackId: flags.track, base: flags.base === undefined ? load(dir).revision : Number(flags.base) };
+        if (engine === "breezyvoice" && flags.speed !== undefined) out({ error: { code: "invalid_args", message: "BreezyVoice does not support --speed" } });
+        const result = engine === "breezyvoice"
+          ? await generateAndInsertBreezyVoice(dir, { ...placement, voiceId: flags["voice-id"]! })
+          : await generateAndInsertTTS(dir, validateTTSRequest({ ...placement, language: flags.language, voice: flags.voice, speed: flags.speed === undefined ? 1 : Number(flags.speed) }));
+        out({ revision: result.revision, summary: result.summary, assetId: result.assetId, itemId: result.itemId, duration: result.duration, undoSteps: result.undoSteps, ...(result.warnings && { warnings: result.warnings }) });
+      }
+    } catch (error) {
+      out({ error: { code: (error as Error & { code?: string }).code ?? (action === "setup" ? "tts_setup_failed" : "tts_failed"), message: (error as Error).message } });
+    }
+    out({ error: { code: "usage", message: "tts status | setup --engine kokoro|breezyvoice | voices | voice-add | voice-delete | generate" } });
   }
   case "status":
     out(getSummary(load(dir)));

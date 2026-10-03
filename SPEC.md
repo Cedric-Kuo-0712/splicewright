@@ -479,6 +479,15 @@ explained, not hidden.
 
 ---
 
+Local narration increment: Kokoro fixed English/Mandarin voices and BreezyVoice Mandarin
+reference-voice cloning share the editor/CLI/MCP insertion path (one revision and one undo step).
+The Narration panel supports engine selection, explicit installation, and saved reference profiles.
+Source installation has an optional TTS wizard; BreezyVoice uses CPU LLM/HiFT with MPS flow on
+supported Apple Silicon, CPU on Linux/WSL2. Native Windows BreezyVoice uses WSL2. Setup and
+BreezyVoice MCP generation expose jobs via `tts_job_status`; synthesis does not download models.
+Core/API/runtime checks are automated; browser interaction and subjective voice quality remain
+human validation.
+
 ## 13. Roadmap (M7–M11, in build order) and later candidates
 
 Each milestone is a core op and/or schema extension, then render, then UI, then MCP/CLI exposure

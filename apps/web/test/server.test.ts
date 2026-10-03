@@ -108,6 +108,19 @@ it("refuses writes from other sites", async () => {
 const postJson = (base: string, path: string, body: unknown, headers: Record<string, string> = {}) =>
   fetch(`${base}${path}`, { method: "POST", headers, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, data: await r.json() }));
 
+it("exposes Kokoro status and rejects stale narration before generating or writing files", async () => {
+  const ttsDir = mkdtempSync(join(tmpdir(), "swr-tts-web-"));
+  init(ttsDir, { title: "tts", fps: 30, width: 640, height: 360 });
+  const s = await open(ttsDir, { port: 0 });
+  try {
+    const status = await (await fetch(`${s.url}api/tts`)).json();
+    expect(status).toMatchObject({ ready: expect.any(Boolean), voices: expect.arrayContaining([expect.objectContaining({ id: "af_heart", language: "en-us" })]), languages: expect.arrayContaining([expect.objectContaining({ id: "zh" })]), setupCommand: expect.stringContaining("tts setup") });
+    expect(await postJson(s.url, "api/tts", { text: "Hello", language: "en-us", voice: "af_heart", at: 0, base: 1 })).toMatchObject({ status: 409, data: { error: { code: "conflict" } } });
+    expect(existsSync(join(ttsDir, "raw"))).toBe(false);
+    expect((await (await fetch(`${s.url}api/project`)).json()).project.revision).toBe(0);
+  } finally { await s.close(); rmSync(ttsDir, { recursive: true, force: true }); }
+});
+
 it("serves persistent review snapshots, validates origin and refuses to restore over later edits", async () => {
   const reviewDir = join(parent, "review-project");
   cpSync(join(import.meta.dirname, "../../../examples/basic"), reviewDir, { recursive: true, filter: (f) => !f.includes(".splicewright") });

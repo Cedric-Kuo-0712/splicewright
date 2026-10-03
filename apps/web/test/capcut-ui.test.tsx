@@ -117,6 +117,7 @@ describe("A1 discoverability and navigation", () => {
       if (category === "素材") expect(html).toContain('data-ui-control="import"');
       if (category === "文字") expect(html).toContain('data-ui-control="create-text"');
       if (category === "貼紙") expect(html).toContain('data-ui-control="create-sticker"');
+      if (category === "音訊") { expect(html).toContain('data-ui-control="narration"'); expect(html).toContain("旁白"); }
       if (category === "轉場") expect(html).toContain("請先選取影片或圖片片段。");
     }
     expect(runtime.op).not.toHaveBeenCalled();

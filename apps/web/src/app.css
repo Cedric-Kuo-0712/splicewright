@@ -201,6 +201,16 @@ h3 { margin: 0 0 8px; font-size: 13px; }
 .feature-panel .bin { border: 0; overflow: visible; }
 .feature-create, .feature-controls { padding: 10px; }
 .feature-create button { display: block; width: 100%; margin-bottom: 8px; overflow-wrap: anywhere; }
+.narration { border-bottom: 1px solid #2a2c31; }
+.narration textarea { width: 100%; resize: vertical; }
+.narration select { min-width: 0; width: 100%; }
+.narration-unavailable { margin: 10px 0; padding: 8px; border: 1px solid #454954; border-radius: 4px; color: #c4c8d0; }
+.narration-unavailable p { margin: 6px 0; white-space: normal; }
+.narration-unavailable code { display: block; overflow-wrap: anywhere; color: #e1e4ea; }
+.narration-error { color: #ff9292; white-space: normal; }
+.narration-progress { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 120px; overflow: auto; }
+.narration-reference { margin: 12px 0; padding: 8px; border: 1px solid #454954; border-radius: 4px; }
+.narration-reference summary { cursor: pointer; }
 .feature-control { display: grid; gap: 4px; margin-bottom: 10px; }
 .feature-control button { display: flex; justify-content: space-between; gap: 8px; text-align: left; padding: 6px; }
 .feature-control small, .unavailable { color: #a0a4af; }

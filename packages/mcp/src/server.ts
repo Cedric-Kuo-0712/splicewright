@@ -1,11 +1,12 @@
 import { existsSync } from "node:fs";
+import { createTtsJobs } from "./tts-jobs.ts";
 import { join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { find, findFillers, getItem, getRange, getSummary, lint, LUT_PRESETS, ops, type OpResult, type VideoItem } from "@splicewright/core";
 import { applyEditReview, applyLutPreset, getEditReview, load, loadCtx, readAssets, sizesOf, redo, run, undo } from "@splicewright/core/node";
-import { checkOutput, ingest, scanMaterials, relinkMaterial, listMaterials, prepareMaterials, recordMaterialReview, materialPreview, peek, sourceFrame, STEPS, stamp, TRANSCRIPT_FORMAT } from "@splicewright/ingest";
+import { breezyVoiceStatus, deleteBreezyVoice, generateAndInsertBreezyVoice, listBreezyVoices, registerBreezyVoice, setupBreezyVoice, setupTTS, validateBreezyVoiceRequest, checkOutput, generateAndInsertTTS, ingest, scanMaterials, relinkMaterial, listMaterials, prepareMaterials, recordMaterialReview, materialPreview, peek, sourceFrame, STEPS, stamp, TRANSCRIPT_FORMAT, TTS_LANGUAGES, TTS_VOICES, ttsStatus } from "@splicewright/ingest";
 import { pip, type PipPreset } from "@splicewright/render/geometry";
 import { cancelRender, renderStatus, startRender, still, storyboard } from "@splicewright/render/node";
 
@@ -38,12 +39,15 @@ Keep context proportional to the next decision: select bounded ranges and fields
 
 Assets must be ingested before insertItem can default a duration and before detectBeats or addCaptionsFromTranscript; ingest is cached, so re-running is cheap.
 
+For local narration, call tts_status to check Kokoro or BreezyVoice. Choose engine kokoro for fixed English/Mandarin voices or breezyvoice for Mandarin voice cloning. Use tts_voice_register once with a reference audio file and its exact transcript, then reuse the saved voiceId from tts_voice_list. tts_generate inserts narration at a timeline frame with one revision and undo step; pass the current baseRevision. Model installation is explicit through tts_setup or CLI tts setup --engine; selected setup downloads dependencies and models, while synthesis never downloads them. tts_setup and BreezyVoice tts_generate return a jobId immediately; use tts_job_status to read completion/result, and never submit the same generation again while its job is running. Jobs belong to the current MCP server session. BreezyVoice uses CPU LLM/HiFT and MPS flow where installed on Apple, CPU elsewhere.
+
 Edit only through splicewright_* tools, never by writing project.json or directly modifying raw/. For agent-authored rounds intended for human review, use apply_edit_review: it atomically applies the whole ops array and records before/after snapshots as one revision and undo step. Get its bounded summary with get_edit_review; request snapshots only when needed. Otherwise use splicewright_batch for an ordinary atomic edit. Pass the baseRevision you last read; on a conflict error the human changed something, so re-read instead of retrying. Undo is shared with the human: only undo your own last step, and pass the revision that step returned as baseRevision so a newer human edit is never the one undone. Frame args also take { near } to snap to edges, markers or beats.
 
 Before a master render, run lint and fix its errors (gaps, text outside the title-safe area, CJK in a font without glyphs, stale/unmeasured source decode or peak checks; run ingest with sourceHealth explicitly for source measurements). Check the result with storyboard over the changed range; render with preset draft for a quick full check. Record decisions worth keeping across sessions in AGENTS.md under Notes.`;
 
 export function createServer(dir: string): McpServer {
   const server = new McpServer({ name: "splicewright", version: "0.0.0" }, { instructions: INSTRUCTIONS });
+  const ttsJobs = createTtsJobs();
   const baseRevision = z.number().int().optional().describe("Revision this edit is based on; stale writes are rejected. Omit for latest.");
 
   server.registerTool("apply_edit_review", {
@@ -151,6 +155,79 @@ export function createServer(dir: string): McpServer {
       inputSchema: { only: z.array(z.enum(STEPS)).optional(), assets: z.array(z.string()).optional().describe("Asset ids; default all.") },
     },
     async ({ only, assets }) => json(await ingest(dir, { only, assets })),
+  );
+  server.registerTool(
+    "tts_status",
+    { description: "Check installed Kokoro/BreezyVoice engines, languages, saved voices, and setup instructions.", inputSchema: { engine: z.enum(["kokoro", "breezyvoice"]).optional() } },
+    async ({ engine }) => {
+      if (engine) return json(await (engine === "breezyvoice" ? breezyVoiceStatus() : ttsStatus()));
+      const [kokoro, breezyvoice] = await Promise.all([ttsStatus(), breezyVoiceStatus()]);
+      return json({ ...kokoro, engines: { kokoro, breezyvoice } });
+    },
+  );
+  server.registerTool(
+    "tts_setup",
+    { description: "Explicitly install selected TTS dependencies/models. Returns a jobId immediately; check tts_job_status. May download several GB. Does not edit the project.", inputSchema: { engine: z.enum(["kokoro", "breezyvoice"]), languages: z.array(z.enum(TTS_LANGUAGES)).min(1).optional() } },
+    async ({ engine, languages }) => {
+      try { return json(ttsJobs.start("setup", engine, async (progress) => {
+        const result = await (engine === "breezyvoice" ? setupBreezyVoice(progress) : setupTTS(languages ?? ["en-us"], progress));
+        if (!result.ready) throw new Error(result.detail || "TTS setup did not complete");
+        return result;
+      })); }
+      catch (error) { return failed((error as Error & { code?: string }).code ?? "tts_setup_failed", error); }
+    },
+  );
+  server.registerTool(
+    "tts_job_status",
+    { description: "Read a setup or BreezyVoice generation job from this MCP server session. ready includes result; failed includes refusal/error. Do not duplicate a running job.", inputSchema: { jobId: z.string().min(1) } },
+    async ({ jobId }) => { try { return json(ttsJobs.get(jobId)); } catch (error) { return failed("not_found", error); } },
+  );
+  server.registerTool(
+    "tts_voice_list",
+    { description: "List saved local BreezyVoice reference profiles. Reuse a voiceId for subsequent narration without uploading again.", inputSchema: {} },
+    async () => { try { return json({ voices: await listBreezyVoices() }); } catch (error) { return failed("tts_failed", error); } },
+  );
+  server.registerTool(
+    "tts_voice_register",
+    { description: "Save a BreezyVoice reference profile from a local audio file and exact transcript. Audio must be 3–30 seconds (15–20 recommended). Stores a copy; does not train model weights or edit the project.", inputSchema: { name: z.string().trim().min(1).max(100), audioPath: z.string().min(1), transcript: z.string().trim().min(1).max(2000) } },
+    async ({ name, audioPath, transcript }) => {
+      try { return json(await registerBreezyVoice({ name, audioPath: resolve(dir, audioPath), transcript })); }
+      catch (error) { return failed((error as Error & { code?: string }).code ?? "tts_failed", error); }
+    },
+  );
+  server.registerTool(
+    "tts_voice_delete",
+    { description: "Delete a saved local BreezyVoice reference profile. Existing timeline audio is retained.", inputSchema: { voiceId: z.string().min(1) } },
+    async ({ voiceId }) => { try { return json(await deleteBreezyVoice(voiceId)); } catch (error) { return failed((error as Error & { code?: string }).code ?? "tts_failed", error); } },
+  );
+  server.registerTool(
+    "tts_generate",
+    {
+      description: "Generate offline narration and insert it on an unlocked audio track in one revision and one undo step. Kokoro (default): language + voice, optional speed. BreezyVoice: engine breezyvoice + saved voiceId, Mandarin text up to 300 characters, no speed. Pass current baseRevision; concurrent project edits refuse insertion. BreezyVoice returns a jobId immediately; tts_job_status returns its insertion result. Synthesis never installs or downloads models.",
+      inputSchema: {
+        engine: z.enum(["kokoro", "breezyvoice"]).optional(), text: z.string().trim().min(1).max(2000),
+        language: z.enum(TTS_LANGUAGES).optional(), voice: z.enum(TTS_VOICES.map((v) => v.id)).optional(), voiceId: z.string().min(1).optional(),
+        speed: z.number().min(0.5).max(2).optional(), at: z.number().int().min(0), trackId: z.string().min(1).optional(),
+        baseRevision: z.number().int().nonnegative(),
+      },
+    },
+    async ({ engine, text, language, voice, voiceId, speed, at, trackId, baseRevision }) => {
+      try {
+        if (engine === "breezyvoice" && speed !== undefined) return failed("invalid_args", new Error("BreezyVoice does not support speed"));
+        const placement = { text, at, trackId, base: baseRevision };
+        if (engine === "breezyvoice") {
+          const request = validateBreezyVoiceRequest({ ...placement, voiceId });
+          return json(ttsJobs.start("generate", "breezyvoice", async () => {
+            const result = await generateAndInsertBreezyVoice(dir, request);
+            return { revision: result.revision, summary: result.summary, assetId: result.assetId, itemId: result.itemId, duration: result.duration, undoSteps: result.undoSteps, ...(result.warnings && { warnings: result.warnings }) };
+          }));
+        }
+        const result = await generateAndInsertTTS(dir, { ...placement, language, voice, speed });
+        return json({ revision: result.revision, summary: result.summary, assetId: result.assetId, itemId: result.itemId, duration: result.duration, undoSteps: result.undoSteps, ...(result.warnings && { warnings: result.warnings }) });
+      } catch (error) {
+        return failed((error as Error & { code?: string }).code ?? "tts_failed", error);
+      }
+    },
   );
   server.registerTool(
     "get_summary",

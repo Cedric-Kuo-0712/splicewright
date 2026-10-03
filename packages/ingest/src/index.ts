@@ -7,6 +7,7 @@ import { HEIF, type Asset } from "@splicewright/core";
 import { cacheDir, fingerprint, load, rawPath, readAssets, writeAtomic, type Probe, type SourceHealth } from "@splicewright/core/node";
 import { audioFxPath, ensureAudioFx } from "./audio-fx.ts";
 import { measureFinalMix, measureSourceHealth } from "./source-health.ts";
+export { TTS_LANGUAGES, TTS_VOICES, generateAndInsertTTS, setupTTS, ttsStatus, validateTTSRequest, type TtsLanguage, type TtsRequest, type TtsStatus } from "./tts.ts";
 
 // Spec §8. ffmpeg steps run here; transcript and beats need Python libraries and run ingest/*.py.
 // Every step is cached by content fingerprint: a probe entry records, per step, the fingerprint it ran on.
@@ -565,3 +566,4 @@ export { scanMaterials, relinkMaterial, listMaterials, prepareMaterials, recordM
 export { sourceFrame } from "./source-frame.ts";
 
 export { checkOutput } from "./output-health.ts";
+export * from "./breezyvoice.ts";

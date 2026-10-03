@@ -1,0 +1,101 @@
+diff --git a/cosyvoice/cli/model.py b/cosyvoice/cli/model.py
+index f4625e3..b187ac1 100755
+--- a/cosyvoice/cli/model.py
++++ b/cosyvoice/cli/model.py
+@@ -11,6 +11,10 @@
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
++import json
++import os
++import time
++from pathlib import Path
+ import torch
+ 
+ class CosyVoiceModel:
+@@ -19,42 +23,69 @@ class CosyVoiceModel:
+                  llm: torch.nn.Module,
+                  flow: torch.nn.Module,
+                  hift: torch.nn.Module):
+-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
++        config = Path(__file__).resolve().parents[3] / 'backend.json'
++        settings = json.loads(config.read_text()) if config.exists() else {'device': 'cpu'}
++        selected = os.environ.get('BREEZYVOICE_DEVICE', settings['device'])
++        if selected not in ('cpu', 'mps', 'cuda'):
++            raise ValueError('BREEZYVOICE_DEVICE must be cpu, mps, or cuda')
++        if selected == 'mps' and not torch.backends.mps.is_available():
++            raise RuntimeError('MPS requested but unavailable')
++        self.device = torch.device(selected)
++        llm_selected = os.environ.get('BREEZYVOICE_LLM_DEVICE', settings.get('llm_device', selected))
++        if llm_selected not in ('cpu', 'mps', 'cuda'):
++            raise ValueError('BREEZYVOICE_LLM_DEVICE must be cpu, mps, or cuda')
++        if llm_selected == 'mps' and not torch.backends.mps.is_available():
++            raise RuntimeError('MPS LLM requested but unavailable')
++        self.llm_device = torch.device(llm_selected)
++        # HiFT uses complex STFT/ISTFT; keep the vocoder on CPU for PyTorch 2.3 MPS.
++        self.hift_device = torch.device('cpu') if selected == 'mps' else self.device
++        print('BreezyVoice devices: LLM:', self.llm_device, 'flow:', self.device, 'HiFT:', self.hift_device, flush=True)
+         self.llm = llm
+         self.flow = flow
+         self.hift = hift
+ 
+     def load(self, llm_model, flow_model, hift_model):
+-        self.llm.load_state_dict(torch.load(llm_model, map_location=self.device))
+-        self.llm.to(self.device).eval()
+-        self.flow.load_state_dict(torch.load(flow_model, map_location=self.device))
++        self.llm.load_state_dict(torch.load(llm_model, map_location='cpu'))
++        self.llm.to(self.llm_device).eval()
++        self.flow.load_state_dict(torch.load(flow_model, map_location='cpu'))
+         self.flow.to(self.device).eval()
+-        self.hift.load_state_dict(torch.load(hift_model, map_location=self.device))
+-        self.hift.to(self.device).eval()
++        self.hift.load_state_dict(torch.load(hift_model, map_location='cpu'))
++        self.hift.to(self.hift_device).eval()
+ 
+     def inference(self, text, text_len, flow_embedding, llm_embedding=torch.zeros(0, 192),
+                   prompt_text=torch.zeros(1, 0, dtype=torch.int32), prompt_text_len=torch.zeros(1, dtype=torch.int32),
+                   llm_prompt_speech_token=torch.zeros(1, 0, dtype=torch.int32), llm_prompt_speech_token_len=torch.zeros(1, dtype=torch.int32),
+                   flow_prompt_speech_token=torch.zeros(1, 0, dtype=torch.int32), flow_prompt_speech_token_len=torch.zeros(1, dtype=torch.int32),
+                   prompt_speech_feat=torch.zeros(1, 0, 80), prompt_speech_feat_len=torch.zeros(1, dtype=torch.int32)):
+-        tts_speech_token = self.llm.inference(text=text.to(self.device),
+-                                              text_len=text_len.to(self.device),
+-                                              prompt_text=prompt_text.to(self.device),
+-                                              prompt_text_len=prompt_text_len.to(self.device),
+-                                              prompt_speech_token=llm_prompt_speech_token.to(self.device),
+-                                              prompt_speech_token_len=llm_prompt_speech_token_len.to(self.device),
+-                                              embedding=llm_embedding.to(self.device),
++        start = time.monotonic()
++        tts_speech_token = self.llm.inference(text=text.to(self.llm_device),
++                                              text_len=text_len.to(self.llm_device),
++                                              prompt_text=prompt_text.to(self.llm_device),
++                                              prompt_text_len=prompt_text_len.to(self.llm_device),
++                                              prompt_speech_token=llm_prompt_speech_token.to(self.llm_device),
++                                              prompt_speech_token_len=llm_prompt_speech_token_len.to(self.llm_device),
++                                              embedding=llm_embedding.to(self.llm_device),
+                                               beam_size=1,
+                                               sampling=25,
+                                               max_token_text_ratio=30,
+                                               min_token_text_ratio=3)
+-        tts_mel = self.flow.inference(token=tts_speech_token,
++        if self.llm_device.type == 'mps':
++            torch.mps.synchronize()
++        llm_seconds = time.monotonic() - start
++        start = time.monotonic()
++        tts_mel = self.flow.inference(token=tts_speech_token.to(self.device),
+                                       token_len=torch.tensor([tts_speech_token.size(1)], dtype=torch.int32).to(self.device),
+                                       prompt_token=flow_prompt_speech_token.to(self.device),
+                                       prompt_token_len=flow_prompt_speech_token_len.to(self.device),
+                                       prompt_feat=prompt_speech_feat.to(self.device),
+                                       prompt_feat_len=prompt_speech_feat_len.to(self.device),
+                                       embedding=flow_embedding.to(self.device))
+-        tts_speech = self.hift.inference(mel=tts_mel).cpu()
+-        torch.cuda.empty_cache()
++        if self.device.type == 'mps':
++            torch.mps.synchronize()
++        flow_seconds = time.monotonic() - start
++        start = time.monotonic()
++        tts_speech = self.hift.inference(mel=tts_mel.to(self.hift_device)).cpu()
++        print('BreezyVoice stage seconds:', json.dumps({'llm': llm_seconds, 'flow': flow_seconds, 'hift': time.monotonic() - start}), flush=True)
++        if self.device.type == 'cuda':
++            torch.cuda.empty_cache()
+         return {'tts_speech': tts_speech}

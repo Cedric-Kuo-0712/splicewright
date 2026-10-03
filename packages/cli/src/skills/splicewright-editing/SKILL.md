@@ -84,6 +84,8 @@ Example: replace placeholders with actual timeline frames and values; verify the
 
 For ducking, key only `volume` on the audio item at timeline frames around the dialogue; use a small number of keys with smooth ramps, and preserve its baseline volume. Video audio may also key volume. `setProps.audioFx` supports EQ, pan, FFT denoise, and RNNoise with a user-supplied model; choose an effect for an audible problem, make one change at a time, and compare the processed output with the untreated source. RNNoise requires `raw/<model>.rnnn`; never invent or download a model path. Listen to the rendered result where possible. A waveform, successful render, or loudness number cannot establish that speech sounds natural or that music is balanced.
 
+For generated narration, use `tts_status` to inspect local Kokoro/BreezyVoice readiness. Install the chosen engine explicitly with `tts_setup` or `splicewright tts setup --engine kokoro|breezyvoice`; synthesis stays offline. Kokoro uses matching language/voice; BreezyVoice uses Mandarin text and a saved `voiceId` from `tts_voice_list`. Save a local reference file plus exact transcript once with `tts_voice_register`. Call `tts_generate` with the current `baseRevision` and timeline frame `at`; insertion takes one revision and one undo step. Setup and BreezyVoice generation return a `jobId`: inspect `tts_job_status`, retain the completed result revision, and do not resubmit a running generation. Jobs belong to the current MCP session. If insertion conflicts, re-read the project before trying again.
+
 ## Verify before calling it done
 
 - Re-read the changed timeline range; run `lint` before a master render.

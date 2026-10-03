@@ -1,9 +1,10 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { init, load, run } from "@splicewright/core/node";
 
 const CLI = join(import.meta.dirname, "../../cli/src/main.ts");
@@ -19,7 +20,7 @@ it("an agent can read and edit a project over stdio MCP", async () => {
   try {
     expect(client.getInstructions()).toContain("splicewright_batch");
     const names = (await client.listTools()).tools.map((t) => t.name);
-    expect(names).toEqual(expect.arrayContaining(["splicewright_split", "splicewright_trim", "splicewright_batch", "get_summary", "get_range", "find"]));
+    expect(names).toEqual(expect.arrayContaining(["splicewright_split", "splicewright_trim", "splicewright_batch", "get_summary", "get_range", "find", "tts_status", "tts_generate", "tts_setup", "tts_voice_list", "tts_voice_register", "tts_voice_delete", "tts_job_status"]));
 
     const call = async (name: string, args: Record<string, unknown> = {}) => {
       const r = (await client.callTool({ name, arguments: args })) as { content: { text: string }[]; isError?: boolean };
@@ -96,3 +97,34 @@ it("still returns an image and render runs as a polled job", { timeout: 300_000 
     await client.close();
   }
 });
+
+it("an agent saves and reuses voice IDs, reads a failed clone job, and deletes a profile without editing the project", async () => {
+  const parent = mkdtempSync(join(tmpdir(), "swr-breezy-mcp-"));
+  const dir = join(parent, "project"), runtime = join(parent, "runtime"), reference = join(parent, "reference.wav");
+  init(dir, { title: "voices", fps: 30, width: 640, height: 360 });
+  execFileSync("ffmpeg", ["-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=3.5", "-c:a", "pcm_s16le", reference], { stdio: "pipe" });
+  const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  const client = new Client({ name: "breezy-test", version: "0" });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [CLI, "mcp"], cwd: dir, env: { ...env, SPLICEWRIGHT_BREEZYVOICE_HOME: runtime }, stderr: "ignore" }));
+  const call = async (name: string, args: Record<string, unknown> = {}) => {
+    const r = await client.callTool({ name, arguments: args }) as { content: { text: string }[]; isError?: boolean };
+    return { ...JSON.parse(r.content[0].text), isError: r.isError ?? false };
+  };
+  try {
+    const saved = await call("tts_voice_register", { name: "旅行旁白", audioPath: reference, transcript: "你好，歡迎來到我的旅行日記。" });
+    expect(saved).toMatchObject({ name: "旅行旁白", language: "zh", isError: false });
+    expect((await call("tts_voice_list")).voices).toEqual([expect.objectContaining({ id: saved.id })]);
+    const job = await call("tts_generate", { engine: "breezyvoice", voiceId: "00000000-0000-0000-0000-000000000000", text: "你好", at: 0, baseRevision: 0 });
+    expect(job).toMatchObject({ state: "running", engine: "breezyvoice", isError: false });
+    let failedJob: Record<string, unknown> = {};
+    await vi.waitFor(async () => {
+      failedJob = await call("tts_job_status", { jobId: job.jobId });
+      expect(failedJob.state).toBe("failed");
+    }, { timeout: 5000, interval: 100 });
+    expect(failedJob).toMatchObject({ error: { code: "invalid_args" }, isError: false });
+    expect(await call("tts_voice_delete", { voiceId: saved.id })).toMatchObject({ deleted: saved.id, isError: false });
+    expect((await call("tts_voice_list")).voices).toEqual([]);
+    expect(load(dir).revision).toBe(0);
+    expect(Object.keys(load(dir).assets)).toHaveLength(0);
+  } finally { await client.close(); rmSync(parent, { recursive: true, force: true }); }
+}, 20_000);

@@ -3,6 +3,7 @@ import type { Project } from "@splicewright/core";
 import { addSticker, addText } from "./edit.ts";
 import { app, playhead } from "./store.ts";
 import { MediaBin } from "./MediaBin.tsx";
+import { Narration } from "./Narration.tsx";
 import { OperationSearch } from "./OperationSearch.tsx";
 import { actionAvailability, SEARCH_ACTIONS, WORKSPACE_CATEGORIES, type SearchAction, type WorkspaceCategory } from "./workspace-search.ts";
 import { focusControl, searchContext, shortcutHint, type ControlLocation } from "./workspace-navigation.ts";
@@ -23,6 +24,7 @@ export function FeaturePanel({ p, category, location, onCategory, onLocate, read
     </nav>
     <button ref={searchButton} className="operation-search-entry" onClick={() => setSearchOpen(true)}>搜尋操作…</button>
     <div className="feature-content">
+      {category === "音訊" && <Narration p={p} readOnly={readOnly} />}
       <div hidden={category !== "素材" && category !== "音訊"}><MediaBin p={p} assetKind={category === "音訊" ? "audio" : undefined} /></div>
       {category === "文字" && <div className="feature-create"><h3>文字</h3><button data-ui-control="create-text" onClick={() => addText(playhead.get().frame)}>新增文字圖層 <kbd>T</kbd></button><p className="dim">在播放頭加入文字。選取現有文字或字幕後，可調整內容與樣式。</p></div>}
       {category === "貼紙" && <div className="feature-create" data-ui-control="create-sticker"><h3>圖片貼紙</h3><p className="dim">使用已匯入的圖片，加入可調整位置的貼紙圖層。</p>{images.map((a) => <button key={a.id} onClick={() => addSticker(a.id, playhead.get().frame)}>{a.path.split("/").pop()}</button>)}{!images.length && <p>請先到「素材」匯入圖片。</p>}</div>}

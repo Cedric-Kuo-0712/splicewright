@@ -15,6 +15,7 @@ Requirements:
 - Node 26 or later. It runs the TypeScript sources directly, so there is no build step.
 - `ffmpeg` and `ffprobe` on your `PATH`.
 - Python 3, only if you want transcripts and beat detection. The other ingest steps run without it.
+- Python 3.10–3.12, only if you want local Kokoro text-to-speech. Kokoro setup is independent of `ingest/.venv`.
 
 ```sh
 git clone <this repo> splicewright && cd splicewright
@@ -42,6 +43,95 @@ splicewright render                     # master quality
 
 You can also skip the `cp`/`import` step and drop files onto the media bin or the timeline in the
 editor. They are copied into `raw/` and ingested in the background.
+
+## Offline narration
+
+Kokoro runs locally through ONNX Runtime's CPU provider. Install only the languages you need; US
+and UK English share a model, while Mandarin uses a separate model. Model setup is explicit and
+downloads into `~/.splicewright/tts` (override with `SPLICEWRIGHT_TTS_HOME`); generation does not
+access the network. Python 3.10–3.12 is required for setup.
+
+```sh
+splicewright tts status
+splicewright tts setup --language en-us       # or en-gb, zh, or en-us,zh
+splicewright tts generate --text "Welcome to the trip." --language en-us --voice af_heart --at 0
+```
+
+`tts generate` creates and imports a WAV, then inserts it on an unlocked audio track in one
+revision and one undo step. English voices: `af_heart`, `am_adam`, `bf_emma`, `bm_george`. Mandarin
+voices: `zf_001`, `zm_010`. Agents can use the MCP tools `tts_status` and `tts_generate`; model
+installation stays in the CLI.
+
+## Source installation
+
+After checking out this repository, run the installer from its root. It requires Node.js 26 or later
+and installs the editor dependencies with `npm ci`. The wizard checks for Git, `ffmpeg`,
+`ffprobe`, and a compatible Python when TTS is selected, and offers package-manager installation when supported. On Linux it installs OS packages
+only when run with the needed administrator privileges; otherwise install Git and FFmpeg with your
+distribution package manager and rerun.
+
+```sh
+node scripts/install.mjs
+```
+
+BreezyVoice model files and the bundled micromamba archive use repository-pinned versions and
+SHA-256 checks. Setup verifies downloads before extraction or publishing; synthesis verifies
+every model file before loading it. Unchanged files use an installation receipt for status
+queries. Setup and generation cannot overlap for the same TTS engine.
+
+Choose `none`, `kokoro`, `breezyvoice`, or both when prompted. It downloads only the selected TTS
+runtime and models. Kokoro's default is US English; select the desired `en-us`, `en-gb`, or `zh`
+languages in the wizard. For automation, make the selection explicit:
+
+```sh
+node scripts/install.mjs --tts kokoro --languages en-us,zh --yes
+node scripts/install.mjs --tts breezyvoice --yes
+node scripts/install.mjs --tts kokoro,breezyvoice --languages en-us,zh --yes
+node scripts/install.mjs --tts none --yes
+```
+
+The installer records its state and streamed log under `~/.splicewright/install/`. Each chosen TTS
+engine is set up through the same CLI command used after installation, then checked for ready status
+and the selected Kokoro languages. BreezyVoice setup uses a local Python 3.10 environment and pinned
+source checkout under `~/.splicewright/breezyvoice`; it needs at least 8 GiB free disk space. It
+supports macOS and Linux/WSL2. Native Windows BreezyVoice setup is unsupported because its
+`pynini` dependency is unavailable there; install it from WSL2. On Apple Silicon, setup uses the
+MPS-compatible flow path while keeping LLM and HiFT on CPU.
+
+After installation, create or open a project and start the editor:
+
+```sh
+mkdir trip && cd trip
+node <repo>/packages/cli/src/main.ts init --title "Trip"
+node <repo>/packages/cli/src/main.ts open
+```
+
+`<repo>` is the absolute path of your checkout. On Windows, run the BreezyVoice installer and
+editor together inside WSL2 (Ubuntu 24.04 provides Python 3.12). Open the editor's localhost URL
+in the Windows browser. Native Windows can install the editor and Kokoro without BreezyVoice.
+This is a source installer, not a published npm package or packaged desktop application.
+
+The editor's **Audio → Narration** panel selects Kokoro or BreezyVoice and installs a missing
+engine explicitly. BreezyVoice reference recordings and exact transcripts are stored as named
+profiles, shared by the editor, CLI, and MCP. Upload once, then select the saved voice; recordings
+must be 3–30 seconds and browser uploads are limited to 20 MB. Mandarin narration is limited to
+300 characters per generation. Generated audio is imported and inserted with one undo step.
+
+```sh
+splicewright tts status --engine breezyvoice
+splicewright tts setup --engine breezyvoice
+splicewright tts voice-add --name "My voice" --audio ~/voice.m4a --transcript-file ~/voice.txt
+splicewright tts voices
+splicewright tts generate --engine breezyvoice --voice-id <saved-id> --text "歡迎來到我的旅行日記。" --at 0
+```
+
+Without `npm link`, substitute `node <repo>/packages/cli/src/main.ts` for `splicewright`.
+Agents use `tts_status`, `tts_setup`, `tts_voice_list`, `tts_voice_register`, `tts_voice_delete`,
+and `tts_generate`. Keep existing Kokoro calls unchanged; for cloning, pass `engine: "breezyvoice"`
+and `voiceId`. Setup and BreezyVoice generation return a `jobId` immediately; inspect
+`tts_job_status` for completion and the insertion result. Jobs belong to the current MCP server
+session. Setup prepares pronunciation/tokenizer assets; generation is offline and never downloads
+models. The `SPLICEWRIGHT_BREEZYVOICE_HOME` variable changes the runtime/profile location.
 
 ## Working with an agent
 

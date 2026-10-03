@@ -6,6 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
+import { handleTtsRequest } from "./tts-api.ts";
 import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { addRecent, applyEditReview, applyLutPreset, fingerprint, getEditReview, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, revertEditReview, run, setEditReviewStatus, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
@@ -194,6 +195,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
           if (req.method !== "GET" && !sameOrigin(req)) return send(res, 403, { error: { code: "forbidden", message: "cross-origin request refused" } });
           const route = `${req.method} ${url.pathname}`;
           const recent = () => recentProjects().filter((r) => resolve(r.path) !== dir);
+          if (await handleTtsRequest(req, res, dir, snapshot)) return;
           if (route === "GET /api/project") return send(res, 200, hasProject() ? { dir, recent: recent(), ...snapshot() } : { dir, empty: true, recent: recent() });
           if (route === "POST /api/init") {
             if (hasProject()) return send(res, 409, { error: { code: "exists", message: "project.json already exists" } });

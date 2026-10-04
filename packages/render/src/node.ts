@@ -14,6 +14,7 @@ import { resolveExportPreset, withExportContainerTag } from "./export-preset.ts"
 import type { GradeLut } from "./grade-effect.ts";
 import { duckRanges } from "./duck.ts";
 import { projectAliases } from "./aliases.ts";
+import { renderLayered, type RenderResources } from "./layered-render.ts";
 
 export { duckRanges };
 
@@ -162,12 +163,12 @@ async function prepare(dir: string) {
   const needsCanvasEffects = project.tracks.some((track) => track.kind === "video" && track.items.some((item) => item.key || item.grade));
   const opts = { serveUrl, inputProps, browserExecutable: browserExecutable(), ...(needsCanvasEffects ? { chromiumOptions: { gl: "angle" as const } } : {}) };
   const composition = await selectComposition({ ...opts, id: ID });
-  return { ...opts, composition };
+  return { ...opts, composition, project, probes };
 }
 
 /** Renders one frame. `output` null returns the image buffer; `maxWidth` scales down (MCP uses 960). */
 export async function still(dir: string, frame: number, output: string | null, maxWidth?: number) {
-  const { composition, ...opts } = await prepare(dir);
+  const { composition, project: _project, probes: _probes, ...opts } = await prepare(dir);
   if (!Number.isInteger(frame) || frame < 0 || frame >= composition.durationInFrames)
     throw new Error(`frame ${frame} outside 0..${composition.durationInFrames - 1}`);
   if (output) mkdirSync(dirname(output), { recursive: true });
@@ -188,7 +189,7 @@ export async function still(dir: string, frame: number, output: string | null, m
  * ponytail: stills render one after another (~0.3 s each); render them concurrently if n grows.
  */
 export async function storyboard(dir: string, { from = 0, to, n = 12 }: { from?: number; to?: number; n?: number } = {}) {
-  const { composition, ...opts } = await prepare(dir);
+  const { composition, project: _project, probes: _probes, ...opts } = await prepare(dir);
   to = Math.min(to ?? composition.durationInFrames, composition.durationInFrames);
   if (!(to > from)) throw new Error(`empty range [${from}, ${to}) of 0..${composition.durationInFrames}`);
   n = Math.max(1, Math.min(24, Math.round(n), to - from));
@@ -204,6 +205,10 @@ export async function storyboard(dir: string, { from = 0, to, n = 12 }: { from?:
 export interface RenderOptions {
   output: string;
   preset?: string;
+  /** Experimental native FFmpeg video/audio route with Remotion graphics overlays. Defaults to Remotion. */
+  pipeline?: "remotion" | "layered";
+  /** Explicitly bound renderer resources for repeatable comparisons; omitted values preserve defaults. */
+  resources?: RenderResources;
   /** Timeline frames [from, to). */
   range?: [number, number];
   onProgress?: (progress: number) => void;
@@ -231,9 +236,9 @@ export async function limit(file: string) {
   }
 }
 
-export async function render(dir: string, { output, preset = "master", range, onProgress, onEncoding, cancelSignal, shouldCancel }: RenderOptions) {
+export async function render(dir: string, { output, preset = "master", pipeline = "remotion", resources, range, onProgress, onEncoding, cancelSignal, shouldCancel }: RenderOptions) {
   if (shouldCancel?.()) throw new Error("render cancelled");
-  const { composition, ...opts } = await prepare(dir);
+  const { composition, project, probes, ...opts } = await prepare(dir);
   if (shouldCancel?.()) throw new Error("render cancelled");
   const exportPreset = resolveExportPreset(
     preset,
@@ -241,9 +246,15 @@ export async function render(dir: string, { output, preset = "master", range, on
     { width: composition.width, height: composition.height, fps: composition.fps },
   );
   mkdirSync(dirname(output), { recursive: true });
+  if (pipeline === "layered") {
+    return renderLayered({ dir, output, preset, presetOptions: exportPreset, range, project, probes, remotion: { ...opts, composition }, resources, cancelSignal, shouldCancel, onProgress, onEncoding });
+  }
   await renderMedia({
     ...opts,
     ...exportPreset,
+    ...(resources?.concurrency !== undefined ? { concurrency: resources.concurrency } : {}),
+    ...(resources?.mediaCacheSizeInBytes !== undefined ? { mediaCacheSizeInBytes: resources.mediaCacheSizeInBytes } : {}),
+    ...(resources?.offthreadVideoCacheSizeInBytes !== undefined ? { offthreadVideoCacheSizeInBytes: resources.offthreadVideoCacheSizeInBytes } : {}),
     composition,
     codec: exportPreset.codec ?? "h264",
     outputLocation: output,
@@ -257,7 +268,7 @@ export async function render(dir: string, { output, preset = "master", range, on
     },
   });
   if ((composition.props.project as Project).meta.limiter) await limit(output);
-  return { output, frames: range ? range[1] - range[0] : composition.durationInFrames, preset };
+  return { output, frames: range ? range[1] - range[0] : composition.durationInFrames, preset, pipelineUsed: "remotion" as const, fallbackReason: undefined };
 }
 
 export interface Job {

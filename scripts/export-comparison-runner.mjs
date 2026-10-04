@@ -175,9 +175,11 @@ if (args.includes('--check')) {
             }
             const phasePeaks = entry.peakRssMiBByPhase ??= {};
             const phasePeak = phasePeaks[phase.stage] ??= { aggregateRssMiB: 0, roleRssMiB: {} };
+            // roleRssMiB keeps per-role maxima from different samples; this snapshot is one coherent sample.
+            if (rss > phasePeak.aggregateRssMiB) phasePeak.roleRssMiBAtAggregatePeak = Object.fromEntries(Object.entries(byRole).map(([role, kib]) => [role, kib / 1024]));
             phasePeak.aggregateRssMiB = Math.max(phasePeak.aggregateRssMiB, rss);
             for (const [role, kib] of Object.entries(byRole)) phasePeak.roleRssMiB[role] = Math.max(phasePeak.roleRssMiB[role] ?? 0, kib / 1024);
-            appendFileSync(join(root, `${name}-memory.jsonl`), JSON.stringify({ at: new Date().toISOString(), phase: phase.stage, batch: phase.batch, processes: rows.map(row => ({ pid: row.pid, ppid: row.ppid, pgid: row.pgid, uid: row.uid, role: classifyTrialProcess(row, child.pid, process.pid), rssKiB: row.rss })), rssMiBByRole: Object.fromEntries(Object.entries(byRole).map(([role, kib]) => [role, kib / 1024])), aggregateRssMiB: rss, unknownProcessCount: byRole.unknown ? rows.filter(row => classifyTrialProcess(row, child.pid, process.pid) === 'unknown').length : 0, note: 'RSS sums may double-count shared pages and omit processes shorter than the one-second sampling interval.' }) + '\n');
+            appendFileSync(join(root, `${name}-memory.jsonl`), JSON.stringify({ at: new Date().toISOString(), phase: phase.stage, batch: phase.batch, processes: rows.map(row => ({ pid: row.pid, ppid: row.ppid, pgid: row.pgid, uid: row.uid, role: classifyTrialProcess(row, child.pid, process.pid), rssKiB: row.rss, cpuPercent: row.cpu })), rssMiBByRole: Object.fromEntries(Object.entries(byRole).map(([role, kib]) => [role, kib / 1024])), aggregateRssMiB: rss, aggregateCpuPercent: cpu, unknownProcessCount: byRole.unknown ? rows.filter(row => classifyTrialProcess(row, child.pid, process.pid) === 'unknown').length : 0, note: 'RSS sums may double-count shared pages and omit processes shorter than the one-second sampling interval.' }) + '\n');
             entry.peakScratchDiskMiB = Math.max(entry.peakScratchDiskMiB, (scratchBytes(scratch) + Math.max(0, scratchBytes(projectScratch) - initialProjectBytes)) / 1048576);
             if (rss > config.guards.rssMiB) abort('process group RSS ceiling');
             if (growth > config.guards.swapGrowthMiB) abort('system swap growth ceiling');

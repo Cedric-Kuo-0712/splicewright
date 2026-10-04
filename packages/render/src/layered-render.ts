@@ -9,7 +9,7 @@ import type { Project } from "@splicewright/core";
 import { fingerprint, type Probe } from "@splicewright/core/node";
 import { audioTransitionFades, planLayeredExport, type LayeredPlan } from "./layered.ts";
 import { withExportContainerTag } from "./export-preset.ts";
-import { graphicsFrameBatches, pipeGraphicsFrames } from "./graphics-stream.ts";
+import { graphicsFrameBatches, pipeGraphicsFrames, writePng } from "./graphics-stream.ts";
 
 type RenderPreset = { crf?: number; scale?: number; concurrency?: number; codec?: "h264" | "h265"; videoBitrate?: string; hardwareAcceleration?: "disable" | "if-possible" | "required" };
 type RenderLike = Parameters<typeof renderMedia>[0];
@@ -156,7 +156,7 @@ function activeWindowFilter(segment: LayeredPlan["video"][number], plan: Layered
   return [`trim=duration=${time(segment.renderEnd - segment.decodeStart, plan.fps)}`, "setpts=PTS-STARTPTS", `fps=${plan.fps}`, "format=rgb24", ...fit, "setsar=1", "format=rgba"].join(",");
 }
 
-async function pipeActiveWindowReader(args: string[], input: Writable, signal: AbortSignal, expectedBytes: number, batch: number) {
+async function pipeActiveWindowReader(args: string[], input: Writable, signal: AbortSignal, expectedBytes: number, frameBytes: number, batch: number) {
   if (signal.aborted) throw signal.reason ?? new Error("render cancelled");
   setExportMemoryPhase("active-window-reader-start", batch);
   const child = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -180,7 +180,13 @@ async function pipeActiveWindowReader(args: string[], input: Writable, signal: A
     if (signal.aborted) throw signal.reason ?? new Error("render cancelled");
     if (result.error) throw result.error;
     if (result.code !== 0) throw new Error(stderr.trim() || `active-window FFmpeg reader exited ${result.code}`);
-    if (bytes !== expectedBytes) throw new Error(`active-window reader returned ${bytes} bytes; expected ${expectedBytes}`);
+    if (bytes > expectedBytes || bytes % frameBytes) throw new Error(`active-window reader returned ${bytes} bytes; expected ${expectedBytes}`);
+    // A stream shorter than its probe ends early; the existing graph's
+    // eof_action=pass shows the background there, so pad with transparent frames.
+    if (bytes < expectedBytes) {
+      const blank = Buffer.alloc(frameBytes);
+      for (; bytes < expectedBytes; bytes += frameBytes) await writePng(input, blank, signal);
+    }
     setExportMemoryPhase("active-window-reader-end", batch);
   } catch (error) {
     setExportMemoryPhase("active-window-reader-failed", batch);
@@ -278,7 +284,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
   const stagedOutput = join(dirname(output), `.${basename(output, outputExt)}.layered-${randomUUID()}${outputExt}`);
   try {
     mkdirSync(dirname(output), { recursive: true });
-    let graphicsMs = 0, graphicsProgress = plan.windows.length ? 0 : 1, encodeProgress = 0;
+    let graphicsMs = 0, graphicsProgress = plan.windows.length || activeWindowUsed ? 0 : 1, encodeProgress = 0;
     const frameCount = plan.to - plan.from;
     const reportProgress = () => args.onProgress?.(0.72 * graphicsProgress + 0.28 * encodeProgress);
     const produceGraphics = async (input: Writable, signal: AbortSignal) => {
@@ -437,7 +443,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
           const expectedBytes = frames * plan.width * plan.height * 4;
           if (!Number.isSafeInteger(expectedBytes)) throw new Error("active-window frame byte size exceeds exact integer range");
           const readerArgs = ["-hide_banner", "-loglevel", "error", "-threads", "2", "-ss", sourceTime(sourceIn, plan.fps), "-i", path, "-filter_threads", String(filterThreads), "-vf", activeWindowFilter(segment, plan), "-an", "-frames:v", String(frames), "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"];
-          await pipeActiveWindowReader(readerArgs, input, signal, expectedBytes, batch);
+          await pipeActiveWindowReader(readerArgs, input, signal, expectedBytes, plan.width * plan.height * 4, batch);
           graphicsProgress = (batch + 1) / plan.video.length;
           reportProgress();
         }

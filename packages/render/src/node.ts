@@ -7,13 +7,15 @@ import { fileURLToPath } from "node:url";
 import { bundle } from "@remotion/bundler";
 import { makeCancelSignal, renderMedia, renderStill, selectComposition } from "@remotion/renderer";
 import { fingerprint, load, loadCtx, readAssets, sizesOf } from "@splicewright/core/node";
-import { captionWords, parseCube, type Project } from "@splicewright/core";
+import { captionWords, durationFrames, fontAssetFamily, itemSpan, parseCube, themeOf, type Project } from "@splicewright/core";
 import { audioFxPath, ffmpeg, grid, measureFinalMix, reverseAudioPath, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
 import { resolveExportPreset, withExportContainerTag } from "./export-preset.ts";
 import type { GradeLut } from "./grade-effect.ts";
 import { duckRanges } from "./duck.ts";
 import { projectAliases } from "./aliases.ts";
+import { planLayeredExport } from "./layered.ts";
+import { estimateGraphicsStagingBytes, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, validateLayeredMedia, type LayeredRenderArgs, type RenderResources } from "./layered-render.ts";
 
 export { duckRanges };
 
@@ -162,12 +164,12 @@ async function prepare(dir: string) {
   const needsCanvasEffects = project.tracks.some((track) => track.kind === "video" && track.items.some((item) => item.key || item.grade));
   const opts = { serveUrl, inputProps, browserExecutable: browserExecutable(), ...(needsCanvasEffects ? { chromiumOptions: { gl: "angle" as const } } : {}) };
   const composition = await selectComposition({ ...opts, id: ID });
-  return { ...opts, composition };
+  return { ...opts, composition, project, probes };
 }
 
 /** Renders one frame. `output` null returns the image buffer; `maxWidth` scales down (MCP uses 960). */
 export async function still(dir: string, frame: number, output: string | null, maxWidth?: number) {
-  const { composition, ...opts } = await prepare(dir);
+  const { composition, project: _project, probes: _probes, ...opts } = await prepare(dir);
   if (!Number.isInteger(frame) || frame < 0 || frame >= composition.durationInFrames)
     throw new Error(`frame ${frame} outside 0..${composition.durationInFrames - 1}`);
   if (output) mkdirSync(dirname(output), { recursive: true });
@@ -188,7 +190,7 @@ export async function still(dir: string, frame: number, output: string | null, m
  * ponytail: stills render one after another (~0.3 s each); render them concurrently if n grows.
  */
 export async function storyboard(dir: string, { from = 0, to, n = 12 }: { from?: number; to?: number; n?: number } = {}) {
-  const { composition, ...opts } = await prepare(dir);
+  const { composition, project: _project, probes: _probes, ...opts } = await prepare(dir);
   to = Math.min(to ?? composition.durationInFrames, composition.durationInFrames);
   if (!(to > from)) throw new Error(`empty range [${from}, ${to}) of 0..${composition.durationInFrames}`);
   n = Math.max(1, Math.min(24, Math.round(n), to - from));
@@ -204,6 +206,10 @@ export async function storyboard(dir: string, { from = 0, to, n = 12 }: { from?:
 export interface RenderOptions {
   output: string;
   preset?: string;
+  /** Experimental native FFmpeg video/audio route with Remotion graphics overlays. Defaults to Remotion. */
+  pipeline?: "remotion" | "layered";
+  /** Explicitly bound renderer resources for repeatable comparisons; omitted values preserve defaults. */
+  resources?: RenderResources;
   /** Timeline frames [from, to). */
   range?: [number, number];
   onProgress?: (progress: number) => void;
@@ -231,9 +237,43 @@ export async function limit(file: string) {
   }
 }
 
-export async function render(dir: string, { output, preset = "master", range, onProgress, onEncoding, cancelSignal, shouldCancel }: RenderOptions) {
+export async function render(dir: string, { output, preset = "master", pipeline = "remotion", resources, range, onProgress, onEncoding, cancelSignal, shouldCancel }: RenderOptions) {
   if (shouldCancel?.()) throw new Error("render cancelled");
-  const { composition, ...opts } = await prepare(dir);
+  if (pipeline === "layered") {
+    const project = load(dir);
+    const probes = readAssets(dir);
+    const selectedRange: [number, number] = range ?? [0, durationFrames(project)];
+    const exportPreset = resolveExportPreset(preset, undefined, { width: project.meta.width, height: project.meta.height, fps: project.meta.fps });
+    const plan = planLayeredExport(project, probes, ...selectedRange, exportPreset.scale ?? 1);
+    validateLayeredMedia(dir, project, probes, plan);
+    const outputWidth = Math.round(project.meta.width * (exportPreset.scale ?? 1));
+    const outputHeight = Math.round(project.meta.height * (exportPreset.scale ?? 1));
+    const activeFrames = plan.windows.reduce((sum, [start, end]) => sum + end - start, 0);
+    const stagingEstimate = estimateGraphicsStagingBytes(outputWidth, outputHeight, activeFrames);
+    if (stagingEstimate > LAYERED_GRAPHICS_STAGING_LIMIT_BYTES)
+      throw new Error(`layered export unsupported: graphics staging estimate ${stagingEstimate} bytes exceeds ${LAYERED_GRAPHICS_STAGING_LIMIT_BYTES}-byte limit`);
+    if (existsSync(join(dir, "splicewright.config.ts")))
+      throw new Error("layered export unsupported: project configuration requires the Remotion route");
+    let remotion: LayeredRenderArgs["remotion"] | undefined;
+    if (plan.windows.length) {
+      const graphicsProject = projectForLayeredGraphics(project, plan);
+      const ctx = loadCtx(dir);
+      const inputProps = {
+        project: graphicsProject,
+        duck: {}, sizes: {}, durations: {}, frameRates: {}, reverseProxies: [], reverseAudioFx: {}, animated: {},
+        words: captionWords(graphicsProject, ctx), luts: {}, audioFx: {}, fontVersions: fontVersionsOf(dir, graphicsProject),
+      };
+      const serveUrl = await bundleProject(dir);
+      const opts = { serveUrl, inputProps, browserExecutable: browserExecutable() };
+      const composition = await selectComposition({ ...opts, id: ID });
+      remotion = { ...opts, composition };
+    }
+    mkdirSync(dirname(output), { recursive: true });
+    return renderLayered({ dir, output, preset, presetOptions: exportPreset, range, project, probes,
+      remotion: remotion ?? { composition: { durationInFrames: plan.to }, inputProps: {} } as LayeredRenderArgs["remotion"],
+      resources, cancelSignal, shouldCancel, onProgress, onEncoding });
+  }
+  const { composition, project, probes, ...opts } = await prepare(dir);
   if (shouldCancel?.()) throw new Error("render cancelled");
   const exportPreset = resolveExportPreset(
     preset,
@@ -244,6 +284,9 @@ export async function render(dir: string, { output, preset = "master", range, on
   await renderMedia({
     ...opts,
     ...exportPreset,
+    ...(resources?.concurrency !== undefined ? { concurrency: resources.concurrency } : {}),
+    ...(resources?.mediaCacheSizeInBytes !== undefined ? { mediaCacheSizeInBytes: resources.mediaCacheSizeInBytes } : {}),
+    ...(resources?.offthreadVideoCacheSizeInBytes !== undefined ? { offthreadVideoCacheSizeInBytes: resources.offthreadVideoCacheSizeInBytes } : {}),
     composition,
     codec: exportPreset.codec ?? "h264",
     outputLocation: output,
@@ -257,7 +300,38 @@ export async function render(dir: string, { output, preset = "master", range, on
     },
   });
   if ((composition.props.project as Project).meta.limiter) await limit(output);
-  return { output, frames: range ? range[1] - range[0] : composition.durationInFrames, preset };
+  return { output, frames: range ? range[1] - range[0] : composition.durationInFrames, preset, pipelineUsed: "remotion" as const, fallbackReason: undefined };
+}
+
+/** Keep original timeline/video metadata for anchors and global frame numbers, while removing
+ * graphics outside the requested windows so their assets and components are never prepared. */
+function projectForLayeredGraphics(project: Project, plan: ReturnType<typeof planLayeredExport>): Project {
+  const active = (item: Project["tracks"][number]["items"][number]) => {
+    if (!plan.windows.length) return false;
+    const span = itemSpan(project, item);
+    return !!span && plan.windows.some(([from, to]) => span.start < to && span.start + span.duration > from);
+  };
+  const tracks = project.tracks.map((track) => {
+    if (track.kind === "video") return track;
+    if (track.hidden || track.kind !== "overlay" && track.kind !== "caption") return { ...track, hidden: true } as typeof track;
+    return { ...track, items: track.items.filter((item) => (track.kind !== "caption" || ("text" in item && !!item.text)) && active(item)) } as typeof track;
+  });
+  const fontIds = new Set<string>();
+  const addFont = (value: unknown) => { if (typeof value === "string" && project.assets[value]?.kind === "font") fontIds.add(value); };
+  const theme = themeOf(project);
+  for (const track of tracks) {
+    if (track.hidden) continue;
+    if (track.kind === "caption") { addFont(track.textStyle?.font ?? theme?.roles.subtitle?.font); if (track.highlight === "word") addFont(theme?.roles.emphasis?.font); }
+    if (track.kind === "overlay") for (const item of track.items) if (item.component === "Text") {
+      const props = item.props as { role?: import("@splicewright/core").FontRole; textStyle?: import("@splicewright/core").TextStyle; style?: Record<string, unknown> };
+      const family = props.style?.fontFamily;
+      if (typeof family === "string") {
+        for (const asset of Object.values(project.assets)) if (asset.kind === "font" && family.includes(fontAssetFamily(asset.id))) fontIds.add(asset.id);
+      } else addFont(props.textStyle?.font ?? theme?.roles[props.role ?? "title"]?.font);
+    }
+  }
+  const assets = Object.fromEntries(Object.entries(project.assets).filter(([id, asset]) => asset.kind !== "font" || fontIds.has(id)));
+  return { ...project, tracks, assets };
 }
 
 export interface Job {

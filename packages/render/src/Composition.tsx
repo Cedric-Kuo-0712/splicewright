@@ -41,6 +41,8 @@ export interface Props extends Record<string, unknown> {
   audioFx?: Record<string, string>;
   fontVersions?: Record<string, string>;
   sampleItemId?: string;
+  /** Internal export mode: render the existing React graphics with alpha, without media layers. */
+  graphicsOnly?: boolean;
   /** Carried through so the Node side can read config presets via selectComposition(). */
   presets?: Config["presets"];
 }
@@ -505,7 +507,7 @@ const OverlayLayer: React.FC<{ p: Project; item: OverlayItem; from: number; C: R
   return <AbsoluteFill style={{ ...style, ...(animated.mask && maskStyle(animated.mask, [p.meta.width, p.meta.height], [p.meta.width, p.meta.height])) }}>{layer}</AbsoluteFill>;
 };
 
-export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, durations = {}, frameRates = {}, reverseProxies, reverseAudioFx, animated = {}, words = {}, luts = {}, audioFx, fontVersions, sampleItemId, components }) => {
+export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, durations = {}, frameRates = {}, reverseProxies, reverseAudioFx, animated = {}, words = {}, luts = {}, audioFx, fontVersions, sampleItemId, graphicsOnly = false, components }) => {
   const registry: Record<string, React.ComponentType<any>> = { Text, Image, Sticker, CaptionLayer, ...components };
   const component = (name: string, where: string) => {
     const C = registry[name];
@@ -518,12 +520,12 @@ export const SplicewrightProject: React.FC<Props & { components?: Config["compon
     return <OverlayLayer p={p} item={item as OverlayItem} from={from} C={C} />;
   };
   return (
-    <AbsoluteFill className="swr" style={{ backgroundColor: p.meta.background ?? "#000", fontFamily: FONT, lineHeight: 1.5 }}>
+    <AbsoluteFill className="swr" style={{ backgroundColor: graphicsOnly ? "transparent" : p.meta.background ?? "#000", fontFamily: FONT, lineHeight: 1.5 }}>
       <style>{BASE}</style>
       <FontAssets project={p} versions={fontVersions} />
       {p.tracks.map((t) =>
         // ponytail: `hidden` drops the whole track, audio included; split visual/audio if a use appears.
-        t.hidden ? null : t.kind === "caption" ? (
+        t.hidden || graphicsOnly && (t.kind === "video" || t.kind === "audio") ? null : t.kind === "caption" ? (
           <Captions key={t.id} p={p} t={t} Layer={component(t.style ?? "CaptionLayer", t.id)} words={words} />
         ) : (
           <React.Fragment key={t.id}>

@@ -28,7 +28,7 @@ function buildConfig({ manifestFile, baselineWorktree, candidateWorktree, outFil
   const manifest = JSON.parse(readFileSync(resolve(manifestFile), 'utf8'));
   if (manifest.seed !== 20261004) throw new Error('Expected fixed fixture seed 20261004');
   const baseline = sourceIdentity(baselineWorktree), candidate = sourceIdentity(candidateWorktree);
-  if (baseline.commit !== BASELINE_COMMIT) throw new Error(`Baseline must be controlled 4 GiB commit ${BASELINE_COMMIT}; got ${baseline.commit}`);
+  if (baseline.commit !== git(baseline.worktree, 'rev-parse', BASELINE_COMMIT)) throw new Error(`Baseline must be controlled 4 GiB commit ${BASELINE_COMMIT}; got ${baseline.commit}`);
   if (baseline.dirtyRenderFiles.length) throw new Error('Baseline renderer has uncommitted changes');
   if (!candidate.dirtyRenderFiles.length && candidate.commit === baseline.commit) throw new Error('Candidate renderer must identify a distinct implementation');
   const fixtures = manifest.fixtures.filter(fixture => fixture.variant === 'chunk-stress');
@@ -49,6 +49,8 @@ function buildConfig({ manifestFile, baselineWorktree, candidateWorktree, outFil
   const fingerprints = [
     ...Object.values(manifest.sources).map(source => ({ path: source.path, sha256: source.sha256 })),
     ...fixtures.map(fixture => ({ path: resolve(fixture.projectDir, 'project.json'), sha256: fixture.projectSha256 })),
+    ...[baseline, candidate].flatMap(source => git(source.worktree, 'ls-files', 'packages/render/src').split('\n').filter(Boolean)
+      .map(file => ({ path: resolve(source.worktree, file), sha256: sha256(readFileSync(resolve(source.worktree, file))) }))),
   ];
   const config = {
     schemaVersion: 1,

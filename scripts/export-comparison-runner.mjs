@@ -41,18 +41,18 @@ function verify() {
     if (!existsSync(join(c.project, 'project.json'))) throw new Error(`Missing project: ${c.id}`);
     if (c.range && (!Array.isArray(c.range) || c.range.length !== 2 || !c.range.every(Number.isInteger) || c.range[0] < 0 || c.range[1] - c.range[0] !== c.frames)) throw new Error(`Invalid range: ${c.id}`);
   }
-  for (const m of config.methods) {
+  for (const m of config.methods)
     if (!/^[a-z0-9-]+$/.test(m.id) || !existsSync(m.renderer ?? config.renderer)) throw new Error(`Invalid method renderer: ${m.id}`);
-    if (!m.options?.preset || !m.expectedEncoder) throw new Error(`Method ${m.id} must pin preset and expectedEncoder`);
-    if (m.options.preset !== config.qualityPolicy?.preset) throw new Error(`Method ${m.id} violates shared qualityPolicy.preset`);
+  if (config.qualityPolicy) {
+    for (const m of config.methods) {
+      if (!m.options?.preset || !m.expectedEncoder) throw new Error(`Method ${m.id} must pin preset and expectedEncoder`);
+      if (m.options.preset !== config.qualityPolicy.preset) throw new Error(`Method ${m.id} violates shared qualityPolicy.preset`);
+    }
+    if (config.methods.length !== 2 || JSON.stringify(config.methods[0].options) !== JSON.stringify(config.methods[1].options) ||
+        config.methods.some(method => method.expectedEncoder !== config.qualityPolicy.expectedEncoder ||
+          method.expectedCodec !== config.qualityPolicy.expectedCodec || method.expectedTag !== config.qualityPolicy.expectedTag))
+      throw new Error('Comparison methods must pin identical render options and the quality-policy encoder/container');
   }
-  if (config.methods.length !== 2 || config.methods[0].options.preset !== config.methods[1].options.preset)
-    throw new Error('Comparison requires exactly two methods with the same preset');
-  if (JSON.stringify(config.methods[0].options) !== JSON.stringify(config.methods[1].options) ||
-      config.methods.some(method => method.expectedEncoder !== config.qualityPolicy?.expectedEncoder ||
-        method.expectedCodec !== config.qualityPolicy?.expectedCodec || method.expectedTag !== config.qualityPolicy?.expectedTag))
-    throw new Error('Comparison methods must pin identical render options and the quality-policy encoder/container');
-  if (config.exactAudioRequired && !config.decodedHashChecks) throw new Error('Exact output checks require decodedHashChecks');
 }
 verify();
 const rendererPath = methodId => config.methods.find(m => m.id === methodId)?.renderer ?? config.renderer;

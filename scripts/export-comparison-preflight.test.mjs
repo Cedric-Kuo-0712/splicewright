@@ -48,3 +48,11 @@ it('refuses different quality presets across the pair during preflight', () => {
     { id: 'candidate', expectedEncoder: 'hevc_videotoolbox', options: { preset: 'master' } },
   ] })).toThrow(/shared qualityPolicy.preset/);
 });
+
+it('keeps legacy comparisons with different encoder presets available without a shared quality policy', () => {
+  expect(JSON.parse(invoke({ qualityPolicy: undefined, methods: [
+    { id: 'cpu', options: { preset: 'master' } },
+    { id: 'h264', options: { preset: 'h264-hardware' } },
+    { id: 'h265', options: { preset: 'h265-hardware' } },
+  ] })).methods).toBe(3);
+});

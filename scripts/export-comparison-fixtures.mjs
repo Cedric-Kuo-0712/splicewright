@@ -122,11 +122,11 @@ export function createFixtureProject({ caseId, variant, seed = DEFAULT_SEED, med
     assets,
     tracks: [
       { id: "video_1", name: "V1", kind: "video", magnetic: true, items: clips },
-      isChunkStress
-        ? { id: "captions_1", name: "Captions", kind: "overlay", items: stressOverlays }
-        : { id: "captions_1", name: "Captions", kind: "caption", items: captions },
+      ...(isChunkStress
+        ? Array.from({ length: 3 }, (_, index) => ({ id: `captions_${index + 1}`, name: `Captions ${index + 1}`, kind: "overlay", items: stressOverlays.filter((_, itemIndex) => itemIndex % 3 === index) }))
+        : [{ id: "captions_1", name: "Captions", kind: "caption", items: captions }]),
     ],
-    ids: { clip: 2, caption: 7 },
+    ids: { clip: isChunkStress ? 6 : 2, caption: isChunkStress ? 10 : 7 },
   };
 }
 
@@ -314,10 +314,7 @@ export async function buildExportComparisonFixtures({ projectDir, outDir, mediaR
       await writeJson(resolve(projectDirPath, ".splicewright/assets.json"), cache);
       const assetDurations = Object.fromEntries(Object.entries(mediaById).map(([id, sourceInfo]) => [id, sourceInfo.duration]));
       const errors = validate(project, undefined, { assetDurations });
-      const blockingErrors = variant === "chunk-stress"
-        ? errors.filter((error) => !/^captions_1: caption_overlay_\d+ overlaps caption_overlay_\d+$/.test(error))
-        : errors;
-      if (blockingErrors.length) throw new Error(`${fixtureCase.caseId}/${variant} failed core validation: ${blockingErrors.join("; ")}`);
+      if (errors.length) throw new Error(`${fixtureCase.caseId}/${variant} failed core validation: ${errors.join("; ")}`);
       const video = project.tracks.find((track) => track.kind === "video");
       const entry = {
         projectDir: projectDirPath,

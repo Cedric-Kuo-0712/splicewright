@@ -48,8 +48,8 @@ describe("export comparison fixture configuration", () => {
   it("builds a bounded-graphics stress fixture with overlapping safe captions and alternating transitions", () => {
     const fixture = createFixtureProject({ caseId: "real", variant: "chunk-stress", seed: 20261004, media: source });
     const video = fixture.tracks.find(track => track.kind === "video");
-    const overlays = fixture.tracks.find(track => track.kind === "overlay");
-    expect(validate(fixture, undefined, { assetDurations: { real_source: source.duration } })).toHaveLength(9);
+    const overlays = { items: fixture.tracks.filter(track => track.kind === "overlay").flatMap(track => track.items).sort((a, b) => a.start - b.start) };
+    expect(validate(fixture, undefined, { assetDurations: { real_source: source.duration } })).toEqual([]);
     expect(video.items).toHaveLength(6);
     expect(video.items.slice(0, 5).map(item => item.transition.kind)).toEqual(["dissolve", "dip", "dissolve", "dip", "dissolve"]);
     expect(overlays.items).toHaveLength(10);

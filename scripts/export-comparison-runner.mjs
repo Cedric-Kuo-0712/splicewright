@@ -21,9 +21,13 @@ const hash = file => {
 };
 function scratchBytes(dir) {
   if (!existsSync(dir)) return 0;
-  return readdirSync(dir, { withFileTypes: true }).reduce((sum, entry) => {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); }
+  catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
+  return entries.reduce((sum, entry) => {
     const path = join(dir, entry.name);
-    return sum + (entry.isSymbolicLink() ? 0 : entry.isDirectory() ? scratchBytes(path) : entry.isFile() ? statSync(path).size : 0);
+    try { return sum + (entry.isSymbolicLink() ? 0 : entry.isDirectory() ? scratchBytes(path) : entry.isFile() ? statSync(path).size : 0); }
+    catch (error) { if (error.code === 'ENOENT') return sum; throw error; }
   }, 0);
 }
 const save = (file, data) => writeFileSync(file, JSON.stringify(data, null, 2) + '\n');

@@ -1,6 +1,6 @@
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import type { Writable } from "node:stream";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -41,6 +41,16 @@ export interface LayeredRenderArgs {
 const seconds = (frames: number, fps: number) => Number((frames / fps).toFixed(9));
 const time = (frames: number, fps: number) => seconds(frames, fps).toFixed(9);
 const sourceTime = (value: number, fps: number) => (Math.round(value * fps) / fps).toFixed(9);
+export function setExportMemoryPhase(stage: string, batch: number | null = null) {
+  const path = process.env.SPLICEWRIGHT_EXPORT_MEMORY_PHASE_FILE;
+  if (path) writeFileSync(path, JSON.stringify({ stage, batch, at: new Date().toISOString() }));
+}
+export function filterBufferedFramesArgs(value: number | undefined, supportsOption: boolean) {
+  if (value === undefined) return [];
+  if (value !== 64 && value !== 128) throw new Error("filterBufferedFrames must be 64 or 128");
+  if (!supportsOption) throw new Error("This FFmpeg build does not support -filter_buffered_frames");
+  return ["-filter_buffered_frames", String(value)];
+}
 /** Historical public name retained for compatibility; streamed frame buffers use the queue limit below. */
 export const LAYERED_GRAPHICS_STAGING_LIMIT_BYTES = 4 * 1024 * 1024 * 1024;
 export const LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES = 256 * 1024 * 1024;
@@ -117,7 +127,12 @@ function addAudioEffects(item: { fadeIn?: number; fadeOut?: number }, offset: nu
 async function runFfmpeg(args: string[], cancelSignal: RenderLike["cancelSignal"], shouldCancel: (() => boolean) | undefined, onProgress: (value: number) => void, durationSeconds: number, produceGraphics?: (input: Writable, signal: AbortSignal) => Promise<void>) {
   if (shouldCancel?.()) throw new Error("render cancelled");
   const controller = new AbortController();
-  const child = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-progress", "pipe:2", "-nostats", ...args], { stdio: [produceGraphics ? "pipe" : "ignore", "ignore", "pipe"] });
+  const rawCap = process.env.SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES;
+  const filterBufferedFrames = rawCap === undefined ? undefined : Number(rawCap);
+  const supportsCap = filterBufferedFrames === undefined || execFileSync("ffmpeg", ["-hide_banner", "-h", "full"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).includes("-filter_buffered_frames");
+  const capArgs = filterBufferedFramesArgs(filterBufferedFrames, supportsCap);
+  setExportMemoryPhase("native-ffmpeg");
+  const child = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-progress", "pipe:2", "-nostats", ...capArgs, ...args], { stdio: [produceGraphics ? "pipe" : "ignore", "ignore", "pipe"] });
   let stderr = "", progressLine = "", producerDone = !produceGraphics, closed = false;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   const abort = (error: unknown) => {
@@ -203,6 +218,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
       if (shouldCancel()) throw new Error("render cancelled");
       const activeFrameCount = plan.windows.reduce((count, [start, end]) => count + end - start, 0);
       let completedFrames = 0;
+      let graphicsBatchIndex = 0;
       // Remotion registers several cancellation listeners per call. Retain all
       // of the current batch's listeners, then release them before the next one.
       const batchCancelCallbacks = new Set<() => void>();
@@ -221,6 +237,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
         await pipeGraphicsFrames({ input, from: plan.from, to: plan.to, width: outputWidth, height: outputHeight,
           batches: graphicsFrameBatches(plan.windows, scheduling), concurrency: frameConcurrency, limitBytes: LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, signal,
           render: async (frames, onFrameBuffer) => {
+            setExportMemoryPhase("graphics-batch", graphicsBatchIndex++);
             const pagesBefore = new Set(await browser!.pages());
             try {
               await renderFrames({
@@ -325,6 +342,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
     const encodeStart = performance.now();
     if (shouldCancel()) throw new Error("render cancelled");
     await runFfmpeg(tagged, args.cancelSignal, shouldCancel, (p) => { encodeProgress = Math.max(encodeProgress, p); reportProgress(); }, seconds(frameCount, plan.fps), plan.windows.length ? produceGraphics : undefined);
+    setExportMemoryPhase("render-complete");
     const encodeMs = performance.now() - encodeStart;
     if (shouldCancel()) throw new Error("render cancelled");
     renameSync(stagedOutput, output);

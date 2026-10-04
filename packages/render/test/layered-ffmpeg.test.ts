@@ -2,7 +2,15 @@ import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { createProject, type VideoItem } from "@splicewright/core";
 import { planLayeredExport, type LayeredPlan } from "../src/layered.ts";
-import { audioClipFilters, makeVideoChain } from "../src/layered-render.ts";
+import { audioClipFilters, filterBufferedFramesArgs, makeVideoChain } from "../src/layered-render.ts";
+
+it("keeps the experimental filter buffer cap opt-in and capability checked", () => {
+  expect(filterBufferedFramesArgs(undefined, false)).toEqual([]);
+  expect(filterBufferedFramesArgs(64, true)).toEqual(["-filter_buffered_frames", "64"]);
+  expect(filterBufferedFramesArgs(128, true)).toEqual(["-filter_buffered_frames", "128"]);
+  expect(() => filterBufferedFramesArgs(64, false)).toThrow(/does not support/);
+  expect(() => filterBufferedFramesArgs(256, true)).toThrow(/must be 64 or 128/);
+});
 
 let available = false;
 try { execFileSync("ffmpeg", ["-version"], { stdio: "ignore" }); available = true; } catch {}

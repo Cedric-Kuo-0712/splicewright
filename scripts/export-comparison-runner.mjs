@@ -1,5 +1,5 @@
 import { outputVideoEncoder } from "./export-output-encoder.mjs";
-import { trialProcesses, trialProcessGroups, stopTrialGroups } from "./export-resource-processes.mjs";
+import { trialProcesses, trialProcessGroups, stopTrialGroups, classifyTrialProcess } from "./export-resource-processes.mjs";
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
@@ -36,7 +36,7 @@ const save = (file, data) => writeFileSync(file, JSON.stringify(data, null, 2) +
 function verify() {
   if (!config.cases?.length || !config.methods?.length || !config.renderer) throw new Error('Missing cases/methods/renderer');
   if ((config.exactAudioRequired || config.exactVideoMethods?.length) && !config.decodedHashChecks) throw new Error('Exact output checks require decodedHashChecks');
-  if (!(config.guards?.rssMiB > 0 && config.guards.trialSeconds > 0 && config.guards.swapGrowthMiB >= 0)) throw new Error('Invalid guards');
+  if (!(config.guards?.rssMiB > 0 && config.guards.trialSeconds > 0 && config.guards.swapGrowthMiB >= 0 && (config.guards.samplingMs === undefined || config.guards.samplingMs >= 250))) throw new Error('Invalid guards');
   for (const file of config.fingerprints ?? []) if (hash(file.path) !== file.sha256) throw new Error(`Input changed: ${file.path}`);
   for (const c of config.cases) {
     if (!/^[a-z0-9-]+$/.test(c.id) || !(c.frames > 0 && c.fps > 0 && c.width > 0 && c.height > 0)) throw new Error('Invalid case');
@@ -44,7 +44,7 @@ function verify() {
     if (c.range && (!Array.isArray(c.range) || c.range.length !== 2 || !c.range.every(Number.isInteger) || c.range[0] < 0 || c.range[1] - c.range[0] !== c.frames)) throw new Error(`Invalid range: ${c.id}`);
   }
   for (const m of config.methods)
-    if (!/^[a-z0-9-]+$/.test(m.id) || !existsSync(m.renderer ?? config.renderer)) throw new Error(`Invalid method renderer: ${m.id}`);
+    if (!/^[a-z0-9-]+$/.test(m.id) || !existsSync(m.renderer ?? config.renderer) || (m.experimentalFilterBufferedFrames !== undefined && ![64, 128].includes(m.experimentalFilterBufferedFrames))) throw new Error(`Invalid method renderer or experimental filter cap: ${m.id}`);
   if (config.qualityPolicy) {
     for (const m of config.methods) {
       if (!m.options?.preset || !m.expectedEncoder) throw new Error(`Method ${m.id} must pin preset and expectedEncoder`);
@@ -61,22 +61,30 @@ const rendererPath = methodId => config.methods.find(m => m.id === methodId)?.re
 if (args.includes('--check')) {
   execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
   execFileSync('ffprobe', ['-version'], { stdio: 'ignore' });
+  if (config.methods.some(method => method.experimentalFilterBufferedFrames !== undefined) && !execFileSync('ffmpeg', ['-hide_banner', '-h', 'full'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).includes('-filter_buffered_frames')) throw new Error('This FFmpeg build does not support -filter_buffered_frames');
   console.log(JSON.stringify({ status: 'PREFLIGHT_PASSED', cases: config.cases.length, methods: config.methods.length, guards: config.guards }));
 } else if (args.includes('--trial')) {
   const index = args.indexOf('--trial');
   const c = config.cases.find(c => c.id === args[index + 1]);
   const m = config.methods.find(m => m.id === args[index + 2]);
   if (!c || !m) throw new Error('Unknown trial');
+  if (m.experimentalFilterBufferedFrames === undefined) delete process.env.SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES;
+  else process.env.SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES = String(m.experimentalFilterBufferedFrames);
   const { render } = await import(pathToFileURL(rendererPath(m.id)).href);
   const name = `${c.id}-${m.id}`, output = join(root, `${name}.mp4`), resultFile = join(root, `${name}.json`);
   if (existsSync(output) || existsSync(resultFile)) throw new Error('Refusing to overwrite trial');
   const record = { status: 'RUNNING', case: c.id, method: m.id, options: m.options, startedAt: new Date().toISOString(), output };
+  const phaseFile = join(root, `${name}-phase.json`);
+  const setPhase = (stage, batch = null) => writeFileSync(phaseFile, JSON.stringify({ stage, batch, at: new Date().toISOString() }));
+  setPhase('render-startup');
   save(resultFile, record);
   let progressBucket = -1;
   try {
     const start = performance.now();
+    setPhase('render');
     record.renderResult = await render(c.project, { ...m.options, ...(c.range ? { range: c.range } : {}), output,
       onEncoding: encoderArgs => {
+        setPhase('native-ffmpeg-encode');
         appendFileSync(join(root, `${name}-encoding.jsonl`), JSON.stringify(encoderArgs) + '\n');
         record.encoder = outputVideoEncoder(encoderArgs);
         record.encoderArgsSha256 = createHash('sha256').update(JSON.stringify(encoderArgs)).digest('hex');
@@ -85,6 +93,7 @@ if (args.includes('--check')) {
       onProgress: progress => { const bucket = Math.floor(progress * 50); if (bucket !== progressBucket) { progressBucket = bucket; appendFileSync(join(root, `${name}-progress.jsonl`), JSON.stringify({ elapsedMs: performance.now() - start, progress }) + '\n'); } },
     });
     record.renderMs = performance.now() - start;
+    setPhase('post-render-validation');
     record.stages = [{ name: 'render', elapsedMs: record.renderMs }];
     record.bytes = statSync(output).size;
     const metadataStart = performance.now();
@@ -98,7 +107,8 @@ if (args.includes('--check')) {
     if (m.options.pipeline && record.renderResult.pipelineUsed !== m.options.pipeline) throw new Error('Unexpected render route');
     const fd = openSync(join(root, `${name}-decode.log`), 'wx');
     const decodeStart = performance.now();
-    try { execFileSync('ffmpeg', ['-nostdin', '-v', 'error', '-threads', '2', '-i', output, '-threads', '2', '-f', 'null', '-'], { stdio: ['ignore', fd, fd], timeout: 30000 }); } finally { closeSync(fd); }
+    setPhase('post-render-full-decode');
+    try { execFileSync('ffmpeg', ['-nostdin', '-v', 'error', '-threads', '2', '-i', output, '-threads', '2', '-f', 'null', '-'], { stdio: ['ignore', fd, fd], timeout: config.decodedHashChecks?.timeoutMs ?? 600000 }); } finally { closeSync(fd); }
     record.stages.push({ name: 'full-decode', elapsedMs: performance.now() - decodeStart });
     record.fullDecode = true;
     record.status = 'DONE';
@@ -122,8 +132,9 @@ if (args.includes('--check')) {
         const name = `${c.id}-${m.id}`, fd = openSync(join(root, `${name}.log`), 'wx');
         const scratch = join(root, `${name}-scratch`); mkdirSync(scratch);
         const projectScratch = join(c.project, '.splicewright'), initialProjectBytes = scratchBytes(projectScratch);
-        const child = spawn(process.execPath, [import.meta.filename, '--config', resolve(configFile), '--trial', c.id, m.id], { cwd: config.repo, detached: true, env: { ...process.env, TMPDIR: scratch, TEMP: scratch, TMP: scratch }, stdio: ['ignore', fd, fd] });
-        const entry = { name, pid: child.pid, startedAt: new Date().toISOString(), peakRssMiB: 0, peakCpuPercent: 0, peakSwapGrowthMiB: 0, peakScratchDiskMiB: 0, samples: 0 };
+        const phaseFile = join(root, `${name}-phase.json`);
+        const child = spawn(process.execPath, [import.meta.filename, '--config', resolve(configFile), '--trial', c.id, m.id], { cwd: config.repo, detached: true, env: { ...process.env, TMPDIR: scratch, TEMP: scratch, TMP: scratch, SPLICEWRIGHT_EXPORT_MEMORY_PHASE_FILE: phaseFile, ...(m.experimentalFilterBufferedFrames === undefined ? {} : { SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES: String(m.experimentalFilterBufferedFrames) }) }, stdio: ['ignore', fd, fd] });
+        const entry = { name, pid: child.pid, startedAt: new Date().toISOString(), experimentalFilterBufferedFrames: m.experimentalFilterBufferedFrames ?? null, peakRssMiB: 0, peakCpuPercent: 0, peakSwapGrowthMiB: 0, peakScratchDiskMiB: 0, samples: 0 };
         record.trials.push(entry); persist(); console.log(JSON.stringify({ event: 'START', name, pid: child.pid }));
         let force;
         const processGroups = new Set([child.pid]);
@@ -135,17 +146,29 @@ if (args.includes('--check')) {
         const ceiling = setTimeout(() => abort('trial timeout'), config.guards.trialSeconds * 1000);
         const sample = setInterval(() => {
           try {
-            const allRows = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,rss=,%cpu=,uid='], { encoding: 'utf8', timeout: 2000 }).trim().split('\n').map(row => { const [pid, ppid, pgid, rss, cpu, uid] = row.trim().split(/\s+/).map(Number); return { pid, ppid, pgid, rss, cpu, uid }; });
+            const allRows = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,rss=,%cpu=,uid=,command='], { encoding: 'utf8', timeout: 2000 }).trim().split('\n').filter(Boolean).map(line => { const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(.+)$/); return match && { pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), rss: Number(match[4]), cpu: Number(match[5]), uid: Number(match[6]), command: match[7] }; }).filter(Boolean);
             const rows = trialProcesses(allRows, child.pid, process.pid);
             for (const group of trialProcessGroups(allRows, child.pid, process.pid, process.getuid?.())) processGroups.add(group);
             const rss = rows.reduce((sum, row) => sum + row.rss, 0) / 1024, cpu = rows.reduce((sum, row) => sum + row.cpu, 0), growth = record.initialSwapMiB === null ? 0 : Math.max(0, swap() - record.initialSwapMiB);
             entry.peakRssMiB = Math.max(entry.peakRssMiB, rss); entry.peakCpuPercent = Math.max(entry.peakCpuPercent, cpu); entry.peakSwapGrowthMiB = Math.max(entry.peakSwapGrowthMiB, growth); entry.samples++;
+            let phase = { stage: 'unknown', batch: null };
+            try { phase = JSON.parse(readFileSync(join(root, `${name}-phase.json`), 'utf8')); } catch {}
+            const byRole = {};
+            for (const row of rows) {
+              const role = classifyTrialProcess(row, child.pid, process.pid);
+              byRole[role] = (byRole[role] ?? 0) + row.rss;
+            }
+            const phasePeaks = entry.peakRssMiBByPhase ??= {};
+            const phasePeak = phasePeaks[phase.stage] ??= { aggregateRssMiB: 0, roleRssMiB: {} };
+            phasePeak.aggregateRssMiB = Math.max(phasePeak.aggregateRssMiB, rss);
+            for (const [role, kib] of Object.entries(byRole)) phasePeak.roleRssMiB[role] = Math.max(phasePeak.roleRssMiB[role] ?? 0, kib / 1024);
+            appendFileSync(join(root, `${name}-memory.jsonl`), JSON.stringify({ at: new Date().toISOString(), phase: phase.stage, batch: phase.batch, processes: rows.map(row => ({ pid: row.pid, ppid: row.ppid, pgid: row.pgid, uid: row.uid, role: classifyTrialProcess(row, child.pid, process.pid), rssKiB: row.rss })), rssMiBByRole: Object.fromEntries(Object.entries(byRole).map(([role, kib]) => [role, kib / 1024])), aggregateRssMiB: rss, unknownProcessCount: byRole.unknown ? rows.filter(row => classifyTrialProcess(row, child.pid, process.pid) === 'unknown').length : 0, note: 'RSS sums may double-count shared pages and omit processes shorter than the one-second sampling interval.' }) + '\n');
             entry.peakScratchDiskMiB = Math.max(entry.peakScratchDiskMiB, (scratchBytes(scratch) + Math.max(0, scratchBytes(projectScratch) - initialProjectBytes)) / 1048576);
             if (rss > config.guards.rssMiB) abort('process group RSS ceiling');
             if (growth > config.guards.swapGrowthMiB) abort('system swap growth ceiling');
             persist();
           } catch (error) { abort(`supervision failed: ${error.message}`); }
-        }, 1000);
+        }, config.guards.samplingMs ?? 1000);
         await new Promise(resolveExit => { child.once('error', error => { entry.error = error.message; entry.exitCode = 1; resolveExit(); }); child.once('exit', (code, sig) => { entry.exitCode = code; entry.signal = sig; resolveExit(); }); });
         clearInterval(sample); clearTimeout(ceiling); clearTimeout(force); closeSync(fd);
         stopGroups('SIGTERM'); stopGroups('SIGKILL');

@@ -15,7 +15,7 @@ import type { GradeLut } from "./grade-effect.ts";
 import { duckRanges } from "./duck.ts";
 import { projectAliases } from "./aliases.ts";
 import { planLayeredExport } from "./layered.ts";
-import { estimateGraphicsStagingBytes, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, validateLayeredMedia, type LayeredRenderArgs, type RenderResources } from "./layered-render.ts";
+import { estimateGraphicsStagingBytes, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, setExportMemoryPhase, validateLayeredMedia, type LayeredRenderArgs, type RenderResources } from "./layered-render.ts";
 
 export { duckRanges };
 
@@ -146,6 +146,7 @@ export function reverseAudioFxSources(dir: string, project: Project, audioFx: Re
 }
 
 async function prepare(dir: string) {
+  setExportMemoryPhase("project-preparation");
   const project = load(dir);
   const ctx = loadCtx(dir);
   const probes = readAssets(dir);
@@ -158,11 +159,13 @@ async function prepare(dir: string) {
   const audioFx = audioFxSources(dir, project);
   const reverseAudioFx = reverseAudioFxSources(dir, project, audioFx);
   const inputProps = { project, duck: duckRanges(project, ctx), sizes: sizesOf(probes), durations, frameRates, reverseProxies, animated: Object.fromEntries(Object.entries(probes).flatMap(([id, probe]) => probe.animated ? [[id, true]] : [])), words: captionWords(project, ctx), luts: lutsOf(dir, project), audioFx, reverseAudioFx, fontVersions: fontVersionsOf(dir, project) };
+  setExportMemoryPhase("bundle");
   const serveUrl = await bundleProject(dir);
   // Canvas effects need a WebGL2 context in Remotion's headless Chromium. Keep the legacy render
   // defaults for projects that do not opt into the per-pixel path.
   const needsCanvasEffects = project.tracks.some((track) => track.kind === "video" && track.items.some((item) => item.key || item.grade));
   const opts = { serveUrl, inputProps, browserExecutable: browserExecutable(), ...(needsCanvasEffects ? { chromiumOptions: { gl: "angle" as const } } : {}) };
+  setExportMemoryPhase("composition");
   const composition = await selectComposition({ ...opts, id: ID });
   return { ...opts, composition, project, probes };
 }
@@ -240,6 +243,7 @@ export async function limit(file: string) {
 export async function render(dir: string, { output, preset = "master", pipeline = "remotion", resources, range, onProgress, onEncoding, cancelSignal, shouldCancel }: RenderOptions) {
   if (shouldCancel?.()) throw new Error("render cancelled");
   if (pipeline === "layered") {
+    setExportMemoryPhase("project-plan");
     const project = load(dir);
     const probes = readAssets(dir);
     const selectedRange: [number, number] = range ?? [0, durationFrames(project)];
@@ -262,8 +266,10 @@ export async function render(dir: string, { output, preset = "master", pipeline 
         duck: {}, sizes: {}, durations: {}, frameRates: {}, reverseProxies: [], reverseAudioFx: {}, animated: {},
         words: captionWords(graphicsProject, ctx), luts: {}, audioFx: {}, fontVersions: fontVersionsOf(dir, graphicsProject),
       };
+      setExportMemoryPhase("bundle");
       const serveUrl = await bundleProject(dir);
       const opts = { serveUrl, inputProps, browserExecutable: browserExecutable() };
+      setExportMemoryPhase("composition");
       const composition = await selectComposition({ ...opts, id: ID });
       remotion = { ...opts, composition };
     }
@@ -280,6 +286,7 @@ export async function render(dir: string, { output, preset = "master", pipeline 
     { width: composition.width, height: composition.height, fps: composition.fps },
   );
   mkdirSync(dirname(output), { recursive: true });
+  setExportMemoryPhase("remotion-render");
   await renderMedia({
     ...opts,
     ...exportPreset,

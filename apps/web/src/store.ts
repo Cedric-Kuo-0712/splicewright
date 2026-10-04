@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import type { PlayerRef } from "@remotion/player";
 import { durationFrames, gapAt, type Project, type VideoItem, type Word } from "@splicewright/core";
 import type { Props as RenderProps, Ranges } from "@splicewright/render";
+import type { ExportPreset } from "../export-options.ts";
 
 // Two stores (§7.3): project state changes per op; the frame ticks at playback rate and only the
 // playhead and timecode subscribe to it.
@@ -100,7 +101,7 @@ export interface ExportJob {
   status: "running" | "done" | "error" | "cancelled";
   progress: number;
   output: string;
-  preset: "draft" | "master";
+  preset: ExportPreset | "master";
   finalMix?: { status: "measuring" } | {
     status: "measured"; measuredAt: string; decoded: true;
     audio: { status: "none" } | {
@@ -165,7 +166,7 @@ export async function prepareReverse(assetId: string) {
   app.set({ message: { text: data.queued ? "Preparing reverse proxy…" : "Reverse proxy ready" } });
 }
 
-export async function startExport(preset: "draft" | "master") {
+export async function startExport(preset: ExportPreset | "master") {
   try {
     const r = await fetch("/api/export", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ preset }) });
     const data = await r.json();

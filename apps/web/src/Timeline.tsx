@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { anchorOf, beatFrames, durationFrames, formatFrame, frameOf, keyframeFrame, gapAt, itemSpan, rulerTicks, secPerFrame, snap, snapPoints, snapSpan, transitionOf, type AudioItem, type CaptionItem, type Item, type OverlayItem, type Project, type SnapPoint, type Track, type VideoItem } from "@splicewright/core";
 import { app, dnd, ioRange, op, playhead, say, seek } from "./store.ts";
 import { dropFiles, findItem, insertOnNewTrack, laneMenu, markerMenu, openMenu, itemMenu, keyMenu, rulerMenu, trackMenu, videoUnder } from "./edit.ts";
+import { BoundedPromiseCache, intersectsTimelineWindow, marqueeSelection, shouldMountTimelineItem, TIMELINE_OVERSCAN_PX, waveformCacheKey, waveformCanvasWindow, waveformSourceSeconds } from "./timeline-memory.ts";
 
 // Spec §7.3 timeline and §15.1–15.2 ruler and snapping.
 
@@ -71,6 +72,7 @@ export function Timeline({ project, readOnly = false }: { project?: Project | nu
   const lanes = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ left: 0, width: 1000 });
   const [drag, setDrag] = useState<Drag | null>(null);
+  const [capturedItem, setCapturedItem] = useState<string | null>(null);
   const [ghost, setGhost] = useState<{ trackId: string; at: number; duration?: number; bad: boolean } | null>(null);
   const [box, setBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [reorder, setReorder] = useState<{ from: string; to: string } | null>(null);
@@ -82,6 +84,15 @@ export function Timeline({ project, readOnly = false }: { project?: Project | nu
   const from = Math.floor(view.left / ppf);
   const ticks = rulerTicks(fps, ppf, [from, Math.ceil((view.left + view.width) / ppf) + 1]);
   const tracks = [...p.tracks].reverse(); // top layer first, as in every NLE
+  const pinnedItems = new Set<string>();
+  if (capturedItem) pinnedItems.add(capturedItem);
+  if (drag) {
+    pinnedItems.add(drag.item.id);
+    for (const id of drag.group.keys()) pinnedItems.add(id);
+  }
+  if (editing?.kind === "caption") pinnedItems.add(editing.id);
+  const windowLeft = view.left - TIMELINE_OVERSCAN_PX;
+  const windowRight = view.left + view.width + TIMELINE_OVERSCAN_PX;
 
   const onScroll = () => setView({ left: scroller.current!.scrollLeft, width: scroller.current!.clientWidth - HEADER });
   useEffect(() => {
@@ -247,13 +258,25 @@ export function Timeline({ project, readOnly = false }: { project?: Project | nu
       boxing = true;
       const r = { left: Math.min(x0, ev.clientX), top: Math.min(y0, ev.clientY), right: Math.max(x0, ev.clientX), bottom: Math.max(y0, ev.clientY) };
       setBox({ left: r.left, top: r.top, width: r.right - r.left, height: r.bottom - r.top });
-      const hits = [...document.querySelectorAll<HTMLElement>(".tracks .item[data-id]")]
-        .filter((n) => {
-          const b = n.getBoundingClientRect();
-          return b.left < r.right && b.right > r.left && b.top < r.bottom && b.bottom > r.top;
-        })
-        .map((n) => n.dataset.id!);
-      const selection = toggle ? [...base.filter((id) => !hits.includes(id)), ...hits.filter((id) => !base.includes(id))] : [...new Set([...base, ...hits])];
+      const originLeft = lanes.current!.getBoundingClientRect().left;
+      const rowElements = new Map([...scroller.current!.querySelectorAll<HTMLElement>("[data-row]")].map((row) => [row.dataset.row!, row]));
+      const hits: string[] = [];
+      for (const track of tracks) {
+        const row = rowElements.get(track.id);
+        if (!row) continue;
+        const rowBox = row.getBoundingClientRect();
+        const top = rowBox.top + 3;
+        const bottom = rowBox.bottom - 3;
+        if (top >= r.bottom || bottom <= r.top) continue;
+        for (const item of track.items) {
+          const span = itemSpan(p, item);
+          if (!span) continue;
+          const left = originLeft + span.start * ppf;
+          const right = left + Math.max(2, span.duration * ppf);
+          if (left < r.right && right > r.left) hits.push(item.id);
+        }
+      }
+      const selection = marqueeSelection(base, hits, toggle);
       app.set({ gap: null, selection });
     };
     el.onpointerup = () => {
@@ -416,6 +439,13 @@ export function Timeline({ project, readOnly = false }: { project?: Project | nu
                   const live = drag?.item.id === item.id ? drag : null;
                   const rider = drag?.group.get(item.id);
                   const [start, duration] = live ? [live.start, live.duration] : rider !== undefined ? [rider + drag!.start - drag!.span.start, span.duration] : [span.start, span.duration];
+                  if (!shouldMountTimelineItem(start * ppf, duration * ppf, windowLeft, windowRight, pinnedItems.has(item.id))) {
+                    // A transition can extend into the viewport after its owning clip has left it.
+                    const tr = transitionOf(t, item);
+                    const cut = item.start + item.duration;
+                    return tr && shouldMountTimelineItem((cut - tr.before) * ppf, (tr.before + tr.after) * ppf, windowLeft, windowRight, false)
+                      ? <TransitionMark key={item.id} t={t} item={item} ppf={ppf} /> : null;
+                  }
                   const shown = live?.mode === "slip" ? ({ ...item, sourceIn: live.slipTo } as typeof item) : item;
                   const cls = ["item", selection.includes(item.id) && "selected", (live || rider !== undefined) && "dragging", (live || rider !== undefined) && drag!.bad && "bad", live?.limit && "limit"].filter(Boolean).join(" ");
                   return (
@@ -423,6 +453,8 @@ export function Timeline({ project, readOnly = false }: { project?: Project | nu
                       <div
                         data-id={item.id}
                         className={cls}
+                        onGotPointerCapture={() => setCapturedItem(item.id)}
+                        onLostPointerCapture={() => setCapturedItem((current) => current === item.id ? null : current)}
                         style={{ left: start * ppf, width: Math.max(2, duration * ppf), ...(live && live.trackId !== t.id && { opacity: 0.35 }) }}
                         onPointerDown={(e) => down(e, t, item)}
                         onContextMenu={(e) => {
@@ -433,11 +465,11 @@ export function Timeline({ project, readOnly = false }: { project?: Project | nu
                         title={`${item.id}${t.kind === "caption" ? " — double-click to edit" : ""}${"sourceIn" in item && t.kind === "video" ? " — Alt+drag to slip" : ""}${t.kind === "caption" || t.kind === "overlay" ? " — Alt+drag to attach to the video under it" : ""}`}
                       >
                         {"assetId" in shown && t.kind === "video" && <Thumbs p={p} item={shown} width={duration * ppf} viewLeft={view.left - start * ppf} viewWidth={view.width} />}
-                        {"assetId" in shown && t.kind === "audio" && <Wave assetId={shown.assetId} sourceIn={shown.sourceIn} fps={fps} ppf={ppf} duration={duration} />}
-                        {t.kind === "audio" && !(live && live.mode !== "move") && <BeatTicks p={p} item={item as AudioItem} ppf={ppf} />}
+                        {"assetId" in shown && t.kind === "audio" && <Wave assetId={shown.assetId} sourceIn={shown.sourceIn} fps={fps} ppf={ppf} duration={duration} viewLeft={view.left - start * ppf} viewWidth={view.width} projectTitle={p.meta.title} assetPath={p.assets[shown.assetId]?.path ?? shown.assetId} />}
+                        {t.kind === "audio" && !(live && live.mode !== "move") && <BeatTicks p={p} item={item as AudioItem} ppf={ppf} windowLeft={windowLeft - start * ppf} windowRight={windowRight - start * ppf} />}
                         {live?.mode === "slip" && <SlipEnds p={p} item={shown as Item & { assetId: string; sourceIn: number }} />}
                         {"sourceIn" in item && !t.locked && !live && <FadeHandles item={item} ppf={ppf} />}
-                        {"keyframes" in shown && (shown.keyframes || ("lutKeyframes" in shown && shown.lutKeyframes?.length)) && <KeyMarks p={p} item={shown as VideoItem | AudioItem | OverlayItem} ppf={ppf} locked={t.locked} />}
+                        {"keyframes" in shown && (shown.keyframes || ("lutKeyframes" in shown && shown.lutKeyframes?.length)) && <KeyMarks p={p} item={shown as VideoItem | AudioItem | OverlayItem} ppf={ppf} locked={t.locked} windowLeft={windowLeft - start * ppf} windowRight={windowRight - start * ppf} />}
                         {t.kind === "video" && "assetId" in shown && ((shown as VideoItem).grade || (shown as VideoItem).key) && <span className="badge" title="Color or key look applied">✦ look</span>}
                         <span className="name">
                           {"text" in item ? item.text : "component" in item ? item.component : (item.label ?? p.assets[item.assetId]?.path)}
@@ -478,7 +510,7 @@ export function Timeline({ project, readOnly = false }: { project?: Project | nu
                 <span>{drag.attachTo ? `attach → ${drag.attachTo}` : "no video here"}</span>
               </div>
             )}
-            <BeatGuides p={p} selection={selection} ppf={ppf} />
+            <BeatGuides p={p} selection={selection} ppf={ppf} windowLeft={windowLeft} windowRight={windowRight} />
             <Playhead ppf={ppf} scroller={scroller} />
           </div>
         </div>
@@ -606,7 +638,7 @@ function SlipEnds({ p, item }: { p: Project; item: Item & { assetId: string; sou
 
 /** The span a transition covers across the cut after `item`. */
 /** A diamond per keyed frame (all props merged); click one to put the playhead on it. */
-function KeyMarks({ p, item, ppf, locked }: { p: Project; item: VideoItem | AudioItem | OverlayItem; ppf: number; locked?: boolean }) {
+function KeyMarks({ p, item, ppf, locked, windowLeft, windowRight }: { p: Project; item: VideoItem | AudioItem | OverlayItem; ppf: number; locked?: boolean; windowLeft: number; windowRight: number }) {
   const at = new Map<number, string[]>();
   for (const [prop, keys] of Object.entries(item.keyframes ?? {}))
     for (const k of keys) {
@@ -617,7 +649,7 @@ function KeyMarks({ p, item, ppf, locked }: { p: Project; item: VideoItem | Audi
     const f = Math.round(frameOf(p, item, key.t));
     if (f >= item.start && f < item.start + item.duration) at.set(f, [...(at.get(f) ?? []), "LUT"]);
   }
-  return [...at].map(([f, props]) => (
+  return [...at].filter(([f]) => intersectsTimelineWindow((f - item.start) * ppf, 8, windowLeft, windowRight)).map(([f, props]) => (
     <div key={f} className="kf" style={{ left: (f - item.start) * ppf }} title={`${props.join(", ")} key at ${formatFrame(f, p.meta.fps)} — click to go there, right-click for ease`} onContextMenu={(e) => props.includes("LUT") ? e.preventDefault() : openMenu(e, keyMenu(item, f, locked))} onPointerDown={(e) => (e.stopPropagation(), seek(f))} />
   ));
 }
@@ -675,15 +707,16 @@ function FadeHandles({ item, ppf }: { item: AudioItem | VideoItem; ppf: number }
   );
 }
 
-function BeatTicks({ p, item, ppf }: { p: Project; item: AudioItem; ppf: number }) {
+function BeatTicks({ p, item, ppf, windowLeft, windowRight }: { p: Project; item: AudioItem; ppf: number; windowLeft: number; windowRight: number }) {
   const down = new Set(beatFrames(p, item, item.downbeats));
-  return beatFrames(p, item).map((f) => <div key={f} className={`beat ${down.has(f) ? "down" : ""}`} style={{ left: (f - item.start) * ppf }} />);
+  return beatFrames(p, item).filter((f) => intersectsTimelineWindow((f - item.start) * ppf, 1, windowLeft, windowRight)).map((f) => <div key={f} className={`beat ${down.has(f) ? "down" : ""}`} style={{ left: (f - item.start) * ppf }} />);
 }
 
 /** Faint full-height lines at the selected audio items' beats (§15.3). */
-function BeatGuides({ p, selection, ppf }: { p: Project; selection: string[]; ppf: number }) {
-  const frames = p.tracks.flatMap((t) => (t.kind === "audio" ? t.items.filter((i) => selection.includes(i.id)).flatMap((i) => beatFrames(p, i)) : []));
-  return frames.map((f) => <div key={f} className="beat-guide" style={{ left: f * ppf }} />);
+function BeatGuides({ p, selection, ppf, windowLeft, windowRight }: { p: Project; selection: string[]; ppf: number; windowLeft: number; windowRight: number }) {
+  const selected = new Set(selection);
+  const frames = p.tracks.flatMap((t) => (t.kind === "audio" ? t.items.filter((i) => selected.has(i.id)).flatMap((i) => beatFrames(p, i)) : []));
+  return frames.filter((f) => intersectsTimelineWindow(f * ppf, 1, windowLeft, windowRight)).map((f) => <div key={f} className="beat-guide" style={{ left: f * ppf }} />);
 }
 
 /** Video thumbnails at whole source seconds, only across the visible part of the item. */
@@ -700,18 +733,25 @@ function Thumbs({ p, item, width, viewLeft, viewWidth }: { p: Project; item: Ite
   return <div className="thumbs">{out}</div>;
 }
 
-const waves = new Map<string, Promise<{ rate: number; peaks: number[] }>>();
+const waves = new BoundedPromiseCache<{ rate: number; peaks: number[] }>(32);
 
-function Wave({ assetId, sourceIn, fps, ppf, duration }: { assetId: string; sourceIn: number; fps: number; ppf: number; duration: number }) {
+function Wave({ assetId, sourceIn, fps, ppf, duration, viewLeft, viewWidth, projectTitle, assetPath }: { assetId: string; sourceIn: number; fps: number; ppf: number; duration: number; viewLeft: number; viewWidth: number; projectTitle: string; assetPath: string }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  // ponytail: one canvas per item capped at 8000 px; tile it if zoomed-in long music looks blurry.
-  const w = Math.min(8000, Math.ceil(duration * ppf));
+  // An initial request may precede waveform preparation. Retry when ingest publishes new data.
+  const ingestStep = app.use((state) => state.ingesting[assetId]);
+  const clipWidth = Math.ceil(duration * ppf);
+  const canvasWindow = waveformCanvasWindow(viewLeft, viewWidth, clipWidth);
+  const w = Math.max(1, canvasWindow.width);
   const query = snapshotQuery();
-  const waveKey = `${assetId}${query}`;
+  const waveKey = waveformCacheKey(projectTitle, assetId, assetPath, query);
   useEffect(() => {
-    if (!waves.has(waveKey)) waves.set(waveKey, fetch(`/api/waveform?asset=${assetId}${query}`).then((r) => r.json()));
+    const waveform = waves.get(waveKey, async () => {
+      const response = await fetch(`/api/waveform?asset=${encodeURIComponent(assetId)}${query}`);
+      if (!response.ok) throw new Error(`waveform request failed (${response.status})`);
+      return response.json();
+    });
     let live = true;
-    waves.get(waveKey)!.then(({ rate, peaks }) => {
+    waveform.then(({ rate, peaks }) => {
       const c = ref.current;
       if (!live || !c || !peaks) return;
       const g = c.getContext("2d")!;
@@ -719,17 +759,18 @@ function Wave({ assetId, sourceIn, fps, ppf, duration }: { assetId: string; sour
       g.fillStyle = "rgba(160, 230, 180, 0.8)";
       const h = c.height / 2;
       for (let x = 0; x < c.width; x++) {
-        const a = Math.floor((sourceIn + (x / c.width) * (duration / fps)) * rate);
-        const b = Math.max(a + 1, Math.floor((sourceIn + ((x + 1) / c.width) * (duration / fps)) * rate));
+        const clipPixel = canvasWindow.left + x;
+        const a = Math.floor(waveformSourceSeconds(sourceIn, clipPixel, ppf, fps) * rate);
+        const b = Math.max(a + 1, Math.floor(waveformSourceSeconds(sourceIn, clipPixel + 1, ppf, fps) * rate));
         let m = 0;
         for (let i = a; i < b && i < peaks.length; i++) m = Math.max(m, peaks[i]);
         const y = Math.sqrt(m / 255) * h; // sqrt so speech at -18 dBFS is still visible
         g.fillRect(x, h - y, 1, y * 2 || 1);
       }
-    });
+    }).catch(() => undefined);
     return () => void (live = false);
-  }, [assetId, sourceIn, fps, duration, w, waveKey, query]);
-  return <canvas ref={ref} className="wave" width={w} height={ROW - 8} style={{ width: duration * ppf }} />;
+  }, [assetId, sourceIn, fps, ppf, canvasWindow.left, duration, w, waveKey, query, ingestStep]);
+  return <canvas ref={ref} className="wave" width={w} height={ROW - 8} style={{ left: canvasWindow.left, width: w }} />;
 }
 
 /** Fallback for assets not yet probed by `splicewright ingest`. */

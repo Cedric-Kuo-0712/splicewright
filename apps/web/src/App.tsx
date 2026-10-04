@@ -10,6 +10,8 @@ import { FeaturePanel } from "./FeaturePanel.tsx";
 import { type SearchAction, type WorkspaceCategory } from "./workspace-search.ts";
 import { focusControl, type ControlLocation } from "./workspace-navigation.ts";
 import { Preview } from "./Preview.tsx";
+import { ExportControls } from "./ExportControls.tsx";
+import { exportLabel, type ExportPreset } from "../export-options.ts";
 
 // Spec §7.3 panels: media bin, player, inspector, timeline.
 
@@ -189,7 +191,7 @@ function Toolbar({ p }: { p: Project }) {
   const gap = app.use((s) => s.gap);
   const recent = app.use((s) => s.recent);
   const exports = app.use((s) => s.exports);
-  const [exportPreset, setExportPreset] = React.useState<"draft" | "master">("master");
+  const [exportPreset, setExportPreset] = React.useState<ExportPreset>("h264-cpu");
   const runningExports = exports.filter((job) => job.status === "running").map((job) => job.id).join(",");
   useEffect(() => {
     const controls = document.querySelectorAll<HTMLElement>(".toolbar > :not(.agent-review):not(.timecode):not(.spacer)");
@@ -232,16 +234,10 @@ function Toolbar({ p }: { p: Project }) {
       <details className="export-menu">
         <summary>Export{runningExports ? ` · ${runningExports.split(",").length}` : ""}</summary>
         <div className="export-panel">
-          <div className="export-start">
-            <select aria-label="Export preset" value={exportPreset} onChange={(e) => setExportPreset(e.target.value as "draft" | "master")}>
-              <option value="draft">Draft · faster</option>
-              <option value="master">Master · high quality</option>
-            </select>
-            <button onClick={() => void startExport(exportPreset)}>Render</button>
-          </div>
+          <ExportControls preset={exportPreset} onChange={setExportPreset} onRender={() => void startExport(exportPreset)} />
           {exports.length === 0 ? <span className="dim">No exports yet</span> : exports.map((job) => (
             <div className="export-job" key={job.id}>
-              <div className="export-job-head"><b>{job.preset}</b><span>{job.status === "running" ? `${Math.round(job.progress * 100)}%` : job.status}</span></div>
+              <div className="export-job-head"><b>{exportLabel(job.preset)}</b><span>{job.status === "running" ? `${Math.round(job.progress * 100)}%` : job.status}</span></div>
               {job.status === "running" && <progress max={1} value={job.progress} />}
               <small>{job.output}</small>
               {job.finalMix?.status === "measuring" && <small>Checking completed render audio…</small>}

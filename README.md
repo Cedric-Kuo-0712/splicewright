@@ -56,6 +56,32 @@ the separate ingest `jobs` option still controls concurrent work. For calibratio
 and quality settings are unchanged. The optional `scripts/benchmark-ingest.mjs` runner records
 real import API/proxy/background timings or an ingest workload in a fresh experiment folder.
 
+## Export encoders and timeline memory
+
+The Export menu offers Draft, H.264 CPU, H.264 Hardware, and H.265 Hardware in one list.
+CPU remains the default. CLI/MCP use the same renderer; pass `--preset h264-cpu`,
+`--preset h264-hardware`, or `--preset h265-hardware`. Existing `draft`, `master`, and
+project presets remain available. Hardware modes require an available encoder and report an
+error rather than silently falling back: VideoToolbox on macOS, or NVENC on supported
+Linux/Windows NVIDIA installations. WSL GPU availability must be verified in that environment.
+
+Hardware presets use bitrate instead of CRF. Initial targets are 20 Mbps for H.264 and 12 Mbps
+for H.265 at 1920x1080/30fps, scaled by output pixels (including preset `scale`) and FPS and rounded to whole
+Mbps with a 1 Mbps floor. They are starting points, not a guarantee of equivalent visual quality.
+Override `videoBitrate` in the matching project preset to calibrate; HEVC MP4 uses `hvc1`.
+With the current Remotion version, H.265 with AAC accepts `.mp4`, `.mkv`, or `.hevc`; `.mov` is unsupported.
+The optional `scripts/benchmark-export.mjs <repo> <input-video> <fresh-output-dir>` compares
+three actual exports of the same two-second 720p composition with text, recording encoder args,
+versions, hashes, render time, file size, and full-decode checks. Its single-run timings do not
+establish a performance or quality winner.
+
+Timeline clips mount only around the horizontal viewport, with 640px overscan. Active pointer
+captures, drag groups, and caption editors stay mounted. Long audio canvases cover only the
+visible segment with 256px overscan; beat guides/ticks and keyframe marks are windowed too.
+Waveform request cache retains at most 32 entries and retries failed loads. Full project data,
+track rows, and selection stay intact; this reduces mounted DOM/canvas work, not project data
+size or a guaranteed percentage of browser heap. Scroll/drag feel remains browser validation.
+
 ## Offline narration
 
 Kokoro runs locally through ONNX Runtime's CPU provider. Install only the languages you need; US

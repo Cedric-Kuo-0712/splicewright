@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { handleTtsRequest } from "./tts-api.ts";
 import { BackgroundIngestScheduler } from "./background-ingest.ts";
+import { isExportPreset } from "./export-options.ts";
 import type { AddressInfo } from "node:net";
 import { createServer, type Plugin, type ViteDevServer } from "vite";
 import { addRecent, applyEditReview, applyLutPreset, cacheDir, fingerprint, getEditReview, historyList, init, load, loadCtx, rawPath, readAssets, recentProjects, redo, revertEditReview, run, setEditReviewStatus, sizesOf, undo, writeAtomic } from "@splicewright/core/node";
@@ -226,8 +227,8 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
           }
           if (route === "POST /api/export") {
             const b = await body(req);
-            const preset = b.preset === "draft" ? "draft" : b.preset === "master" ? "master" : null;
-            if (!preset) return send(res, 400, { error: { code: "invalid", message: 'preset must be "draft" or "master"' } });
+            const preset = b.preset;
+            if (!isExportPreset(preset)) return send(res, 400, { error: { code: "invalid", message: "unknown export preset" } });
             const title = String(load(dir).meta.title).replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "splicewright";
             const outputDir = join(dir, "exports");
             const output = join(outputDir, `${title}-${preset}-${Date.now()}.mp4`);

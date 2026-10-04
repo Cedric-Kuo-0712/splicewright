@@ -457,7 +457,7 @@ export function createServer(dir: string): McpServer {
       description: "Start rendering to an mp4 in the background → job id; poll render_status. Range is timeline frames [from, to).",
       inputSchema: {
         output: z.string().default("out/final.mp4").describe("Path relative to the project folder."),
-        preset: z.string().default("master").describe("draft, master, or one from splicewright.config.ts"),
+        preset: z.string().default("master").describe("draft, master, h264-cpu, h264-hardware, h265-hardware, or one from splicewright.config.ts. Hardware modes require an available encoder."),
         range: z.tuple([z.number().int().min(0), z.number().int().min(1)]).optional(),
       },
     },

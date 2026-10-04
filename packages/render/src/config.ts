@@ -8,6 +8,8 @@ export interface Preset {
   crf?: number;
   scale?: number;
   concurrency?: number;
+  codec?: "h264" | "h265";
+  videoBitrate?: string;
   hardwareAcceleration?: "disable" | "if-possible" | "required";
 }
 

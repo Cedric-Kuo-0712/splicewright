@@ -32,7 +32,7 @@ const USAGE = `usage: splicewright <command>
   edit-review show [--snapshots] | edit-review keep|dismiss <id> | edit-review revert <id> [--base <revision>]
   undo | redo [--base <revision>]
   still --at <frame|[hh:]mm:ss[.s]> [-o out/still-<frame>.jpg]
-  render [-o out/final.mp4] [--preset draft|master] [--range a-b]
+  render [-o out/final.mp4] [--preset draft|master|h264-cpu|h264-hardware|h265-hardware] [--range a-b]
   open [--port 5190]
   mcp
   migrate video-cut <path> [--out <dir>] [--force]`;

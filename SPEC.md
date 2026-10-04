@@ -403,7 +403,11 @@ so the tool also runs on Linux.
   import { Polaroid } from "./components/Polaroid";
   export default defineConfig({
     components: { Polaroid },                         // OverlayItem.component === "Polaroid"
-    presets: { master: { crf: 18, hardwareAcceleration: "if-possible", concurrency: 8 } },
+    presets: {
+      master: { crf: 18, concurrency: 8 },
+      "h264-hardware": { videoBitrate: "20M" },
+      "h265-hardware": { videoBitrate: "12M" },
+    },
   });
   ```
   The UI and the renderer both load this file (via the Vite / Remotion bundler), so custom
@@ -503,6 +507,15 @@ ingest; editing preparation precedes queued reverse/analysis phases without drop
 Ingest FFmpeg codec/filter pools use CPU-aware thread budgets, preserving proxy format and
 quality. API scheduling/cache correctness is automated; latency/resource comparisons are
 recorded separately on fixed inputs and do not establish a universal performance optimum.
+
+Export/timeline performance increment: explicit `h264-cpu`, `h264-hardware`, and
+`h265-hardware` presets share the renderer behind CLI, MCP, and the single web Export list.
+Hardware modes require acceleration and use configurable bitrate; CPU remains the web default.
+Legacy presets keep replacement semantics. Timeline horizontally windows clip DOM, audio
+canvases, beat/keyframe markers, and bounds waveform cache entries; full rows/project data and
+selection remain available. Active pointer captures/drag groups/caption editors stay mounted.
+Automated geometry, store/API and render checks do not replace browser interaction or subjective
+quality validation. Vertical track virtualization is outside this increment.
 
 ## 13. Roadmap (M7–M11, in build order) and later candidates
 

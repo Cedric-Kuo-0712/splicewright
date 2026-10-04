@@ -10,6 +10,7 @@ import { fingerprint, load, loadCtx, readAssets, sizesOf } from "@splicewright/c
 import { captionWords, parseCube, type Project } from "@splicewright/core";
 import { audioFxPath, ffmpeg, grid, measureFinalMix, reverseAudioPath, scratch, spread } from "@splicewright/ingest";
 import type { Preset } from "./config.ts";
+import { resolveExportPreset, withExportContainerTag } from "./export-preset.ts";
 import type { GradeLut } from "./grade-effect.ts";
 import { duckRanges } from "./duck.ts";
 import { projectAliases } from "./aliases.ts";
@@ -80,7 +81,6 @@ function browserExecutable(): string {
   return browser!;
 }
 const ID = "SplicewrightProject"; // Root.tsx's COMPOSITION_ID; not imported, Node can't load .tsx
-const BUILTIN: Record<string, Preset> = { draft: { scale: 0.5, crf: 28 }, master: { crf: 18 } };
 
 // ponytail: one bundle per project per process; restart `splicewright mcp` after editing
 // components/ or splicewright.config.ts. Key on their mtimes if that gets annoying.
@@ -207,6 +207,8 @@ export interface RenderOptions {
   /** Timeline frames [from, to). */
   range?: [number, number];
   onProgress?: (progress: number) => void;
+  /** Optional diagnostics for experiments; observes the selected encoder without changing args. */
+  onEncoding?: (args: readonly string[]) => void;
   /** Internal cancellation hook used by background export jobs. */
   cancelSignal?: Parameters<typeof renderMedia>[0]["cancelSignal"];
   /** Internal cancellation check around preparation steps that do not accept a signal. */
@@ -229,22 +231,30 @@ export async function limit(file: string) {
   }
 }
 
-export async function render(dir: string, { output, preset = "master", range, onProgress, cancelSignal, shouldCancel }: RenderOptions) {
+export async function render(dir: string, { output, preset = "master", range, onProgress, onEncoding, cancelSignal, shouldCancel }: RenderOptions) {
   if (shouldCancel?.()) throw new Error("render cancelled");
   const { composition, ...opts } = await prepare(dir);
   if (shouldCancel?.()) throw new Error("render cancelled");
-  const presets = { ...BUILTIN, ...(composition.props.presets as Record<string, Preset> | undefined) };
-  if (!presets[preset]) throw new Error(`unknown preset "${preset}"; have ${Object.keys(presets).join(", ")}`);
+  const exportPreset = resolveExportPreset(
+    preset,
+    composition.props.presets as Record<string, Preset> | undefined,
+    { width: composition.width, height: composition.height, fps: composition.fps },
+  );
   mkdirSync(dirname(output), { recursive: true });
   await renderMedia({
     ...opts,
+    ...exportPreset,
     composition,
-    codec: "h264",
+    codec: exportPreset.codec ?? "h264",
     outputLocation: output,
     cancelSignal,
     frameRange: range ? [range[0], range[1] - 1] : null,
     onProgress: ({ progress }) => onProgress?.(progress),
-    ...presets[preset],
+    ffmpegOverride: ({ args }) => {
+      const tagged = withExportContainerTag(args, exportPreset.codec ?? "h264", output);
+      onEncoding?.([...tagged]);
+      return tagged;
+    },
   });
   if ((composition.props.project as Project).meta.limiter) await limit(output);
   return { output, frames: range ? range[1] - range[0] : composition.durationInFrames, preset };

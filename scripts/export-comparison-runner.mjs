@@ -33,6 +33,7 @@ function scratchBytes(dir) {
 const save = (file, data) => writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
 function verify() {
   if (!config.cases?.length || !config.methods?.length || !config.renderer) throw new Error('Missing cases/methods/renderer');
+  if ((config.exactAudioRequired || config.exactVideoMethods?.length) && !config.decodedHashChecks) throw new Error('Exact output checks require decodedHashChecks');
   if (!(config.guards?.rssMiB > 0 && config.guards.trialSeconds > 0 && config.guards.swapGrowthMiB >= 0)) throw new Error('Invalid guards');
   for (const file of config.fingerprints ?? []) if (hash(file.path) !== file.sha256) throw new Error(`Input changed: ${file.path}`);
   for (const c of config.cases) {

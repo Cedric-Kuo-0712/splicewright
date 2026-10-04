@@ -7,7 +7,7 @@ import { fingerprint } from "@splicewright/core/node";
 import type { Project } from "@splicewright/core";
 import { estimateGraphicsStagingBytes, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
 
-const state = vi.hoisted(() => ({ fail: false, commands: [] as string[][], graphics: [] as Record<string, any>[] }));
+const state = vi.hoisted(() => ({ fail: false, commands: [] as string[][], graphics: [] as Record<string, any>[], probes: 0 }));
 vi.mock("@remotion/renderer", () => ({
   renderFrames: async (options: Record<string, any>) => {
     state.graphics.push(options);
@@ -18,7 +18,7 @@ vi.mock("@remotion/renderer", () => ({
   },
 }));
 vi.mock("node:child_process", () => ({
-  execFileSync: () => JSON.stringify({ streams: [{ pix_fmt: "yuv420p", color_space: "bt709", color_transfer: "bt709", color_primaries: "bt709", sample_aspect_ratio: "1:1" }] }),
+  execFileSync: () => { state.probes++; return JSON.stringify({ streams: [{ pix_fmt: "yuv420p", color_space: "bt709", color_transfer: "bt709", color_primaries: "bt709", sample_aspect_ratio: "1:1" }] }); },
   spawn: (_binary: string, args: string[]) => {
     state.commands.push(args);
     const child = new EventEmitter() as any;
@@ -32,7 +32,7 @@ vi.mock("node:child_process", () => ({
 let root: string | undefined;
 afterEach(() => {
   if (root) rmSync(root, { recursive: true, force: true });
-  root = undefined; state.fail = false; state.commands.length = 0; state.graphics.length = 0;
+  root = undefined; state.fail = false; state.commands.length = 0; state.graphics.length = 0; state.probes = 0;
 });
 function setup(): LayeredRenderArgs {
   root = mkdtempSync(join(tmpdir(), "swr-layered-lifecycle-"));
@@ -114,6 +114,16 @@ describe("layered output lifecycle", () => {
     expect(command.filter((_, i) => command[i - 1] === "-threads")).toEqual(["2", "2", "4"]);
     expect(command[command.indexOf("-filter_complex_threads") + 1]).toBe("2");
     expect(command[command.indexOf("-x265-params") + 1]).toBe("pools=4:frame-threads=4");
+  });
+  it("probes a canonical source path once per render even when several clips use it", async () => {
+    const args = setup();
+    args.project.tracks[0].items = [
+      { id: "first", assetId: "a", start: 0, duration: 30, sourceIn: 0 },
+      { id: "second", assetId: "a", start: 30, duration: 30, sourceIn: 1 },
+    ] as typeof args.project.tracks[0]["items"];
+    args.range = [0, 60];
+    await renderLayered(args);
+    expect(state.probes).toBe(1);
   });
   it.each([0, 5, 1.5, NaN])("refuses unsafe thread count %s before rendering or replacing output", async count => {
     const args = setup(); args.resources = { filterThreads: count };

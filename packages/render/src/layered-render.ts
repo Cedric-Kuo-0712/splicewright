@@ -59,8 +59,13 @@ const safeColor = (color: string) => {
   if (/^#[\da-f]{3}$/i.test(color)) return `0x${[...color.slice(1)].map((value) => value + value).join("")}`;
   return color.startsWith("#") ? `0x${color.slice(1)}` : color;
 };
-function verifiedMediaProperties(path: string) {
-  const output = execFileSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt,color_space,color_transfer,color_primaries,color_range,sample_aspect_ratio", "-of", "json", path], { encoding: "utf8" });
+function verifiedMediaProperties(path: string, cache: Map<string, string>) {
+  const canonical = realpathSync(path);
+  let output = cache.get(canonical);
+  if (output === undefined) {
+    output = execFileSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt,color_space,color_transfer,color_primaries,color_range,sample_aspect_ratio", "-of", "json", canonical], { encoding: "utf8" });
+    cache.set(canonical, output);
+  }
   const stream = (JSON.parse(output) as { streams?: { pix_fmt?: string; color_space?: string; color_transfer?: string; color_primaries?: string; color_range?: string; sample_aspect_ratio?: string }[] }).streams?.[0];
   if (!stream) throw new Error(`layered export unsupported: cannot probe video stream in ${path}`);
   if (/(?:p|gray)(?:10|12|14|16)(?:le|be)?|p0(?:10|12|16)/i.test(stream.pix_fmt ?? "")) throw new Error(`layered export unsupported: HDR or high bit depth video (${stream.pix_fmt})`);
@@ -83,6 +88,16 @@ function resolveProjectAsset(dir: string, path: string) {
   if (isAbsolute(path) || /^[a-z]:[\\/]/i.test(path) || path.split(/[\\/]/).some((part) => part === ".."))
     throw new Error(`layered export asset path contains traversal: ${path}`);
   return realpathSync(resolve(root, path));
+}
+
+/** Validate only the media that survived range planning; safe to run before Remotion setup. */
+export function validateLayeredMedia(dir: string, project: Project, probes: Record<string, Probe>, plan: LayeredPlan) {
+  for (const item of [...plan.video.map((entry) => entry.item), ...plan.audio.map((entry) => entry.item)]) {
+    const asset = project.assets[item.assetId];
+    const probe = probes[item.assetId];
+    if (!asset || !probe || probe.path !== asset.path || probe.fingerprint !== fingerprint(resolveProjectAsset(dir, asset.path)))
+      throw new Error(`layered export unsupported: media probe for ${item.id} is stale`);
+  }
 }
 
 function addAudioEffects(item: { fadeIn?: number; fadeOut?: number }, offset: number, duration: number, out: string[], fps: number, transition?: { in?: number; outStart?: number; out?: number }, phaseShift = 0) {
@@ -143,12 +158,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
     throw new Error("layered export unsupported: project configuration requires the Remotion route");
   }
   const plan = planLayeredExport(project, probes, ...(range ?? [0, Math.max(1, args.remotion.composition.durationInFrames)]), args.presetOptions.scale ?? 1);
-  for (const item of [...plan.video.map((entry) => entry.item), ...plan.audio.map((entry) => entry.item)]) {
-    const asset = project.assets[item.assetId];
-    const probe = probes[item.assetId];
-    if (!asset || !probe || probe.path !== asset.path || probe.fingerprint !== fingerprint(resolveProjectAsset(dir, asset.path)))
-      throw new Error(`layered export unsupported: media probe for ${item.id} is stale`);
-  }
+  validateLayeredMedia(dir, project, probes, plan);
   const outputWidth = Math.round(project.meta.width * (args.presetOptions.scale ?? 1));
   const outputHeight = Math.round(project.meta.height * (args.presetOptions.scale ?? 1));
   const activeFrames = plan.windows.reduce((sum, [start, end]) => sum + end - start, 0);
@@ -203,12 +213,13 @@ export async function renderLayered(args: LayeredRenderArgs) {
     const graphicsMs = performance.now() - overlayStart;
 
     const inputs: string[] = [];
+    const verifiedMediaCache = new Map<string, string>();
     const filters: string[] = [];
     const audioLabels: string[] = [];
     let inputIndex = 0;
     for (const segment of plan.video) {
       const path = resolveProjectAsset(dir, project.assets[segment.item.assetId].path);
-      verifiedMediaProperties(path);
+      verifiedMediaProperties(path, verifiedMediaCache);
       const clipStart = segment.item.start - segment.lead;
       const offset = segment.decodeStart - clipStart;
       const sourceIn = segment.sourceIn - seconds(segment.lead, plan.fps) + seconds(offset, plan.fps);

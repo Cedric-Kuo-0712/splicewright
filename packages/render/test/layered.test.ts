@@ -6,7 +6,7 @@ import { fingerprint } from "@splicewright/core/node";
 import type { AudioItem, Project, Track, VideoItem } from "@splicewright/core";
 import type { Probe } from "@splicewright/core/node";
 import { audioTransitionFades, planLayeredExport } from "../src/layered.ts";
-import { renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
+import { renderLayered, validateLayeredMedia, type LayeredRenderArgs } from "../src/layered-render.ts";
 
 const video = (id: string, start: number, transition?: VideoItem["transition"]): VideoItem => ({ id, assetId: `a_${id}`, start, duration: 90, sourceIn: 1, transition });
 const project = (items = [video("v1", 0), video("v2", 90)], more: Track[] = []): Project => ({
@@ -19,6 +19,32 @@ const project = (items = [video("v1", 0), video("v2", 90)], more: Track[] = []):
 const probes = (items: VideoItem[]) => Object.fromEntries(items.map((item) => [item.assetId, { path: `raw/${item.assetId}.mp4`, fingerprint: "x", kind: "video", width: 64, height: 36, fps: 48, duration: 8, audio: false } satisfies Probe]));
 
 describe("layered export planning", () => {
+  it("validates selected source fingerprints before renderer preparation", () => {
+    const dir = mkdtempSync(join(tmpdir(), "swr-layered-probe-"));
+    try {
+      mkdirSync(join(dir, "raw"));
+      const items = [video("v1", 0)];
+      const file = join(dir, "raw/a_v1.mp4");
+      writeFileSync(file, "source before encoding");
+      const p = project(items), media = probes(items);
+      media.a_v1.fingerprint = fingerprint(file)!;
+      const plan = planLayeredExport(p, media);
+      expect(() => validateLayeredMedia(dir, p, media, plan)).not.toThrow();
+      media.a_v1.fingerprint = "stale";
+      expect(() => validateLayeredMedia(dir, p, media, plan)).toThrow("media probe for v1 is stale");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("rejects an unsupported transition affecting the range after its outgoing clip has ended", () => {
+    const items = [video("v1", 0, { kind: "wipe", duration: 30 }), video("v2", 90)];
+    expect(() => planLayeredExport(project(items), probes(items), 96, 100)).toThrow(/wipe transition/);
+  });
+
+  it("ignores unsupported transition phases that do not intersect the requested range", () => {
+    const items = [video("v1", 0, { kind: "wipe", duration: 30 }), video("v2", 90)];
+    expect(planLayeredExport(project(items), probes(items), 0, 30).video[0].outgoing).toBeUndefined();
+    expect(planLayeredExport(project(items), probes(items), 120, 150).video[0].incoming).toBeUndefined();
+  });
   it("keeps the Remotion timeline frame range and maps dissolve handles to source time", () => {
     const items = [video("v1", 0, { kind: "dissolve", duration: 30 }), video("v2", 90)];
     const plan = planLayeredExport(project(items), probes(items), 30, 150);
@@ -64,6 +90,28 @@ describe("layered export planning", () => {
       { incoming: undefined, outgoing: { start: 75, duration: 30 } },
       { incoming: 30, outgoing: undefined },
     ]);
+  });
+
+  it("ignores unsupported media and graphics outside the requested range", () => {
+    const active = video("active", 0);
+    const unrelated = { ...video("unrelated", 50_000), reverse: true, grade: { exposure: 2 } } as VideoItem;
+    const p = project([active, unrelated], [
+      { id: "audio", kind: "audio", items: [{ id: "bad-audio", assetId: "missing", start: 50_000, duration: 60, sourceIn: 0, audioFx: { pan: 1 } }] } as unknown as Track,
+      { id: "overlay", kind: "overlay", items: [{ id: "custom", component: "Unknown", start: 50_000, duration: 60, props: {} }] } as unknown as Track,
+    ]);
+    expect(planLayeredExport(p, probes([active]), 0, 60).video.map((entry) => entry.item.id)).toEqual(["active"]);
+  });
+
+  it("still refuses an unsupported item that crosses into the requested range", () => {
+    const active = { ...video("active", 0), reverse: true } as VideoItem;
+    expect(() => planLayeredExport(project([active]), probes([active]), 30, 60)).toThrow("uses speed or reverse playback");
+  });
+
+  it("keeps graphic windows in original composition frame coordinates", () => {
+    const items = [video("v1", 0), video("v2", 90)];
+    const graphic = { id: "overlay", component: "Text", start: 120, duration: 30, props: { text: "global" } };
+    const p = project(items, [{ id: "graphics", kind: "overlay", items: [graphic] } as unknown as Track]);
+    expect(planLayeredExport(p, probes(items), 125, 140).windows).toEqual([[125, 140]]);
   });
 
   it("refuses default caption blur and accepts an overlay CaptionLayer explicitly set to none", () => {

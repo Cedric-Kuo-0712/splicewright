@@ -1,4 +1,4 @@
-import { itemSpan, transitionOf, type AudioItem, type Project, type Track, type VideoItem } from "@splicewright/core";
+import { itemSpan, transitionOf, type AudioItem, type OverlayItem, type Project, type Track, type VideoItem } from "@splicewright/core";
 import type { Probe } from "@splicewright/core/node";
 
 export interface LayeredSegment {
@@ -62,7 +62,13 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
   if (!/^(?:#[\da-f]{3}|#[\da-f]{6}|black|transparent)$/i.test(background)) fail("project background must be a simple hex color, black, or transparent");
   const videoTrack = visibleVideo[0] as Extract<Track, { kind: "video" }>;
   const videoTrackIndex = project.tracks.indexOf(videoTrack);
-  if (project.tracks.some((track, index) => !track.hidden && index < videoTrackIndex && (track.kind === "overlay" || track.kind === "caption") && track.items.length))
+  const intersects = (item: Parameters<typeof itemSpan>[1]) => {
+    const span = itemSpan(project, item);
+    if (!span) return false;
+    const start = span.start, end = span.start + span.duration;
+    return start < to && end > from;
+  };
+  if (project.tracks.some((track, index) => !track.hidden && index < videoTrackIndex && (track.kind === "overlay" || track.kind === "caption") && track.items.some((item) => intersects(item))))
     fail("graphics tracks below the video track cannot be preserved by layered composition");
   if (Math.round(project.meta.width * scale) < 2 || Math.round(project.meta.height * scale) < 2 || Math.round(project.meta.width * scale) % 2 || Math.round(project.meta.height * scale) % 2)
     fail("output dimensions must be positive and even for 4:2:0 video");
@@ -71,6 +77,11 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
   const segments: LayeredSegment[] = [];
   for (let index = 0; index < ordered.length; index++) {
     const item = ordered[index];
+    const outgoingCandidate = transitionOf(videoTrack, item);
+    const incomingCandidate = index > 0 ? transitionOf(videoTrack, ordered[index - 1]) : undefined;
+    const clipStartCandidate = item.start - (incomingCandidate && incomingCandidate.kind !== "dip" ? incomingCandidate.before : 0);
+    const clipEndCandidate = item.start + item.duration + (outgoingCandidate && outgoingCandidate.kind !== "dip" ? outgoingCandidate.after : 0);
+    if (clipStartCandidate >= to || clipEndCandidate <= from) continue;
     if (index > 0 && ordered[index - 1].start + ordered[index - 1].duration > item.start)
       fail(`overlapping video items before ${item.id} are unsupported`);
     const asset = project.assets[item.assetId];
@@ -82,9 +93,12 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
     if (item.grade || item.key || item.lutKeyframes?.length || item.mask || item.crop || item.effects || item.blend && item.blend !== "normal" || !isIdentityTransform(item.transform) || Object.keys(item.keyframes ?? {}).length)
       fail(`item ${item.id} uses an unsupported video look or animation`);
     if (item.audioFx) fail(`item ${item.id} uses processed audio`);
-    const outgoingRaw = transitionOf(videoTrack, item);
+    const affectsRange = (cut: number, transition: NonNullable<ReturnType<typeof transitionOf>>) => cut - transition.before < to && cut + transition.after > from;
+    const outgoingRaw = outgoingCandidate && affectsRange(item.start + item.duration, outgoingCandidate) ? outgoingCandidate : undefined;
     if (outgoingRaw && outgoingRaw.kind !== "dissolve" && outgoingRaw.kind !== "dip") fail(`${outgoingRaw.kind} transition on ${item.id} is unsupported`);
-    const incomingRaw = index > 0 ? transitionOf(videoTrack, ordered[index - 1]) : undefined;
+    const previous = ordered[index - 1];
+    const incomingRaw = incomingCandidate && previous && affectsRange(previous.start + previous.duration, incomingCandidate) ? incomingCandidate : undefined;
+    if (incomingRaw && incomingRaw.kind !== "dissolve" && incomingRaw.kind !== "dip") fail(`${incomingRaw.kind} transition into ${item.id} is unsupported`);
     if (incomingRaw && incomingRaw.next.id !== item.id) fail(`overlapping video items before ${item.id} are unsupported`);
     const incoming = incomingRaw ? { kind: incomingRaw.kind as "dissolve" | "dip", before: incomingRaw.before, after: incomingRaw.after } : undefined;
     const outgoing = outgoingRaw ? { kind: outgoingRaw.kind as "dissolve" | "dip", before: outgoingRaw.before, after: outgoingRaw.after } : undefined;
@@ -111,17 +125,18 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
 
   const audio: LayeredPlan["audio"] = [];
   for (const track of project.tracks) {
-    if (track.hidden || track.kind === "caption" || track.kind === "overlay" || track.kind === "video") continue;
+    if (track.hidden || track.muted || track.kind === "caption" || track.kind === "overlay" || track.kind === "video") continue;
     if (track.kind !== "audio") continue;
-    if (track.items.some((item) => item.audioFx || item.duck || Object.keys(item.keyframes ?? {}).length)) fail(`audio track ${track.id} uses processed, ducked, or animated audio`);
     for (const item of track.items) {
+      const renderStart = Math.max(from, item.start);
+      const renderEnd = Math.min(to, item.start + item.duration);
+      if (renderEnd <= renderStart) continue;
+      if (item.audioFx || item.duck || Object.keys(item.keyframes ?? {}).length) fail(`audio track ${track.id} uses processed, ducked, or animated audio`);
       const probe = probes[item.assetId];
       if (!probe || probe.kind !== "audio" || probe.audio !== true) fail(`audio item ${item.id} needs a current audio probe`);
       if (probe.duration !== undefined && item.sourceIn + item.duration / project.meta.fps > probe.duration + 1e-6)
         fail(`audio source range for ${item.id} exceeds its probed duration`);
-      const renderStart = Math.max(from, item.start);
-      const renderEnd = Math.min(to, item.start + item.duration);
-      if (renderEnd > renderStart) {
+      {
         const phaseStarts = [
           item.fadeIn && item.start < renderStart && item.start + item.fadeIn > renderStart ? item.start : undefined,
           item.fadeOut && item.start + item.duration - item.fadeOut < renderStart && item.start + item.duration > renderStart ? item.start + item.duration - item.fadeOut : undefined,
@@ -133,11 +148,14 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
 
   for (const track of project.tracks) {
     if (track.hidden || track.kind !== "caption" && track.kind !== "overlay") continue;
+    const activeItems = track.items.filter((item) => track.kind !== "caption" || ("text" in item && !!item.text)).filter((item) => intersects(item));
+    if (!activeItems.length) continue;
     if (track.kind === "caption" && track.style && track.style !== "CaptionLayer") fail(`caption track ${track.id} uses a custom component`);
-    if (track.kind === "overlay" && track.items.some((item) => !supportedOverlayComponents.has(item.component) || item.blend && item.blend !== "normal")) fail(`overlay track ${track.id} uses a custom component or underlying-video blend mode`);
-    if (track.kind === "caption" && track.items.some((item) => "text" in item && !!item.text))
+    const overlayItems = track.kind === "overlay" ? activeItems as OverlayItem[] : [];
+    if (track.kind === "overlay" && overlayItems.some((item) => !supportedOverlayComponents.has(item.component) || item.blend && item.blend !== "normal")) fail(`overlay track ${track.id} uses a custom component or underlying-video blend mode`);
+    if (track.kind === "caption" && activeItems.some((item) => "text" in item && !!item.text))
       fail(`caption track ${track.id} uses CaptionLayer's backdrop blur; use an overlay CaptionLayer with css.backdropFilter set to none`);
-    if (track.kind === "overlay") for (const item of track.items) {
+    if (track.kind === "overlay") for (const item of overlayItems) {
       const css = item.component === "CaptionLayer" ? item.props.css : undefined;
       const style = item.props.style;
       if (!styleHasSafeBackdrop(style) || !styleHasSafeBackdrop(css, item.component === "CaptionLayer") || !styleHasSafeBackdrop(item.props.hiCss) ||

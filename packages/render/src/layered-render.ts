@@ -417,8 +417,9 @@ export async function renderLayered(args: LayeredRenderArgs) {
     if (activeWindowUsed) {
       inputIndex = 1;
       for (const segment of plan.video) {
-        if (!segment.videoAudio) continue;
+        // segmentInput verifies media properties; muted clips need that check too.
         const input = segmentInput(segment);
+        if (!segment.videoAudio) continue;
         inputs.push("-vn", ...input.args);
         addVideoAudio(segment, input.offset, inputIndex++);
       }

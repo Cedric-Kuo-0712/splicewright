@@ -89,6 +89,28 @@ it.skipIf(!available)("cleans failed capped encodes and preserves an existing de
   }
 });
 
+it.skipIf(!available)("still rejects unsupported media properties on muted active-window clips", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "swr-active-window-verify-"));
+  const previousMode = process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW;
+  try {
+    mkdirSync(join(dir, "raw"));
+    const source = join(dir, "raw/source.mp4"), output = join(dir, "output.mp4");
+    ffmpeg(["-f", "lavfi", "-i", "testsrc2=s=32x32:r=30:d=1,setsar=2/1", "-frames:v", "30", "-c:v", "libx264", "-threads", "1", source]);
+    const project = createProject({ title: "active verify", width: 32, height: 32, fps: 30 });
+    project.assets = { a: { id: "a", kind: "video", path: "raw/source.mp4" } };
+    project.tracks = [{ id: "v", name: "Video", kind: "video", muted: true, items: [{ id: "clip", assetId: "a", start: 0, duration: 30, sourceIn: 0 }] }];
+    const probes = { a: { kind: "video" as const, path: "raw/source.mp4", fingerprint: fingerprint(source)!, width: 32, height: 32, fps: 30, duration: 1, audio: false } };
+    process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW = "1";
+    await expect(renderLayered({ dir, output, preset: "h264-cpu", project, probes, presetOptions: { codec: "h264", crf: 18 },
+      remotion: { composition: { durationInFrames: 30 }, inputProps: { project } } as unknown as LayeredRenderArgs["remotion"],
+    })).rejects.toThrow(/non-square pixel aspect ratio/);
+    expect(existsSync(output)).toBe(false);
+  } finally {
+    if (previousMode === undefined) delete process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW; else process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW = previousMode;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 it.skipIf(!available)("streams contiguous muted clips through one encoder with exact decoded pixels", async () => {
   const dir = mkdtempSync(join(tmpdir(), "swr-active-window-equality-"));
   const previousMode = process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW;

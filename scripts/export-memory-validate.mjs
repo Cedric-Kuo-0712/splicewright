@@ -1,7 +1,36 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
+export function validateTrialCoverage(result) {
+  const cases = result.config?.cases;
+  const methods = result.config?.methods;
+  if (!Array.isArray(cases) || cases.length === 0 || !Array.isArray(methods) || methods.length === 0 || !Array.isArray(result.trials)) {
+    throw new Error('Decoded equality validation requires configured cases, methods, and completed trials');
+  }
+  const uniqueIds = (items, label) => {
+    const ids = items.map(item => item?.id);
+    if (ids.some(id => typeof id !== 'string' || !id) || new Set(ids).size !== ids.length) throw new Error(`Decoded equality validation requires unique ${label} IDs`);
+  };
+  uniqueIds(cases, 'case');
+  uniqueIds(methods, 'method');
+  if (result.trials.length !== cases.length * methods.length) throw new Error('Decoded equality validation requires one completed trial per configured case and method');
+  const expected = new Set(cases.flatMap(testCase => methods.map(method => `${testCase.id}\0${method.id}`)));
+  const seen = new Set();
+  for (const trial of result.trials) {
+    const testCase = trial.result?.case;
+    const method = trial.result?.method;
+    const key = `${testCase}\0${method}`;
+    if (!expected.has(key) || seen.has(key)) throw new Error(`Unexpected or duplicate completed trial: ${trial.name}`);
+    if (trial.result?.status !== 'DONE' || !trial.result.output) throw new Error(`Incomplete trial: ${trial.name}`);
+    seen.add(key);
+  }
+  if (seen.size !== expected.size) throw new Error('Decoded equality validation is missing a configured case and method trial');
+  return result.trials;
+}
+
+async function validateResultFile() {
 const resultFile = resolve(process.argv[2] ?? '');
 if (!process.argv[2]) throw new Error('Usage: node scripts/export-memory-validate.mjs <result.json>');
 const result = JSON.parse(readFileSync(resultFile, 'utf8'));
@@ -9,7 +38,7 @@ if (result.status !== 'DONE' || (!result.config?.validationBaseline && !result.c
 const priorReference = result.config.provenance?.priorSuccessful10;
 if (priorReference && (!Array.isArray(result.config.cases) || result.config.cases.filter(testCase => testCase.id === 'sequential-10' && testCase.audio === false).length !== 1)) throw new Error('Prior-output equality validation requires exactly one muted sequential-10 case');
 if (!priorReference && (!Array.isArray(result.config.cases) || result.config.cases.length !== 1 || result.config.cases[0].audio !== true)) throw new Error('Decoded equality validation requires exactly one audio-enabled case');
-if (!Array.isArray(result.trials) || result.trials.length !== result.config.methods?.length) throw new Error('Decoded equality validation requires one completed trial per configured method');
+validateTrialCoverage(result);
 const outputPath = join(dirname(resultFile), 'validation.json');
 if (existsSync(outputPath)) throw new Error(`Refusing to overwrite validation evidence: ${outputPath}`);
 const hash = (file, audio) => {
@@ -25,12 +54,12 @@ const rows = [];
 let error;
 try {
   if (priorReference) {
-    if (!Array.isArray(result.trials) || result.trials.length !== result.config.methods?.length || result.config.methods.length !== 1 || result.config.methods[0].experimentalActiveWindow !== true) throw new Error('Prior-output comparison requires one completed active-window trial');
-    const trial = result.trials[0];
-    if (trial.result?.status !== 'DONE' || trial.result.case !== 'sequential-10') throw new Error(`Incomplete active-window sequential-10 trial: ${trial.name}`);
+    if (result.config.methods.length !== 1 || result.config.methods[0].experimentalActiveWindow !== true) throw new Error('Prior-output comparison requires one active-window method');
+    const trial = result.trials.find(candidate => candidate.result.case === 'sequential-10');
+    if (!trial) throw new Error('Prior-output comparison requires a completed active-window sequential-10 trial');
     const referenceFileSha256 = execFileSync('shasum', ['-a', '256', priorReference.output], { encoding: 'utf8' }).split(/\s+/)[0];
     if (referenceFileSha256 !== priorReference.fileSha256) throw new Error('Preserved sequential-10 reference file changed');
-    const row = { method: trial.result.method, videoSha256: hash(trial.result.output, false), referenceVideoSha256: hash(priorReference.output, false) };
+    const row = { case: trial.result.case, method: trial.result.method, videoSha256: hash(trial.result.output, false), referenceVideoSha256: hash(priorReference.output, false) };
     row.exactVideoEqual = row.videoSha256 === row.referenceVideoSha256;
     rows.push(row);
     if (!row.exactVideoEqual) throw new Error('Decoded RGB mismatch against preserved sequential-10 output');
@@ -54,3 +83,6 @@ try {
 const validation = { status: error ? 'FAILED' : 'DONE', error, createdAt: new Date().toISOString(), scope: priorReference ? 'Full decoded RGB SHA-256 equality against the preserved successful sequential-10 output.' : 'Full decoded RGB and PCM SHA-256 equality; not a subjective quality rating.', rows };
 writeFileSync(outputPath, `${JSON.stringify(validation, null, 2)}\n`, { flag: 'wx' });
 console.log(JSON.stringify({ status: validation.status, methods: rows.length, error }));
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await validateResultFile();

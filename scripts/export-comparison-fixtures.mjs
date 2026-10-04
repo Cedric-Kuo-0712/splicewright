@@ -62,25 +62,25 @@ export function makeCaptions(seed = DEFAULT_SEED, caseOffset = 0) {
 }
 
 export function createFixtureProject({ caseId, variant, seed = DEFAULT_SEED, media }) {
-  if (!media || !Number.isFinite(media.duration) || media.duration < 7.4 || !Number.isFinite(media.fps) || media.fps <= 0)
-    throw new Error(`${caseId}: source metadata must include positive fps and at least 7.4 seconds of media`);
-  const sourceFrame = (seconds) => Math.round(seconds * media.fps);
-  const sourceSecond = (frame) => Number((frame / media.fps).toFixed(9));
-  const firstSourceIn = sourceSecond(sourceFrame(0.5));
-  const secondTarget = Math.min(15, media.duration - 3.4);
-  const secondSourceIn = sourceSecond(sourceFrame(Math.max(4, secondTarget)));
+  const sources = Array.isArray(media) ? media : [
+    { ...media, id: `${caseId}_source`, sourceInSeconds: 0.5 },
+    { ...media, id: `${caseId}_source`, sourceInSeconds: Math.min(15, media.duration - 3.4) },
+  ];
+  if (sources.length !== 2 || sources.some((source) => !source || !Number.isFinite(source.duration) || source.duration < 3.4 || !Number.isFinite(source.fps) || source.fps <= 0))
+    throw new Error(`${caseId}: both source segments require positive fps and at least 3.4 seconds of media`);
+  const snappedSourceIn = (source) => Number((Math.round(source.sourceInSeconds * source.fps) / source.fps).toFixed(9));
   const captions = makeCaptions(seed, caseId === "diagnostic" ? 0 : 101);
   const isDiagnostic = caseId === "diagnostic";
   const isOverlayTransition = variant === "overlay-transition";
   const transitionKind = caseId === "diagnostic" ? "dissolve" : "dip";
-  const source = {
-    id: `${caseId}_source`,
-    path: media.path,
+  const assets = Object.fromEntries(sources.map((source, index) => [source.id ?? `${caseId}_source_${index + 1}`, {
+    id: source.id ?? `${caseId}_source_${index + 1}`,
+    path: source.path,
     kind: "video",
-  };
+  }]));
   const clips = [
-    { id: "clip_1", start: 0, duration: 90, assetId: source.id, sourceIn: firstSourceIn, volume: 1, fadeIn: 6 },
-    { id: "clip_2", start: 90, duration: 90, assetId: source.id, sourceIn: secondSourceIn, volume: 1, fadeOut: 6 },
+    { id: "clip_1", start: 0, duration: 90, assetId: sources[0].id, sourceIn: snappedSourceIn(sources[0]), volume: 1, fadeIn: 6 },
+    { id: "clip_2", start: 90, duration: 90, assetId: sources[1].id, sourceIn: snappedSourceIn(sources[1]), volume: 1, fadeOut: 6 },
   ];
   // Transition metadata belongs to the outgoing clip, which ends at the 90-frame cut.
   if (isOverlayTransition) clips[0].transition = { kind: transitionKind, duration: 18 };
@@ -94,7 +94,7 @@ export function createFixtureProject({ caseId, variant, seed = DEFAULT_SEED, med
       height: isDiagnostic ? 720 : 1080,
       background: "#000000",
     },
-    assets: { [source.id]: source },
+    assets,
     tracks: [
       { id: "video_1", name: "V1", kind: "video", magnetic: true, items: clips },
       { id: "captions_1", name: "Captions", kind: "caption", items: captions },
@@ -124,19 +124,31 @@ function probe(file) {
   };
 }
 
-async function selectRealSource(mediaRoot) {
+async function selectRealSources(mediaRoot) {
   const names = (await readdir(mediaRoot)).filter((name) => VIDEO_EXTENSIONS.has(extname(name).toLowerCase())).sort();
-  const preferred = "VID20260627195107.mp4";
-  const ordered = [preferred, ...names.filter((name) => name !== preferred)];
-  for (const name of ordered) {
+  const preferred = [
+    ["dji_export_20260629_215630_1782741390317_editor.mp4", 12],
+    ["dji_export_20260629_220010_1782741610439_editor.mp4", 40],
+  ];
+  const selected = [];
+  for (const [name, sourceInSeconds] of preferred) {
     if (!names.includes(name)) continue;
     const file = resolve(mediaRoot, name);
     const info = probe(file);
-    if (info.duration >= 7.4 && info.width >= 1280 && info.height >= 720 && info.audio && info.fps > 0) {
-      return { name, file, ...info };
+    if (info.duration >= sourceInSeconds + 3.4 && info.width === 1920 && info.height === 1080 && info.audio && info.fps > 0)
+      selected.push({ id: `real_source_${selected.length + 1}`, name, file, ...info, sourceInSeconds });
+  }
+  const ordered = names.filter((name) => !selected.some((source) => source.name === name));
+  for (const name of ordered) {
+    if (selected.length === 2) break;
+    const file = resolve(mediaRoot, name);
+    const info = probe(file);
+    if (info.duration >= 7.4 && info.width === 1920 && info.height === 1080 && info.audio && info.fps > 0) {
+      selected.push({ id: `real_source_${selected.length + 1}`, name, file, ...info, sourceInSeconds: selected.length === 0 ? 12 : 40 });
     }
   }
-  throw new Error(`no video with audio, >=1280x720, and >=7.4 seconds found in ${mediaRoot}`);
+  if (selected.length !== 2) throw new Error(`could not find two 1080p sources with audio and enough duration in ${mediaRoot}`);
+  return selected;
 }
 
 async function ensureSafeOutput(projectDir, outDir) {
@@ -169,7 +181,7 @@ export async function generateDiagnosticMedia(outDir) {
   const audio = "aevalsrc=0.02*sin(2*PI*300*t)+0.8*sin(2*PI*1200*t)*gt(0.04-mod(t\\,1)\\,0):s=48000:d=7.5";
   try {
     execFileSync("ffmpeg", [
-      "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=6",
+      "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=7.5",
       "-f", "lavfi", "-i", audio, "-t", "7.5", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
       "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k", "-ac", "2", "-movflags", "+faststart", target,
     ], { stdio: ["ignore", "ignore", "pipe"] });
@@ -197,7 +209,7 @@ export async function buildExportComparisonFixtures({ projectDir, outDir, mediaR
   if (!sourceProject || typeof sourceProject !== "object" || !sourceProject.meta) throw new Error("--project must contain a valid project.json");
   const root = await realpath(mediaRoot ?? resolve(source, "raw"));
   if (pathWithin(root, output) || pathWithin(output, root)) throw new Error("--out must be separate from --media-root");
-  const real = await selectRealSource(root);
+  const realSources = await selectRealSources(root);
   const diagnostic = resolve(output, "shared/diagnostic.mp4");
   try { await stat(diagnostic); }
   catch { throw new Error(`missing ${diagnostic}; run this command first with --generate-media`); }
@@ -215,11 +227,11 @@ export async function buildExportComparisonFixtures({ projectDir, outDir, mediaR
     sources: {},
     fixtures: [],
   };
-  const sources = [
-    { id: "diagnostic", file: diagnostic, path: "../shared/diagnostic.mp4", info: diag },
-    { id: "real", file: real.file, path: `raw/${real.name}`, info: real },
+  const sourceFiles = [
+    { id: "diagnostic_source", caseId: "diagnostic", file: diagnostic, path: "../shared/diagnostic.mp4", info: diag },
+    ...realSources.map((item) => ({ id: item.id, caseId: "real", name: item.name, file: item.file, info: item, path: `raw/${item.name}` })),
   ];
-  for (const item of sources) {
+  for (const item of sourceFiles) {
     const fileStat = await stat(item.file);
     manifest.sources[item.id] = {
       path: item.file,
@@ -231,33 +243,48 @@ export async function buildExportComparisonFixtures({ projectDir, outDir, mediaR
       nativeAudioSampleRate: item.info.audioSampleRate,
     };
   }
-  for (const sourceInfo of sources) {
+  const cases = [
+    {
+      caseId: "diagnostic",
+      media: [
+        { ...diag, id: "diagnostic_source", path: "../shared/diagnostic.mp4", sourceInSeconds: 0.5 },
+        { ...diag, id: "diagnostic_source", path: "../shared/diagnostic.mp4", sourceInSeconds: 4.1 },
+      ],
+    },
+    { caseId: "real", media: realSources.map((item) => ({ ...item, path: `raw/${item.name}` })) },
+  ];
+  for (const fixtureCase of cases) {
     for (const variant of ["hardcut", "overlay-transition"]) {
-      const projectDirPath = resolve(output, `${sourceInfo.id}-${variant}`);
+      const projectDirPath = resolve(output, `${fixtureCase.caseId}-${variant}`);
       await mkdir(resolve(projectDirPath, ".splicewright"), { recursive: true });
       await symlink(rawLinkTarget, resolve(projectDirPath, "raw"), "dir");
-      const assetPath = sourceInfo.path;
-      const media = { ...sourceInfo.info, path: assetPath };
-      const project = createFixtureProject({ caseId: sourceInfo.id, variant, seed, media });
-      const asset = Object.values(project.assets)[0];
-      const mediaOnDisk = resolve(projectDirPath, asset.path);
-      const sourceFingerprint = fingerprint(mediaOnDisk);
-      if (!sourceFingerprint) throw new Error(`${sourceInfo.id}: source path does not resolve from fixture project: ${asset.path}`);
-      const cache = { [asset.id]: {
-        path: asset.path,
-        fingerprint: sourceFingerprint,
-        kind: "video",
-        duration: sourceInfo.info.duration,
-        width: sourceInfo.info.width,
-        height: sourceInfo.info.height,
-        fps: sourceInfo.info.fps,
-        audio: sourceInfo.info.audio,
-      } };
+      const project = createFixtureProject({ caseId: fixtureCase.caseId, variant, seed, media: fixtureCase.media });
+      const mediaById = Object.fromEntries(fixtureCase.media.map((item) => [item.id, item]));
+      const cache = {};
+      const fingerprints = {};
+      for (const asset of Object.values(project.assets)) {
+        const sourceInfo = mediaById[asset.id];
+        const mediaOnDisk = resolve(projectDirPath, asset.path);
+        const sourceFingerprint = fingerprint(mediaOnDisk);
+        if (!sourceFingerprint) throw new Error(`${fixtureCase.caseId}: source path does not resolve from fixture project: ${asset.path}`);
+        fingerprints[asset.id] = sourceFingerprint;
+        cache[asset.id] = {
+          path: asset.path,
+          fingerprint: sourceFingerprint,
+          kind: "video",
+          duration: sourceInfo.duration,
+          width: sourceInfo.width,
+          height: sourceInfo.height,
+          fps: sourceInfo.fps,
+          audio: sourceInfo.audio,
+        };
+      }
       const projectBytes = `${JSON.stringify(project, null, 2)}\n`;
       await writeFile(resolve(projectDirPath, "project.json"), projectBytes, "utf8");
       await writeJson(resolve(projectDirPath, ".splicewright/assets.json"), cache);
-      const errors = validate(project, undefined, { assetDurations: { [asset.id]: sourceInfo.info.duration } });
-      if (errors.length) throw new Error(`${sourceInfo.id}/${variant} failed core validation: ${errors.join("; ")}`);
+      const assetDurations = Object.fromEntries(Object.entries(mediaById).map(([id, sourceInfo]) => [id, sourceInfo.duration]));
+      const errors = validate(project, undefined, { assetDurations });
+      if (errors.length) throw new Error(`${fixtureCase.caseId}/${variant} failed core validation: ${errors.join("; ")}`);
       const video = project.tracks.find((track) => track.kind === "video");
       const entry = {
         projectDir: projectDirPath,
@@ -267,28 +294,29 @@ export async function buildExportComparisonFixtures({ projectDir, outDir, mediaR
         fps: project.meta.fps,
         frames: 180,
         durationSeconds: 6,
-        audio: { present: sourceInfo.info.audio, volume: 1, sourceSampleRate: sourceInfo.info.audioSampleRate },
-        source: {
-          path: asset.path,
-          sourceFps: sourceInfo.info.fps,
-          sourceFrameRate: sourceInfo.info.frameRate,
-          sourceFrames: video.items.map((clip) => ({
+        audio: { present: fixtureCase.media.every((item) => item.audio), volume: 1, sourceSampleRates: fixtureCase.media.map((item) => item.audioSampleRate) },
+        sources: fixtureCase.media.map((sourceInfo) => ({
+          assetId: sourceInfo.id,
+          path: sourceInfo.path,
+          sourceFps: sourceInfo.fps,
+          sourceFrameRate: sourceInfo.frameRate,
+          sourceFrames: video.items.filter((clip) => clip.assetId === sourceInfo.id).map((clip) => ({
             itemId: clip.id,
             timelineStartFrame: clip.start,
             durationFrames: clip.duration,
             sourceInSeconds: clip.sourceIn,
-            sourceInFrame: Math.round(clip.sourceIn * sourceInfo.info.fps),
+            sourceInFrame: Math.round(clip.sourceIn * sourceInfo.fps),
           })),
           sha256: manifest.sources[sourceInfo.id].sha256,
           bytes: manifest.sources[sourceInfo.id].bytes,
-        },
+          fingerprint: fingerprints[sourceInfo.id],
+        })),
         captions: project.tracks.find((track) => track.kind === "caption").items.map(({ start, duration, text }) => ({ start, duration, text })),
         transitions: video.items.flatMap((clip) => clip.transition ? [{ kind: clip.transition.kind, cutFrame: clip.start + clip.duration, durationFrames: clip.transition.duration }] : []),
         semanticCounts: semanticCounts(project),
         probeCachePath: resolve(projectDirPath, ".splicewright/assets.json"),
-        sourceFingerprint,
       };
-      manifest.fixtures.push({ caseId: sourceInfo.id, variant, ...entry });
+      manifest.fixtures.push({ caseId: fixtureCase.caseId, variant, ...entry });
     }
   }
   await writeJson(resolve(output, "fixture-manifest.json"), manifest);

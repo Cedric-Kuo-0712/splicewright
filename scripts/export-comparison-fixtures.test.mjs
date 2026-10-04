@@ -28,9 +28,15 @@ describe("export comparison fixture configuration", () => {
   });
 
   it("retains the probed source frame rate when it differs from the project frame rate", () => {
-    const media = { ...source, fps: 48 };
+    const media = [
+      { ...source, id: "real_source_1", path: "raw/first.mp4", fps: 48, sourceInSeconds: 12 },
+      { ...source, id: "real_source_2", path: "raw/second.mp4", fps: 24, sourceInSeconds: 40 },
+    ];
     const fixture = createFixtureProject({ caseId: "real", variant: "overlay-transition", media });
     expect(fixture.meta.fps).toBe(30);
-    expect(fixture.tracks[0].items[1].sourceIn * media.fps).toBe(Math.round(fixture.tracks[0].items[1].sourceIn * media.fps));
+    expect(fixture.tracks[0].items.map((item) => item.assetId)).toEqual(["real_source_1", "real_source_2"]);
+    expect(fixture.tracks[0].items[0].sourceIn * media[0].fps).toBe(Math.round(fixture.tracks[0].items[0].sourceIn * media[0].fps));
+    expect(fixture.tracks[0].items[1].sourceIn * media[1].fps).toBe(Math.round(fixture.tracks[0].items[1].sourceIn * media[1].fps));
+    expect(validate(fixture, undefined, { assetDurations: { real_source_1: 51, real_source_2: 81 } })).toEqual([]);
   });
 });

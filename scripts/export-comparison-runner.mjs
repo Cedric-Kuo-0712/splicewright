@@ -42,13 +42,14 @@ function verify() {
     const accepted = [entry.templateSha256, ...Object.values(entry.emittedSha256ByRenderer ?? {})];
     if (!existsSync(entry.path) || !accepted.includes(hash(entry.path))) throw new Error(`Generated renderer entry changed: ${entry.path}`);
   }
+  if (config.provenance?.priorSuccessful10 && (!existsSync(config.provenance.priorSuccessful10.output) || !/^[a-f0-9]{64}$/.test(config.provenance.priorSuccessful10.fileSha256))) throw new Error('Pinned prior sequential-10 reference is missing or malformed');
   for (const c of config.cases) {
     if (!/^[a-z0-9-]+$/.test(c.id) || !(c.frames > 0 && c.fps > 0 && c.width > 0 && c.height > 0)) throw new Error('Invalid case');
     if (!existsSync(join(c.project, 'project.json'))) throw new Error(`Missing project: ${c.id}`);
     if (c.range && (!Array.isArray(c.range) || c.range.length !== 2 || !c.range.every(Number.isInteger) || c.range[0] < 0 || c.range[1] - c.range[0] !== c.frames)) throw new Error(`Invalid range: ${c.id}`);
   }
   for (const m of config.methods)
-    if (!/^[a-z0-9-]+$/.test(m.id) || !existsSync(m.renderer ?? config.renderer) || (m.experimentalFilterBufferedFrames !== undefined && ![64, 128].includes(m.experimentalFilterBufferedFrames))) throw new Error(`Invalid method renderer or experimental filter cap: ${m.id}`);
+    if (!/^[a-z0-9-]+$/.test(m.id) || !existsSync(m.renderer ?? config.renderer) || (m.experimentalFilterBufferedFrames !== undefined && ![64, 128].includes(m.experimentalFilterBufferedFrames)) || (m.experimentalActiveWindow !== undefined && typeof m.experimentalActiveWindow !== 'boolean')) throw new Error(`Invalid method renderer or experimental setting: ${m.id}`);
   if (config.qualityPolicy) {
     for (const m of config.methods) {
       if (!m.options?.preset || !m.expectedEncoder) throw new Error(`Method ${m.id} must pin preset and expectedEncoder`);
@@ -67,6 +68,7 @@ if (args.includes('--check')) {
   execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
   execFileSync('ffprobe', ['-version'], { stdio: 'ignore' });
   if (config.methods.some(method => method.experimentalFilterBufferedFrames !== undefined) && !execFileSync('ffmpeg', ['-hide_banner', '-h', 'full'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).includes('-filter_buffered_frames')) throw new Error('This FFmpeg build does not support -filter_buffered_frames');
+  if (config.provenance?.priorSuccessful10 && hash(config.provenance.priorSuccessful10.output) !== config.provenance.priorSuccessful10.fileSha256) throw new Error('Pinned prior sequential-10 reference file changed');
   console.log(JSON.stringify({ status: 'PREFLIGHT_PASSED', cases: config.cases.length, methods: config.methods.length, guards: config.guards }));
 } else if (args.includes('--trial')) {
   const index = args.indexOf('--trial');
@@ -75,6 +77,8 @@ if (args.includes('--check')) {
   if (!c || !m) throw new Error('Unknown trial');
   if (m.experimentalFilterBufferedFrames === undefined) delete process.env.SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES;
   else process.env.SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES = String(m.experimentalFilterBufferedFrames);
+  if (m.experimentalActiveWindow) process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW = '1';
+  else delete process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW;
   const { render } = await import(pathToFileURL(rendererPath(m.id)).href);
   const name = `${c.id}-${m.id}`, output = join(root, `${name}.mp4`), resultFile = join(root, `${name}.json`);
   if (existsSync(output) || existsSync(resultFile)) throw new Error('Refusing to overwrite trial');
@@ -102,6 +106,7 @@ if (args.includes('--check')) {
       },
       onProgress: progress => { const bucket = Math.floor(progress * 50); if (bucket !== progressBucket) { progressBucket = bucket; appendFileSync(join(root, `${name}-progress.jsonl`), JSON.stringify({ elapsedMs: performance.now() - start, progress }) + '\n'); } },
     });
+    if (m.experimentalActiveWindow && (!existsSync(eventsFile) || !readFileSync(eventsFile, 'utf8').includes('"stage":"active-window-reader-start"'))) throw new Error('The active-window experimental method did not use its requested reader path');
     record.renderMs = performance.now() - start;
     setPhase('post-render-validation');
     record.stages = [{ name: 'render', elapsedMs: record.renderMs }];

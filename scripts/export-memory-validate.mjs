@@ -5,8 +5,10 @@ import { dirname, join, resolve } from 'node:path';
 const resultFile = resolve(process.argv[2] ?? '');
 if (!process.argv[2]) throw new Error('Usage: node scripts/export-memory-validate.mjs <result.json>');
 const result = JSON.parse(readFileSync(resultFile, 'utf8'));
-if (result.status !== 'DONE' || !result.config?.validationBaseline) throw new Error('Requires a completed comparison with validationBaseline');
-if (!Array.isArray(result.config.cases) || result.config.cases.length !== 1 || result.config.cases[0].audio !== true) throw new Error('Decoded equality validation requires exactly one audio-enabled case');
+if (result.status !== 'DONE' || (!result.config?.validationBaseline && !result.config?.provenance?.priorSuccessful10)) throw new Error('Requires a completed baseline comparison or pinned prior successful sequential-10 output');
+const priorReference = result.config.provenance?.priorSuccessful10;
+if (priorReference && (!Array.isArray(result.config.cases) || result.config.cases.filter(testCase => testCase.id === 'sequential-10' && testCase.audio === false).length !== 1)) throw new Error('Prior-output equality validation requires exactly one muted sequential-10 case');
+if (!priorReference && (!Array.isArray(result.config.cases) || result.config.cases.length !== 1 || result.config.cases[0].audio !== true)) throw new Error('Decoded equality validation requires exactly one audio-enabled case');
 if (!Array.isArray(result.trials) || result.trials.length !== result.config.methods?.length) throw new Error('Decoded equality validation requires one completed trial per configured method');
 const outputPath = join(dirname(resultFile), 'validation.json');
 if (existsSync(outputPath)) throw new Error(`Refusing to overwrite validation evidence: ${outputPath}`);
@@ -22,21 +24,33 @@ const hash = (file, audio) => {
 const rows = [];
 let error;
 try {
-  for (const trial of result.trials) {
-    if (trial.result?.status !== 'DONE') throw new Error(`Incomplete trial: ${trial.name}`);
-    rows.push({ method: trial.result.method, videoSha256: hash(trial.result.output, false), audioSha256: hash(trial.result.output, true) });
-  }
-  const baseline = rows.find(row => row.method === result.config.validationBaseline);
-  if (!baseline) throw new Error(`Missing validation baseline ${result.config.validationBaseline}`);
-  for (const row of rows) {
-    row.exactVideoEqual = row.videoSha256 === baseline.videoSha256;
-    row.exactAudioEqual = row.audioSha256 === baseline.audioSha256;
-    if (!row.exactVideoEqual || !row.exactAudioEqual) throw new Error(`Decoded RGB/PCM mismatch: ${row.method}`);
+  if (priorReference) {
+    if (!Array.isArray(result.trials) || result.trials.length !== result.config.methods?.length || result.config.methods.length !== 1 || result.config.methods[0].experimentalActiveWindow !== true) throw new Error('Prior-output comparison requires one completed active-window trial');
+    const trial = result.trials[0];
+    if (trial.result?.status !== 'DONE' || trial.result.case !== 'sequential-10') throw new Error(`Incomplete active-window sequential-10 trial: ${trial.name}`);
+    const referenceFileSha256 = execFileSync('shasum', ['-a', '256', priorReference.output], { encoding: 'utf8' }).split(/\s+/)[0];
+    if (referenceFileSha256 !== priorReference.fileSha256) throw new Error('Preserved sequential-10 reference file changed');
+    const row = { method: trial.result.method, videoSha256: hash(trial.result.output, false), referenceVideoSha256: hash(priorReference.output, false) };
+    row.exactVideoEqual = row.videoSha256 === row.referenceVideoSha256;
+    rows.push(row);
+    if (!row.exactVideoEqual) throw new Error('Decoded RGB mismatch against preserved sequential-10 output');
+  } else {
+    for (const trial of result.trials) {
+      if (trial.result?.status !== 'DONE') throw new Error(`Incomplete trial: ${trial.name}`);
+      rows.push({ method: trial.result.method, videoSha256: hash(trial.result.output, false), audioSha256: hash(trial.result.output, true) });
+    }
+    const baseline = rows.find(row => row.method === result.config.validationBaseline);
+    if (!baseline) throw new Error(`Missing validation baseline ${result.config.validationBaseline}`);
+    for (const row of rows) {
+      row.exactVideoEqual = row.videoSha256 === baseline.videoSha256;
+      row.exactAudioEqual = row.audioSha256 === baseline.audioSha256;
+      if (!row.exactVideoEqual || !row.exactAudioEqual) throw new Error(`Decoded RGB/PCM mismatch: ${row.method}`);
+    }
   }
 } catch (cause) {
   error = cause instanceof Error ? cause.message : String(cause);
   process.exitCode = 1;
 }
-const validation = { status: error ? 'FAILED' : 'DONE', error, createdAt: new Date().toISOString(), scope: 'Full decoded RGB and PCM SHA-256 equality; not a subjective quality rating.', rows };
+const validation = { status: error ? 'FAILED' : 'DONE', error, createdAt: new Date().toISOString(), scope: priorReference ? 'Full decoded RGB SHA-256 equality against the preserved successful sequential-10 output.' : 'Full decoded RGB and PCM SHA-256 equality; not a subjective quality rating.', rows };
 writeFileSync(outputPath, `${JSON.stringify(validation, null, 2)}\n`, { flag: 'wx' });
 console.log(JSON.stringify({ status: validation.status, methods: rows.length, error }));

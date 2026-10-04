@@ -90,7 +90,9 @@ const bundles = new Map<string, Promise<string>>();
 export function bundleProject(dir: string): Promise<string> {
   if (!bundles.has(dir)) {
     const promise = new Promise<string>((resolveUrl, reject) => {
-      const child = fork(join(here, "bundle-child.ts"), [], { silent: true });
+      // stdout is ignored, not piped: an undrained pipe would block a chatty bundler once its buffer fills.
+      // A clean execArgv: inherited flags such as --input-type or --inspect break or collide in the child.
+      const child = fork(join(here, "bundle-child.ts"), [], { execArgv: [], stdio: ["ignore", "ignore", "pipe", "ipc"] });
       let stderr = "";
       let settled = false;
       const kill = () => child.kill("SIGKILL"); // no orphan if the parent exits mid-bundle

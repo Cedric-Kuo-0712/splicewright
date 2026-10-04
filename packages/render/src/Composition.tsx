@@ -354,7 +354,7 @@ export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: 
 
 const lookOffStyle: React.CSSProperties = { position: "absolute", top: 8, right: 8, zIndex: 10, padding: "4px 8px", color: "#fff", background: "#9b1c1c", borderRadius: 4, font: "12px sans-serif" };
 
-const CanvasVideoPath: React.FC<{
+export const CanvasVideoPath: React.FC<{
   itemName: string;
   src: string;
   trimBefore: number;
@@ -370,6 +370,10 @@ const CanvasVideoPath: React.FC<{
   sample: boolean;
 }> = ({ itemName, src, trimBefore, speed, volume, muted, fit, style, keyLook, grade, luts, itemId, sample }) => {
   const [decodeError, setDecodeError] = useState<Error | null>(null);
+  const { isPlayer } = useRemotionEnvironment();
+  // Embedded Players may support native AAC playback without WebCodecs audio decoding.
+  // Keep canvas effects, but use the same native audio path as ungraded preview clips.
+  const separateAudio = isPlayer || speed !== 1;
   return (
     <div data-look-item-id={itemId} style={{ display: "contents" }}>
       {decodeError ? (
@@ -380,7 +384,7 @@ const CanvasVideoPath: React.FC<{
           trimBefore={trimBefore}
           playbackRate={speed}
           volume={volume}
-          muted={muted || speed !== 1}
+          muted={muted || separateAudio}
           objectFit={fit ?? "contain"}
           style={{ ...style, objectFit: undefined }}
           disallowFallbackToOffthreadVideo
@@ -388,7 +392,7 @@ const CanvasVideoPath: React.FC<{
           effects={lookEffects(itemId, grade, keyLook, luts, sample)}
         />
       )}
-      {!decodeError && speed !== 1 && <Audio src={src} trimBefore={trimBefore} playbackRate={speed} volume={volume} muted={muted} />}
+      {!decodeError && separateAudio && <Audio src={src} trimBefore={trimBefore} playbackRate={speed} volume={volume} muted={muted} />}
     </div>
   );
 };

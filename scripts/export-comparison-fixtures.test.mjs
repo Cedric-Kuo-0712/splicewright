@@ -44,4 +44,16 @@ describe("export comparison fixture configuration", () => {
     expect(fixture.tracks[0].items[1].sourceIn * media[1].fps).toBe(Math.round(fixture.tracks[0].items[1].sourceIn * media[1].fps));
     expect(validate(fixture, undefined, { assetDurations: { real_source_1: 51, real_source_2: 81 } })).toEqual([]);
   });
+
+  it("builds a bounded-graphics stress fixture with overlapping safe captions and alternating transitions", () => {
+    const fixture = createFixtureProject({ caseId: "real", variant: "chunk-stress", seed: 20261004, media: source });
+    const video = fixture.tracks.find(track => track.kind === "video");
+    const overlays = fixture.tracks.find(track => track.kind === "overlay");
+    expect(validate(fixture, undefined, { assetDurations: { real_source: source.duration } })).toHaveLength(9);
+    expect(video.items).toHaveLength(6);
+    expect(video.items.slice(0, 5).map(item => item.transition.kind)).toEqual(["dissolve", "dip", "dissolve", "dip", "dissolve"]);
+    expect(overlays.items).toHaveLength(10);
+    expect(overlays.items.some((item, index) => index > 0 && item.start < overlays.items[index - 1].start + overlays.items[index - 1].duration)).toBe(true);
+    expect(overlays.items.every(item => item.component === "CaptionLayer" && item.props.css.backdropFilter === "none")).toBe(true);
+  });
 });

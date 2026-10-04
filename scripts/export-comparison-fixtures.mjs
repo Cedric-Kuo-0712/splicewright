@@ -73,18 +73,42 @@ export function createFixtureProject({ caseId, variant, seed = DEFAULT_SEED, med
   const captions = makeCaptions(seed, caseId === "diagnostic" ? 0 : 101);
   const isDiagnostic = caseId === "diagnostic";
   const isOverlayTransition = variant === "overlay-transition";
+  const isChunkStress = variant === "chunk-stress";
   const transitionKind = caseId === "diagnostic" ? "dissolve" : "dip";
   const assets = Object.fromEntries(sources.map((source, index) => [source.id ?? `${caseId}_source_${index + 1}`, {
     id: source.id ?? `${caseId}_source_${index + 1}`,
     path: source.path,
     kind: "video",
   }]));
-  const clips = [
+  const clips = isChunkStress
+    ? Array.from({ length: 6 }, (_, index) => {
+      const source = sources[index % sources.length];
+      return {
+        id: `clip_${index + 1}`,
+        start: index * 30,
+        duration: 30,
+        assetId: source.id,
+        sourceIn: snappedSourceIn(source) + (index % 2) * 1.2,
+        volume: 1,
+        ...(index < 5 ? { transition: { kind: index % 2 ? "dip" : "dissolve", duration: 12 } } : {}),
+      };
+    })
+    : [
     { id: "clip_1", start: 0, duration: 90, assetId: sources[0].id, sourceIn: snappedSourceIn(sources[0]), volume: 1, fadeIn: 6 },
     { id: "clip_2", start: 90, duration: 90, assetId: sources[1].id, sourceIn: snappedSourceIn(sources[1]), volume: 1, fadeOut: 6 },
   ];
   // Transition metadata belongs to the outgoing clip, which ends at the 90-frame cut.
   if (isOverlayTransition) clips[0].transition = { kind: transitionKind, duration: 18 };
+  const stressOverlays = isChunkStress ? Array.from({ length: 10 }, (_, index) => ({
+    id: `caption_overlay_${index + 1}`,
+    start: Math.max(0, index * 17 - 4),
+    duration: Math.min(38, 180 - Math.max(0, index * 17 - 4)),
+    component: "CaptionLayer",
+    props: {
+      texts: [CAPTION_TEMPLATES[(index + seed) % CAPTION_TEMPLATES.length]],
+      css: { backdropFilter: "none" },
+    },
+  })) : [];
   return {
     schemaVersion: 1,
     revision: 0,
@@ -98,7 +122,9 @@ export function createFixtureProject({ caseId, variant, seed = DEFAULT_SEED, med
     assets,
     tracks: [
       { id: "video_1", name: "V1", kind: "video", magnetic: true, items: clips },
-      { id: "captions_1", name: "Captions", kind: "caption", items: captions },
+      isChunkStress
+        ? { id: "captions_1", name: "Captions", kind: "overlay", items: stressOverlays }
+        : { id: "captions_1", name: "Captions", kind: "caption", items: captions },
     ],
     ids: { clip: 2, caption: 7 },
   };
@@ -194,10 +220,11 @@ export async function generateDiagnosticMedia(outDir) {
 
 function semanticCounts(project) {
   const video = project.tracks.find((track) => track.kind === "video");
-  const captions = project.tracks.find((track) => track.kind === "caption");
+  const captions = project.tracks.filter((track) => track.kind === "caption" || track.kind === "overlay")
+    .flatMap((track) => track.items);
   return {
     videoItems: video.items.length,
-    captions: captions.items.length,
+    captions: captions.length,
     transitions: video.items.filter((item) => item.transition).length,
     fades: video.items.filter((item) => item.fadeIn || item.fadeOut).length,
   };
@@ -255,7 +282,7 @@ export async function buildExportComparisonFixtures({ projectDir, outDir, mediaR
     { caseId: "real", media: realSources.map((item) => ({ ...item, path: `raw/${item.name}` })) },
   ];
   for (const fixtureCase of cases) {
-    for (const variant of ["hardcut", "overlay-transition"]) {
+    for (const variant of ["hardcut", "overlay-transition", "chunk-stress"]) {
       const projectDirPath = resolve(output, `${fixtureCase.caseId}-${variant}`);
       await mkdir(resolve(projectDirPath, ".splicewright"), { recursive: true });
       await symlink(rawLinkTarget, resolve(projectDirPath, "raw"), "dir");
@@ -287,7 +314,10 @@ export async function buildExportComparisonFixtures({ projectDir, outDir, mediaR
       await writeJson(resolve(projectDirPath, ".splicewright/assets.json"), cache);
       const assetDurations = Object.fromEntries(Object.entries(mediaById).map(([id, sourceInfo]) => [id, sourceInfo.duration]));
       const errors = validate(project, undefined, { assetDurations });
-      if (errors.length) throw new Error(`${fixtureCase.caseId}/${variant} failed core validation: ${errors.join("; ")}`);
+      const blockingErrors = variant === "chunk-stress"
+        ? errors.filter((error) => !/^captions_1: caption_overlay_\d+ overlaps caption_overlay_\d+$/.test(error))
+        : errors;
+      if (blockingErrors.length) throw new Error(`${fixtureCase.caseId}/${variant} failed core validation: ${blockingErrors.join("; ")}`);
       const video = project.tracks.find((track) => track.kind === "video");
       const entry = {
         projectDir: projectDirPath,
@@ -314,7 +344,9 @@ export async function buildExportComparisonFixtures({ projectDir, outDir, mediaR
           bytes: manifest.sources[sourceInfo.id].bytes,
           fingerprint: fingerprints[sourceInfo.id],
         })),
-        captions: project.tracks.find((track) => track.kind === "caption").items.map(({ start, duration, text }) => ({ start, duration, text })),
+        captions: project.tracks.flatMap((track) => track.kind === "caption"
+          ? track.items.map(({ start, duration, text }) => ({ start, duration, text }))
+          : track.kind === "overlay" ? track.items.map(({ start, duration, props }) => ({ start, duration, text: props.texts?.[0], css: props.css })) : []),
         transitions: video.items.flatMap((clip) => clip.transition ? [{ kind: clip.transition.kind, cutFrame: clip.start + clip.duration, durationFrames: clip.transition.duration }] : []),
         semanticCounts: semanticCounts(project),
         probeCachePath: resolve(projectDirPath, ".splicewright/assets.json"),

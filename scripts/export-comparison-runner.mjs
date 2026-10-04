@@ -41,10 +41,21 @@ function verify() {
     if (!existsSync(join(c.project, 'project.json'))) throw new Error(`Missing project: ${c.id}`);
     if (c.range && (!Array.isArray(c.range) || c.range.length !== 2 || !c.range.every(Number.isInteger) || c.range[0] < 0 || c.range[1] - c.range[0] !== c.frames)) throw new Error(`Invalid range: ${c.id}`);
   }
-  for (const m of config.methods) if (!/^[a-z0-9-]+$/.test(m.id)) throw new Error('Invalid method');
+  for (const m of config.methods) {
+    if (!/^[a-z0-9-]+$/.test(m.id) || !existsSync(m.renderer ?? config.renderer)) throw new Error(`Invalid method renderer: ${m.id}`);
+    if (!m.options?.preset || !m.expectedEncoder) throw new Error(`Method ${m.id} must pin preset and expectedEncoder`);
+    if (m.options.preset !== config.qualityPolicy?.preset) throw new Error(`Method ${m.id} violates shared qualityPolicy.preset`);
+  }
+  if (config.methods.length !== 2 || config.methods[0].options.preset !== config.methods[1].options.preset)
+    throw new Error('Comparison requires exactly two methods with the same preset');
+  if (JSON.stringify(config.methods[0].options) !== JSON.stringify(config.methods[1].options) ||
+      config.methods.some(method => method.expectedEncoder !== config.qualityPolicy?.expectedEncoder ||
+        method.expectedCodec !== config.qualityPolicy?.expectedCodec || method.expectedTag !== config.qualityPolicy?.expectedTag))
+    throw new Error('Comparison methods must pin identical render options and the quality-policy encoder/container');
+  if (config.exactAudioRequired && !config.decodedHashChecks) throw new Error('Exact output checks require decodedHashChecks');
 }
 verify();
-const { render } = await import(pathToFileURL(config.renderer).href);
+const rendererPath = methodId => config.methods.find(m => m.id === methodId)?.renderer ?? config.renderer;
 if (args.includes('--check')) {
   execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' });
   execFileSync('ffprobe', ['-version'], { stdio: 'ignore' });
@@ -54,6 +65,7 @@ if (args.includes('--check')) {
   const c = config.cases.find(c => c.id === args[index + 1]);
   const m = config.methods.find(m => m.id === args[index + 2]);
   if (!c || !m) throw new Error('Unknown trial');
+  const { render } = await import(pathToFileURL(rendererPath(m.id)).href);
   const name = `${c.id}-${m.id}`, output = join(root, `${name}.mp4`), resultFile = join(root, `${name}.json`);
   if (existsSync(output) || existsSync(resultFile)) throw new Error('Refusing to overwrite trial');
   const record = { status: 'RUNNING', case: c.id, method: m.id, options: m.options, startedAt: new Date().toISOString(), output };
@@ -66,13 +78,17 @@ if (args.includes('--check')) {
         appendFileSync(join(root, `${name}-encoding.jsonl`), JSON.stringify(encoderArgs) + '\n');
         const index = encoderArgs.findIndex(arg => arg === '-c:v' || arg === '-vcodec' || arg === '-codec:v');
         if (index >= 0) record.encoder = encoderArgs[index + 1];
+        record.encoderArgsSha256 = createHash('sha256').update(JSON.stringify(encoderArgs)).digest('hex');
         if (m.expectedEncoder && record.encoder !== m.expectedEncoder) throw new Error(`Unexpected encoder: ${record.encoder}`);
       },
       onProgress: progress => { const bucket = Math.floor(progress * 50); if (bucket !== progressBucket) { progressBucket = bucket; appendFileSync(join(root, `${name}-progress.jsonl`), JSON.stringify({ elapsedMs: performance.now() - start, progress }) + '\n'); } },
     });
     record.renderMs = performance.now() - start;
+    record.stages = [{ name: 'render', elapsedMs: record.renderMs }];
     record.bytes = statSync(output).size;
+    const metadataStart = performance.now();
     record.metadata = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration:stream=codec_type,codec_name,codec_tag_string,width,height,nb_frames,r_frame_rate,sample_rate,channels,color_space,color_range', '-of', 'json', output], { encoding: 'utf8', timeout: 10000 }));
+    record.stages.push({ name: 'probe', elapsedMs: performance.now() - metadataStart });
     const video = record.metadata.streams.find(s => s.codec_type === 'video');
     if (!video || Number(video.nb_frames) !== c.frames || video.width !== c.width || video.height !== c.height || Number(video.r_frame_rate.split('/')[0]) / Number(video.r_frame_rate.split('/')[1]) !== c.fps) throw new Error('Output dimensions/frame count/fps mismatch');
     if (m.expectedCodec && video.codec_name !== m.expectedCodec) throw new Error(`Unexpected output codec: ${video.codec_name}`);
@@ -80,7 +96,9 @@ if (args.includes('--check')) {
     if (c.audio && !record.metadata.streams.some(s => s.codec_type === 'audio')) throw new Error('Missing audio');
     if (m.options.pipeline && record.renderResult.pipelineUsed !== m.options.pipeline) throw new Error('Unexpected render route');
     const fd = openSync(join(root, `${name}-decode.log`), 'wx');
+    const decodeStart = performance.now();
     try { execFileSync('ffmpeg', ['-nostdin', '-v', 'error', '-threads', '2', '-i', output, '-threads', '2', '-f', 'null', '-'], { stdio: ['ignore', fd, fd], timeout: 30000 }); } finally { closeSync(fd); }
+    record.stages.push({ name: 'full-decode', elapsedMs: performance.now() - decodeStart });
     record.fullDecode = true;
     record.status = 'DONE';
   } catch (error) { record.status = 'FAILED'; record.error = error.stack ?? String(error); process.exitCode = 1; }

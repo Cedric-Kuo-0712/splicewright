@@ -1,10 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, fork } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { bundle } from "@remotion/bundler";
 import { makeCancelSignal, renderMedia, renderStill, selectComposition } from "@remotion/renderer";
 import { fingerprint, load, loadCtx, readAssets, sizesOf } from "@splicewright/core/node";
 import { captionWords, durationFrames, fontAssetFamily, itemSpan, parseCube, themeOf, type Project } from "@splicewright/core";
@@ -13,7 +12,6 @@ import type { Preset } from "./config.ts";
 import { resolveExportPreset, withExportContainerTag } from "./export-preset.ts";
 import type { GradeLut } from "./grade-effect.ts";
 import { duckRanges } from "./duck.ts";
-import { projectAliases } from "./aliases.ts";
 import { planLayeredExport } from "./layered.ts";
 import { estimateGraphicsStagingBytes, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, setExportMemoryPhase, validateLayeredMedia, type LayeredRenderArgs, type RenderResources } from "./layered-render.ts";
 
@@ -91,27 +89,24 @@ const bundles = new Map<string, Promise<string>>();
 /** Bundles the composition plus the project's splicewright.config.ts; the project dir is symlinked as public/. */
 export function bundleProject(dir: string): Promise<string> {
   if (!bundles.has(dir)) {
-    const config = join(dir, "splicewright.config.ts");
-    const entry = join(dir, ".splicewright", "entry.tsx");
-    mkdirSync(dirname(entry), { recursive: true });
-    writeFileSync(
-      entry,
-      [
-        `import { registerRoot } from "remotion";`,
-        `import { makeRoot } from ${JSON.stringify(join(here, "Root.tsx"))};`,
-        existsSync(config) ? `import config from ${JSON.stringify(config)};` : `const config = {};`,
-        `registerRoot(makeRoot(config));`,
-      ].join("\n"),
-    );
-    const promise = bundle({
-      entryPoint: entry,
-      rootDir: root,
-      publicDir: dir,
-      symlinkPublicDir: true, // never copy raw footage into the bundle
-      webpackOverride: (c) => ({
-        ...c,
-        resolve: { ...c.resolve, alias: projectAliases(here, c.resolve?.alias as Record<string, unknown> | undefined) },
-      }),
+    const promise = new Promise<string>((resolveUrl, reject) => {
+      const child = fork(join(here, "bundle-child.ts"), [], { silent: true });
+      let stderr = "";
+      let settled = false;
+      const kill = () => child.kill("SIGKILL"); // no orphan if the parent exits mid-bundle
+      const done = (err?: Error, url?: string) => {
+        if (settled) return;
+        settled = true;
+        process.off("exit", kill);
+        if (err) { child.kill(); reject(err); } else resolveUrl(url!);
+      };
+      process.on("exit", kill);
+      child.stderr!.on("data", (d) => { stderr = (stderr + d).slice(-2000); });
+      child.on("message", (m: { serveUrl?: string; error?: string }) =>
+        m.serveUrl ? done(undefined, m.serveUrl) : done(new Error(`bundling ${dir} failed: ${m.error}`)));
+      child.on("error", (e) => done(e));
+      child.on("exit", (code, sig) => done(new Error(`bundle child exited (${sig ?? code}) without a result: ${stderr.trim()}`)));
+      child.send({ dir, root });
     });
     promise.catch(() => bundles.delete(dir));
     bundles.set(dir, promise);

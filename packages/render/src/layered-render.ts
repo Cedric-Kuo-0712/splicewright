@@ -1,6 +1,6 @@
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, renameSync, rmSync } from "node:fs";
 import type { Writable } from "node:stream";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -9,6 +9,7 @@ import type { Project } from "@splicewright/core";
 import { fingerprint, type Probe } from "@splicewright/core/node";
 import { audioTransitionFades, planLayeredExport, type LayeredPlan } from "./layered.ts";
 import { withExportContainerTag } from "./export-preset.ts";
+import { pipeGraphicsFrames } from "./graphics-stream.ts";
 
 type RenderPreset = { crf?: number; scale?: number; concurrency?: number; codec?: "h264" | "h265"; videoBitrate?: string; hardwareAcceleration?: "disable" | "if-possible" | "required" };
 type RenderLike = Parameters<typeof renderMedia>[0];
@@ -42,7 +43,7 @@ const time = (frames: number, fps: number) => seconds(frames, fps).toFixed(9);
 const sourceTime = (value: number, fps: number) => (Math.round(value * fps) / fps).toFixed(9);
 /** Historical staging name; the 4 GiB ceiling now bounds live graphics working memory. */
 export const LAYERED_GRAPHICS_STAGING_LIMIT_BYTES = 4 * 1024 * 1024 * 1024;
-export const LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
+export const LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES = 256 * 1024 * 1024;
 export function estimateGraphicsStagingBytes(width: number, height: number, frames: number) {
   if (![width, height, frames].every(Number.isSafeInteger) || width < 1 || height < 1 || frames < 0) return Infinity;
   const scanlineBytes = (width * 4 + 1) * height;
@@ -113,53 +114,51 @@ function addAudioEffects(item: { fadeIn?: number; fadeOut?: number }, offset: nu
   if (transition?.out && transition.outStart !== undefined) add("out", transition.outStart + phaseShift, transition.out);
 }
 
-async function writeWithBackpressure(stream: Writable, chunk: Buffer) {
-  await new Promise<void>((resolvePromise, reject) => {
-    const onError = (error: Error) => { stream.off("drain", onDrain); reject(error); };
-    const onDrain = () => { stream.off("error", onError); resolvePromise(); };
-    stream.once("error", onError);
-    if (stream.write(chunk)) { stream.off("error", onError); resolvePromise(); }
-    else stream.once("drain", onDrain);
-  });
-}
-
-async function runFfmpeg(args: string[], cancelSignal: RenderLike["cancelSignal"], shouldCancel: (() => boolean) | undefined, onProgress: (value: number) => void, durationSeconds: number, produceGraphics?: (input: Writable) => Promise<void>) {
+async function runFfmpeg(args: string[], cancelSignal: RenderLike["cancelSignal"], shouldCancel: (() => boolean) | undefined, onProgress: (value: number) => void, durationSeconds: number, produceGraphics?: (input: Writable, signal: AbortSignal) => Promise<void>) {
   if (shouldCancel?.()) throw new Error("render cancelled");
-  await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-progress", "pipe:2", "-nostats", ...args], { stdio: [produceGraphics ? "pipe" : "ignore", "ignore", "pipe"] });
-    let stderr = "";
-    let progressLine = "";
-    let cancelled = false;
-    cancelSignal?.(() => { cancelled = true; child.kill("SIGTERM"); });
-    child.stderr!.setEncoding("utf8").on("data", (chunk: string) => {
-      progressLine += chunk;
-      const lines = progressLine.split(/\r?\n/);
-      progressLine = lines.pop() ?? "";
-      for (const line of lines) {
-        const match = /^out_time_us=(\d+)/.exec(line);
-        if (match) onProgress(Math.min(1, Number(match[1]) / 1_000_000 / durationSeconds));
-        else if (!line.startsWith("frame=") && !line.startsWith("fps=") && !line.startsWith("speed=") && !line.startsWith("progress=")) stderr = `${stderr}${line}\n`.slice(-2000);
-      }
-    });
-    child.on("error", reject);
-    const input = child.stdin;
-    let producerError: unknown;
-    const producerPromise = produceGraphics
-      ? produceGraphics(input!).then(() => input!.end(), (error) => {
-          producerError = error;
-          input!.destroy(error instanceof Error ? error : new Error(String(error)));
-          child.kill("SIGTERM");
-        })
-      : Promise.resolve();
-    child.on("close", (code) => {
-      void producerPromise.then(() => {
-        if (producerError !== undefined) reject(producerError);
-        else if (cancelled || shouldCancel?.()) reject(new Error("render cancelled"));
-        else if (code === 0) { onProgress(1); resolvePromise(); }
-        else reject(new Error(stderr.trim() || `ffmpeg exited ${code}`));
-      }, reject);
+  const controller = new AbortController();
+  const child = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-progress", "pipe:2", "-nostats", ...args], { stdio: [produceGraphics ? "pipe" : "ignore", "ignore", "pipe"] });
+  let stderr = "", progressLine = "", producerDone = !produceGraphics, closed = false;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const abort = (error: unknown) => {
+    if (!controller.signal.aborted) controller.abort(error);
+    child.stdin?.destroy();
+    if (!closed) {
+      child.kill("SIGTERM");
+      killTimer ??= setTimeout(() => child.kill("SIGKILL"), 2000);
+      killTimer.unref();
+    }
+  };
+  cancelSignal?.(() => abort(new Error("render cancelled")));
+  child.stdin?.on("error", abort);
+  child.stderr!.setEncoding("utf8").on("data", (chunk: string) => {
+    progressLine += chunk;
+    const lines = progressLine.split(/\r?\n/); progressLine = lines.pop() ?? "";
+    for (const line of lines) {
+      const match = /^out_time_us=(\d+)/.exec(line);
+      if (match) {
+        try { onProgress(Math.min(1, Number(match[1]) / 1_000_000 / durationSeconds)); }
+        catch (error) { abort(error); }
+      } else if (!line.startsWith("frame=") && !line.startsWith("fps=") && !line.startsWith("speed=") && !line.startsWith("progress=")) stderr = `${stderr}${line}\n`.slice(-2000);
+    }
+  });
+  const exit = new Promise<void>((resolve, reject) => {
+    child.once("error", error => { abort(error); reject(error); });
+    child.once("close", code => {
+      closed = true; if (killTimer) clearTimeout(killTimer);
+      if (controller.signal.aborted || shouldCancel?.()) reject(controller.signal.reason ?? new Error("render cancelled"));
+      else if (code !== 0 || !producerDone) {
+        const error = new Error(stderr.trim() || `ffmpeg exited ${code}${producerDone ? "" : " before graphics finished"}`);
+        abort(error); reject(error);
+      } else resolve();
     });
   });
+  const producer = produceGraphics ? Promise.resolve().then(async () => {
+    await produceGraphics(child.stdin!, controller.signal);
+    producerDone = true; child.stdin!.end();
+  }).catch(error => { abort(error); throw error; }) : Promise.resolve();
+  try { await Promise.all([exit, producer]); onProgress(1); }
+  catch (error) { abort(error); await Promise.allSettled([exit, producer]); throw error; }
 }
 
 export async function renderLayered(args: LayeredRenderArgs) {
@@ -186,66 +185,44 @@ export async function renderLayered(args: LayeredRenderArgs) {
   const outputHeight = Math.round(project.meta.height * (args.presetOptions.scale ?? 1));
   const frameEstimate = estimateGraphicsStagingBytes(outputWidth, outputHeight, 1);
   const frameConcurrency = args.resources?.concurrency ?? args.presetOptions.concurrency ?? 2;
-  const liveEstimate = frameEstimate * Math.max(1, frameConcurrency);
-  if (plan.windows.length && (!Number.isSafeInteger(liveEstimate) || liveEstimate > LAYERED_GRAPHICS_STAGING_LIMIT_BYTES || frameEstimate * Math.max(1, frameConcurrency) > LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES))
+  if (!Number.isInteger(frameConcurrency) || frameConcurrency < 1 || frameConcurrency > 4)
+    throw new Error("layered graphics concurrency must be an integer from 1 to 4");
+  // Include the reusable blank frame and the current pipe write, not timeline duration.
+  const liveEstimate = frameEstimate * (frameConcurrency + 2);
+  if (plan.windows.length && (!Number.isSafeInteger(liveEstimate) || liveEstimate > LAYERED_GRAPHICS_STAGING_LIMIT_BYTES || liveEstimate > LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES))
     throw new Error(`layered export unsupported: estimated live graphics working set ${liveEstimate} bytes exceeds the bounded ${LAYERED_GRAPHICS_STAGING_LIMIT_BYTES}-byte limit`);
   const outputExt = extname(output) || ".mp4";
   const stagedOutput = join(dirname(output), `.${basename(output, outputExt)}.layered-${randomUUID()}${outputExt}`);
   try {
     mkdirSync(dirname(output), { recursive: true });
-    let renderedFrames = 0;
-    let graphicsMs = 0;
+    let graphicsMs = 0, graphicsProgress = plan.windows.length ? 0 : 1, encodeProgress = 0;
     const frameCount = plan.to - plan.from;
-    const produceGraphics = async (input: Writable) => {
+    const reportProgress = () => args.onProgress?.(0.72 * graphicsProgress + 0.28 * encodeProgress);
+    const produceGraphics = async (input: Writable, signal: AbortSignal) => {
       const overlayStart = performance.now();
       if (shouldCancel()) throw new Error("render cancelled");
-      const frames = Array.from({ length: frameCount }, (_, index) => plan.from + index);
-      let nextFrame = plan.from;
-      let pump = Promise.resolve();
-      let admittedBytes = 0;
-      const pending = new Map<number, { buffer: Buffer; finish: () => void; fail: (error: unknown) => void }>();
-      await renderFrames({
-        ...args.remotion,
-        inputProps: { ...args.remotion.inputProps, graphicsOnly: true },
-        composition: { ...args.remotion.composition, props: { ...args.remotion.composition.props, graphicsOnly: true } },
-        outputDir: null,
-        frames,
-        imageFormat: "png",
-        muted: true,
-        onStart: () => {},
-        concurrency: frameConcurrency,
-        ...(args.resources?.mediaCacheSizeInBytes !== undefined ? { mediaCacheSizeInBytes: args.resources.mediaCacheSizeInBytes } : {}),
-        ...(args.resources?.offthreadVideoCacheSizeInBytes !== undefined ? { offthreadVideoCacheSizeInBytes: args.resources.offthreadVideoCacheSizeInBytes } : {}),
-        scale: args.presetOptions.scale ?? 1,
-        cancelSignal: args.cancelSignal,
-        onFrameUpdate: (count) => { renderedFrames = count; args.onProgress?.(frameCount ? 0.72 * count / frameCount : 0.72); },
-        onFrameBuffer: (buffer, frame) => {
-          if (buffer.byteLength > LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES) throw new Error("layered export unsupported: graphics frame exceeds the bounded queue limit");
-          admittedBytes += buffer.byteLength;
-          if (admittedBytes > LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES) throw new Error("layered export unsupported: in-flight graphics exceed the bounded queue limit");
-          return new Promise<void>((resolvePromise, reject) => {
-            if (pending.has(frame) || frame < nextFrame || frame >= plan.to) { reject(new Error(`layered graphics returned duplicate or out-of-range frame ${frame}`)); return; }
-            pending.set(frame, { buffer, finish: resolvePromise, fail: reject });
-            pump = pump.then(async () => {
-              while (pending.has(nextFrame)) {
-                const entry = pending.get(nextFrame)!;
-                pending.delete(nextFrame);
-                try {
-                  if (shouldCancel()) throw new Error("render cancelled");
-                  await writeWithBackpressure(input, entry.buffer);
-                  admittedBytes -= entry.buffer.byteLength;
-                  nextFrame++;
-                  entry.finish();
-                } catch (error) { admittedBytes -= entry.buffer.byteLength; entry.fail(error); throw error; }
-              }
-            });
-            pump.catch(reject);
-          });
-        },
-      });
-      await pump;
-      if (nextFrame !== plan.to) throw new Error(`layered graphics frame sequence ended at ${nextFrame}; expected ${plan.to}`);
-      graphicsMs = performance.now() - overlayStart;
+      const frames = plan.windows.flatMap(([start, end]) => Array.from({ length: end - start }, (_, index) => start + index));
+      const callbacks = new Set<() => void>();
+      const cancelGraphics = () => { for (const callback of callbacks) callback(); };
+      const graphicsCancelSignal: NonNullable<RenderLike["cancelSignal"]> = callback => { callbacks.add(callback); if (signal.aborted) callback(); };
+      signal.addEventListener("abort", cancelGraphics, { once: true });
+      try {
+        await pipeGraphicsFrames({ input, from: plan.from, to: plan.to, width: outputWidth, height: outputHeight,
+          frames, concurrency: frameConcurrency, limitBytes: LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, signal,
+          render: onFrameBuffer => renderFrames({
+            ...args.remotion,
+            inputProps: { ...args.remotion.inputProps, graphicsOnly: true },
+            composition: { ...args.remotion.composition, props: { ...args.remotion.composition.props, graphicsOnly: true } },
+            outputDir: null, frames, imageFormat: "png", muted: true, onStart: () => {}, concurrency: frameConcurrency,
+            ...(args.resources?.mediaCacheSizeInBytes !== undefined ? { mediaCacheSizeInBytes: args.resources.mediaCacheSizeInBytes } : {}),
+            ...(args.resources?.offthreadVideoCacheSizeInBytes !== undefined ? { offthreadVideoCacheSizeInBytes: args.resources.offthreadVideoCacheSizeInBytes } : {}),
+            scale: args.presetOptions.scale ?? 1, cancelSignal: graphicsCancelSignal,
+            onFrameUpdate: count => { graphicsProgress = Math.max(graphicsProgress, count / frames.length); reportProgress(); },
+            onFrameBuffer: async (buffer, frame) => { if (shouldCancel()) throw new Error("render cancelled"); await onFrameBuffer(buffer, frame); },
+          }),
+        });
+        graphicsProgress = 1; reportProgress(); graphicsMs = performance.now() - overlayStart;
+      } finally { signal.removeEventListener("abort", cancelGraphics); }
     };
 
     const inputs: string[] = [];
@@ -295,7 +272,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
       inputIndex++;
     }
     if (plan.windows.length) {
-      inputs.push("-f", "image2pipe", "-vcodec", "png", "-framerate", String(plan.fps), "-i", "pipe:0");
+      inputs.push("-threads", "2", "-thread_queue_size", "2", "-f", "image2pipe", "-vcodec", "png", "-framerate", String(plan.fps), "-i", "pipe:0");
       const graphicsLabel = `graphic${inputIndex}`;
       filters.push(`[${inputIndex}:v:0]format=rgba,setpts=PTS-STARTPTS[${graphicsLabel}]`);
       const composited = `baseg${inputIndex}`;
@@ -315,7 +292,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
     args.onEncoding?.(tagged);
     const encodeStart = performance.now();
     if (shouldCancel()) throw new Error("render cancelled");
-    await runFfmpeg(tagged, args.cancelSignal, shouldCancel, (p) => args.onProgress?.(0.72 + p * 0.28), seconds(frameCount, plan.fps), plan.windows.length ? produceGraphics : undefined);
+    await runFfmpeg(tagged, args.cancelSignal, shouldCancel, (p) => { encodeProgress = Math.max(encodeProgress, p); reportProgress(); }, seconds(frameCount, plan.fps), plan.windows.length ? produceGraphics : undefined);
     const encodeMs = performance.now() - encodeStart;
     if (shouldCancel()) throw new Error("render cancelled");
     renameSync(stagedOutput, output);

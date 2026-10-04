@@ -71,7 +71,7 @@ function buildConfig({ manifestFile, baselineWorktree, candidateWorktree, outFil
     exactAudioRequired: true,
     guards: { rssMiB: 2048, trialSeconds: 180, swapGrowthMiB: 256 },
     order: 'methods alternate per case; exactly one trial per case/method',
-    limitations: ['Screening result only: one trial each, no universal performance claim.', 'The hardware encoder output is compared by full decoded hashes and diagnostics; encoded file hashes are not a video equivalence test.'],
+    limitations: ['Candidate graphics and encode timers overlap; compare total wall time rather than their sum.', 'Screening result only: one trial each, no universal performance claim.', 'The hardware encoder output is compared by full decoded hashes and diagnostics; encoded file hashes are not a video equivalence test.'],
   };
   writeFileSync(resolve(outFile), `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx' });
   return config;

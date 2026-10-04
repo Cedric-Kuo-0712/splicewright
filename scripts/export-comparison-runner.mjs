@@ -1,3 +1,4 @@
+import { trialProcesses } from "./export-resource-processes.mjs";
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
@@ -109,7 +110,7 @@ if (args.includes('--check')) {
   const swap = () => platform() === 'darwin' ? Number(/used = ([\d.]+)M/.exec(execFileSync('sysctl', ['vm.swapusage'], { encoding: 'utf8', timeout: 2000 }))?.[1] ?? 0) : null;
   const record = { status: 'RUNNING', startedAt: new Date().toISOString(), config,
     provenance: { node: process.version, cpu: cpus()[0]?.model, cores: cpus().length, memoryBytes: totalmem(), platform: platform(), release: release(), runnerSha256: hash(import.meta.filename), ffmpeg: execFileSync('ffmpeg', ['-version'], { encoding: 'utf8' }).split('\n')[0] },
-    initialSwapMiB: swap(), trials: [], limitations: ['One run per case/method, no spread.', 'Case order alternates methods; cache and thermal state are uncontrolled.', 'RSS sums process-group pages and can double-count shared pages.', 'System swap growth is a safety trigger, not attributable memory usage.'],
+    initialSwapMiB: swap(), trials: [], limitations: ['One run per case/method, no spread.', 'Case order alternates methods; cache and thermal state are uncontrolled.', 'RSS sums the trial process tree including detached Chromium and can double-count shared pages; one-second samples can miss brief peaks.', 'System swap growth is a safety trigger, not attributable memory usage.'],
   };
   const persist = () => save(resultFile, record);
   const signal = (pid, sig) => { try { process.kill(-pid, sig); } catch (e) { if (e.code !== 'ESRCH') throw e; } };
@@ -126,12 +127,17 @@ if (args.includes('--check')) {
         const entry = { name, pid: child.pid, startedAt: new Date().toISOString(), peakRssMiB: 0, peakCpuPercent: 0, peakSwapGrowthMiB: 0, peakScratchDiskMiB: 0, samples: 0 };
         record.trials.push(entry); persist(); console.log(JSON.stringify({ event: 'START', name, pid: child.pid }));
         let force;
-        const abort = reason => { if (entry.abortReason) return; entry.abortReason = reason; record.stopReason = reason; persist(); signal(child.pid, 'SIGTERM'); force = setTimeout(() => signal(child.pid, 'SIGKILL'), 3000); };
+        const processGroups = new Set([child.pid]);
+        const stopGroups = sig => { for (const group of processGroups) signal(group, sig); };
+        const abort = reason => { if (entry.abortReason) return; entry.abortReason = reason; record.stopReason = reason; persist(); stopGroups('SIGTERM'); force = setTimeout(() => stopGroups('SIGKILL'), 3000); };
         const ceiling = setTimeout(() => abort('trial timeout'), config.guards.trialSeconds * 1000);
         const sample = setInterval(() => {
           try {
-            const rows = execFileSync('ps', ['-axo', 'pid=,pgid=,rss=,%cpu='], { encoding: 'utf8', timeout: 2000 }).trim().split('\n').map(row => row.trim().split(/\s+/).map(Number)).filter(row => row[1] === child.pid || row[0] === process.pid);
-            const rss = rows.reduce((sum, row) => sum + row[2], 0) / 1024, cpu = rows.reduce((sum, row) => sum + row[3], 0), growth = record.initialSwapMiB === null ? 0 : Math.max(0, swap() - record.initialSwapMiB);
+            const allRows = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,rss=,%cpu='], { encoding: 'utf8', timeout: 2000 }).trim().split('\n').map(row => { const [pid, ppid, pgid, rss, cpu] = row.trim().split(/\s+/).map(Number); return { pid, ppid, pgid, rss, cpu }; });
+            const rows = trialProcesses(allRows, child.pid, process.pid);
+            const supervisorGroup = allRows.find(row => row.pid === process.pid)?.pgid;
+            for (const row of rows) if (row.pid !== process.pid && row.pgid !== supervisorGroup && row.pgid > 0) processGroups.add(row.pgid);
+            const rss = rows.reduce((sum, row) => sum + row.rss, 0) / 1024, cpu = rows.reduce((sum, row) => sum + row.cpu, 0), growth = record.initialSwapMiB === null ? 0 : Math.max(0, swap() - record.initialSwapMiB);
             entry.peakRssMiB = Math.max(entry.peakRssMiB, rss); entry.peakCpuPercent = Math.max(entry.peakCpuPercent, cpu); entry.peakSwapGrowthMiB = Math.max(entry.peakSwapGrowthMiB, growth); entry.samples++;
             entry.peakScratchDiskMiB = Math.max(entry.peakScratchDiskMiB, (scratchBytes(scratch) + Math.max(0, scratchBytes(projectScratch) - initialProjectBytes)) / 1048576);
             if (rss > config.guards.rssMiB) abort('process group RSS ceiling');
@@ -141,7 +147,7 @@ if (args.includes('--check')) {
         }, 1000);
         await new Promise(resolveExit => { child.once('error', error => { entry.error = error.message; entry.exitCode = 1; resolveExit(); }); child.once('exit', (code, sig) => { entry.exitCode = code; entry.signal = sig; resolveExit(); }); });
         clearInterval(sample); clearTimeout(ceiling); clearTimeout(force); closeSync(fd);
-        signal(child.pid, 'SIGTERM'); signal(child.pid, 'SIGKILL');
+        stopGroups('SIGTERM'); stopGroups('SIGKILL');
         entry.completedAt = new Date().toISOString();
         const file = join(root, `${name}.json`); if (existsSync(file)) entry.result = JSON.parse(readFileSync(file));
         persist(); console.log(JSON.stringify({ event: 'END', name, status: entry.result?.status, exitCode: entry.exitCode, peakRssMiB: entry.peakRssMiB, abortReason: entry.abortReason }));

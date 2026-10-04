@@ -248,7 +248,7 @@ export async function render(dir: string, { output, preset = "master", pipeline 
     validateLayeredMedia(dir, project, probes, plan);
     const outputWidth = Math.round(project.meta.width * (exportPreset.scale ?? 1));
     const outputHeight = Math.round(project.meta.height * (exportPreset.scale ?? 1));
-    const liveFrameEstimate = estimateGraphicsStagingBytes(outputWidth, outputHeight, Math.max(1, resources?.concurrency ?? exportPreset.concurrency ?? 2));
+    const liveFrameEstimate = estimateGraphicsStagingBytes(outputWidth, outputHeight, (resources?.concurrency ?? exportPreset.concurrency ?? 2) + 2);
     if (plan.windows.length && liveFrameEstimate > Math.min(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES))
       throw new Error(`layered export unsupported: estimated live graphics queue ${liveFrameEstimate} bytes exceeds ${LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES}-byte limit`);
     if (existsSync(join(dir, "splicewright.config.ts")))

@@ -374,7 +374,8 @@ export const CanvasVideoPath: React.FC<{
 }> = ({ itemName, src, trimBefore, speed, volume, muted, fit, style, keyLook, grade, luts, itemId, sample }) => {
   const [decodeError, setDecodeError] = useState<Error | null>(null);
   const { isPlayer } = useRemotionEnvironment();
-  const requiresEffects = !!grade || !!keyLook || sample;
+  const effects = lookEffects(itemId, grade, keyLook, luts, sample);
+  const requiresEffects = effects.length > 0;
   // Embedded Players may support native AAC playback without WebCodecs audio decoding.
   // Keep canvas effects, but use the same native audio path as ungraded preview clips.
   const separateAudio = isPlayer || speed !== 1;
@@ -395,7 +396,7 @@ export const CanvasVideoPath: React.FC<{
           // when the embedded browser does not support their WebCodecs decoder.
           disallowFallbackToOffthreadVideo={requiresEffects}
           onError={requiresEffects ? canvasVideoErrorHandler(itemName, setDecodeError) : undefined}
-          effects={lookEffects(itemId, grade, keyLook, luts, sample)}
+          effects={effects}
         />
       )}
       {!decodeError && separateAudio && <Audio src={src} trimBefore={trimBefore} playbackRate={speed} volume={volume} muted={muted} />}

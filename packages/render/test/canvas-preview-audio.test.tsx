@@ -77,6 +77,19 @@ it("requires the canvas decoder for pixel sampling even without a grade", () => 
   expect(state.video.mock.calls[0][0].effects).toHaveLength(1);
 });
 
+it.each([undefined, {}, { curves: { all: [[0, 0], [1, 1]] as [number, number][] } }])("allows native fallback when grade %j produces no pixel effects", (grade) => {
+  renderToStaticMarkup(<CanvasVideoPath {...props} grade={grade} />);
+  expect(state.video.mock.calls[0][0]).toMatchObject({
+    effects: [], disallowFallbackToOffthreadVideo: false, onError: undefined,
+  });
+});
+
+it("keeps identity-curve sampling on the effects path", () => {
+  renderToStaticMarkup(<CanvasVideoPath {...props} grade={{ curves: { all: [[0, 0], [1, 1]] } }} sample />);
+  expect(state.video.mock.calls[0][0].effects).toHaveLength(1);
+  expect(state.video.mock.calls[0][0].disallowFallbackToOffthreadVideo).toBe(true);
+});
+
 it("previews canvas effects with native audio and bypasses WebCodecs audio buffering", () => {
   renderToStaticMarkup(<CanvasVideoPath {...props} />);
   expect(state.video).toHaveBeenCalledOnce();

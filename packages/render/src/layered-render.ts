@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync } 
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { renderMedia } from "@remotion/renderer";
+import { renderFrames, renderMedia } from "@remotion/renderer";
 import type { Project } from "@splicewright/core";
 import { fingerprint, type Probe } from "@splicewright/core/node";
 import { audioTransitionFades, planLayeredExport, type LayeredPlan } from "./layered.ts";
@@ -45,10 +45,6 @@ function verifiedMediaProperties(path: string) {
   if (stream.sample_aspect_ratio && !["1:1", "N/A"].includes(stream.sample_aspect_ratio)) throw new Error(`layered export unsupported: non-square pixel aspect ratio ${stream.sample_aspect_ratio}`);
   for (const [name, value] of [["color space", stream.color_space], ["transfer", stream.color_transfer], ["primaries", stream.color_primaries]] as const)
     if (value && !["bt709", "unknown", "reserved"].includes(value)) throw new Error(`layered export unsupported: ${name} ${value}`);
-  return {
-    bt709: [stream.color_space, stream.color_transfer, stream.color_primaries].every((value) => value === "bt709"),
-    range: stream.color_range === "pc" ? "pc" as const : stream.color_range === "tv" ? "tv" as const : undefined,
-  };
 }
 
 function addVideoFade(filters: string[], options: { start: number; duration: number; color?: boolean; alpha?: boolean }, fps: number, direction: "in" | "out") {
@@ -102,9 +98,15 @@ async function runFfmpeg(args: string[], cancelSignal: RenderLike["cancelSignal"
 
 export async function renderLayered(args: LayeredRenderArgs) {
   const { dir, output, preset, range, project, probes } = args;
+  let cancelled = false;
+  args.cancelSignal?.(() => { cancelled = true; });
+  const shouldCancel = () => cancelled || !!args.shouldCancel?.();
+  if (shouldCancel()) throw new Error("render cancelled");
   if (existsSync(join(dir, "splicewright.config.ts"))) {
-    const config = await import("node:fs/promises").then(({ readFile }) => readFile(join(dir, "splicewright.config.ts"), "utf8"));
-    if (/\bcomponents\b/.test(config)) throw new Error("layered export unsupported: project config may override graphics components");
+    // Ceiling: arbitrary TS can re-export or compute a custom registry. Source
+    // regexes cannot establish eligibility; expose resolved registry metadata
+    // before allowing configured projects in this experimental route.
+    throw new Error("layered export unsupported: project configuration requires the Remotion route");
   }
   for (const track of project.tracks) for (const item of track.items) {
     if (track.hidden || !("assetId" in item)) continue;
@@ -125,44 +127,45 @@ export async function renderLayered(args: LayeredRenderArgs) {
     for (const [start, end] of plan.windows) activeFrames += end - start;
     let renderedFrames = 0;
     const overlayStart = performance.now();
-    const overlayPaths: { path: string; start: number; end: number }[] = [];
+    const overlayPaths: { path: string; firstFrame: number; start: number; end: number }[] = [];
     for (const [windowIndex, [start, end]] of plan.windows.entries()) {
-      if (args.shouldCancel?.()) throw new Error("render cancelled");
-      const path = join(work, `graphics-${windowIndex}.webm`);
+      if (shouldCancel()) throw new Error("render cancelled");
+      const path = join(work, `graphics-${windowIndex}`);
       const inputProps = { ...args.remotion.inputProps, graphicsOnly: true };
-      await renderMedia({
+      // PNG keeps browser RGB and alpha intact. VP9 intermediates introduce
+      // another lossy generation and require a special decoder for alpha.
+      const frames = await renderFrames({
         ...args.remotion,
         inputProps,
-        outputLocation: path,
+        composition: { ...args.remotion.composition, props: { ...args.remotion.composition.props, graphicsOnly: true } },
+        outputDir: path,
         frameRange: [start, end - 1],
-        codec: "vp9",
-        crf: 18,
-        pixelFormat: "yuva420p",
         imageFormat: "png",
+        muted: true,
+        onStart: () => {},
         concurrency: args.resources?.concurrency ?? args.presetOptions.concurrency ?? 2,
         ...(args.resources?.mediaCacheSizeInBytes !== undefined ? { mediaCacheSizeInBytes: args.resources.mediaCacheSizeInBytes } : {}),
         ...(args.resources?.offthreadVideoCacheSizeInBytes !== undefined ? { offthreadVideoCacheSizeInBytes: args.resources.offthreadVideoCacheSizeInBytes } : {}),
         scale: args.presetOptions.scale ?? 1,
-        onProgress: ({ progress }) => args.onProgress?.(activeFrames ? 0.72 * (renderedFrames + (end - start) * progress) / activeFrames : 0.72),
+        onFrameUpdate: (count) => args.onProgress?.(activeFrames ? 0.72 * (renderedFrames + count) / activeFrames : 0.72),
         cancelSignal: args.cancelSignal,
       });
       renderedFrames += end - start;
-      overlayPaths.push({ path, start, end });
+      overlayPaths.push({ path: frames.assetsInfo.imageSequenceName, firstFrame: frames.assetsInfo.firstFrameIndex, start, end });
     }
     const graphicsMs = performance.now() - overlayStart;
 
     const inputs: string[] = [];
     const filters: string[] = [];
     const audioLabels: string[] = [];
-    const sourceProperties: ReturnType<typeof verifiedMediaProperties>[] = [];
     let inputIndex = 0;
     for (const segment of plan.video) {
       const path = resolveProjectAsset(dir, project.assets[segment.item.assetId].path);
-      sourceProperties.push(verifiedMediaProperties(path));
-      inputs.push("-threads", "2", "-i", path);
+      verifiedMediaProperties(path);
+      const sourceIn = segment.sourceIn - seconds(segment.lead, plan.fps);
+      inputs.push("-threads", "2", "-ss", sourceTime(sourceIn, plan.fps), "-i", path);
       if (segment.videoAudio) {
         const duration = segment.lead + segment.duration + segment.tail;
-        const sourceIn = segment.sourceIn - seconds(segment.lead, plan.fps);
         const effects = [`volume=${segment.item.volume ?? 1}`];
         const transitionFades = audioTransitionFades(segment);
         addAudioEffects(segment.item, segment.lead, segment.duration, effects, plan.fps, {
@@ -171,50 +174,51 @@ export async function renderLayered(args: LayeredRenderArgs) {
           out: transitionFades.outgoing?.duration,
         });
         const label = `aud${inputIndex}`;
-        filters.push(`[${inputIndex}:a:0]atrim=start=${sourceTime(sourceIn, plan.fps)}:duration=${time(duration, plan.fps)},asetpts=PTS-STARTPTS,aresample=48000,${effects.join(",")},adelay=delays=${Math.round((segment.item.start - segment.lead) * 48000 / plan.fps)}S:all=1[${label}]`);
+        filters.push(`[${inputIndex}:a:0]atrim=duration=${time(duration, plan.fps)},asetpts=PTS-STARTPTS,aresample=48000,${effects.join(",")},adelay=delays=${Math.round((segment.item.start - segment.lead) * 48000 / plan.fps)}S:all=1[${label}]`);
         audioLabels.push(`[${label}]`);
       }
       inputIndex++;
     }
-    const videoChain = makeVideoChain(plan, project, dir, filters, 0);
+    const videoChain = makeVideoChain(plan, filters, 0);
     inputIndex = videoChain.nextInput;
     for (const entry of plan.audio) {
       const track = project.tracks.find((candidate) => candidate.items.some((item) => item.id === entry.item.id));
       if (track?.kind !== "audio" || track.muted) continue;
       const path = resolveProjectAsset(dir, project.assets[entry.item.assetId].path);
-      inputs.push("-threads", "2", "-i", path);
+      inputs.push("-threads", "2", "-ss", sourceTime(entry.item.sourceIn, plan.fps), "-i", path);
       const gain = (entry.item.volume ?? 1) * (track.volume ?? 1);
       const effects = [`volume=${gain}`];
       if (entry.item.fadeIn) effects.push(`afade=t=in:st=0:d=${time(entry.item.fadeIn, plan.fps)}`);
       if (entry.item.fadeOut) effects.push(`afade=t=out:st=${time(entry.duration - entry.item.fadeOut, plan.fps)}:d=${time(entry.item.fadeOut, plan.fps)}`);
       const label = `aud${inputIndex}`;
-      filters.push(`[${inputIndex}:a:0]atrim=start=${sourceTime(entry.item.sourceIn, plan.fps)}:duration=${time(entry.duration, plan.fps)},asetpts=PTS-STARTPTS,aresample=48000,${effects.join(",")},adelay=delays=${Math.round(entry.start * 48000 / plan.fps)}S:all=1[${label}]`);
+      filters.push(`[${inputIndex}:a:0]atrim=duration=${time(entry.duration, plan.fps)},asetpts=PTS-STARTPTS,aresample=48000,${effects.join(",")},adelay=delays=${Math.round(entry.start * 48000 / plan.fps)}S:all=1[${label}]`);
       audioLabels.push(`[${label}]`);
       inputIndex++;
     }
     for (const overlay of overlayPaths) {
-      inputs.push("-threads", "2", "-i", overlay.path);
+      inputs.push("-threads", "2", "-framerate", String(plan.fps), "-start_number", String(overlay.firstFrame), "-i", overlay.path);
       const label = `graphic${inputIndex}`;
       filters.push(`[${inputIndex}:v:0]format=rgba,setpts=PTS+${time(overlay.start, plan.fps)}/TB[${label}]`);
       const next = `baseg${inputIndex}`;
-      filters.push(`[${videoChain.videoLabel}][${label}]overlay=eof_action=pass:shortest=0:enable='between(t,${time(overlay.start, plan.fps)},${time(overlay.end, plan.fps)})'[${next}]`);
+      filters.push(`[${videoChain.videoLabel}][${label}]overlay=format=rgb:eof_action=pass:shortest=0:enable='gte(t,${time(overlay.start, plan.fps)})*lt(t,${time(overlay.end, plan.fps)})'[${next}]`);
       videoChain.videoLabel = next;
       inputIndex++;
     }
-    filters.push(`[${videoChain.videoLabel}]trim=start=${time(plan.from, plan.fps)}:duration=${time(frameCount, plan.fps)},setpts=PTS-STARTPTS,fps=${plan.fps},format=yuv420p[vout]`);
+    // Keep composition in RGB until this single, explicit output conversion.
+    // Merely tagging a default BT.601 conversion as BT.709 changes colors.
+    filters.push(`[${videoChain.videoLabel}]trim=start=${time(plan.from, plan.fps)}:duration=${time(frameCount, plan.fps)},setpts=PTS-STARTPTS,fps=${plan.fps},scale=in_range=pc:out_range=tv:out_color_matrix=bt709,format=yuv420p[vout]`);
     if (audioLabels.length) {
       filters.push(`${audioLabels.join("")}amix=inputs=${audioLabels.length}:duration=longest:normalize=0,atrim=start=${time(plan.from, plan.fps)}:duration=${time(frameCount, plan.fps)},asetpts=PTS-STARTPTS${project.meta.limiter ? ",alimiter=limit=0.891:attack=1:release=120:level=disabled" : ""}[aout]`);
     }
     const encoder = videoEncoder(args.presetOptions);
-    const allBt709 = sourceProperties.length > 0 && sourceProperties.every((info) => info.bt709);
-    const rangeTag = sourceProperties.length && sourceProperties.every((info) => info.range === sourceProperties[0].range) ? sourceProperties[0].range : undefined;
-    const ffmpegArgs = ["-filter_complex_threads", "2", ...inputs, "-filter_complex", filters.join(";"), "-map", "[vout]", ...(audioLabels.length ? ["-map", "[aout]"] : []), "-c:v", encoder.name, "-pix_fmt", "yuv420p", "-threads", "2", ...encoder.options, ...(audioLabels.length ? ["-c:a", "aac", "-b:a", "320k", "-ar", "48000"] : []), ...(/\.(?:mp4|mov)$/i.test(outputExt) ? ["-movflags", "+faststart"] : []), "-t", time(frameCount, plan.fps), ...(allBt709 ? ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"] : []), ...(rangeTag ? ["-color_range", rangeTag] : []), stagedOutput];
+    const ffmpegArgs = ["-filter_complex_threads", "2", ...inputs, "-filter_complex", filters.join(";"), "-map", "[vout]", ...(audioLabels.length ? ["-map", "[aout]"] : []), "-c:v", encoder.name, "-pix_fmt", "yuv420p", "-threads", "2", ...encoder.options, ...(audioLabels.length ? ["-c:a", "aac", "-b:a", "320k", "-ar", "48000"] : []), ...(/\.(?:mp4|mov)$/i.test(outputExt) ? ["-movflags", "+faststart"] : []), "-t", time(frameCount, plan.fps), "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv", stagedOutput];
     const tagged = withExportContainerTag(ffmpegArgs, args.presetOptions.codec ?? "h264", stagedOutput);
     args.onEncoding?.(tagged);
     const encodeStart = performance.now();
-    await runFfmpeg(tagged, args.cancelSignal, args.shouldCancel, (p) => args.onProgress?.(0.72 + p * 0.28), seconds(frameCount, plan.fps));
+    if (shouldCancel()) throw new Error("render cancelled");
+    await runFfmpeg(tagged, args.cancelSignal, shouldCancel, (p) => args.onProgress?.(0.72 + p * 0.28), seconds(frameCount, plan.fps));
     const encodeMs = performance.now() - encodeStart;
-    if (args.shouldCancel?.()) throw new Error("render cancelled");
+    if (shouldCancel()) throw new Error("render cancelled");
     renameSync(stagedOutput, output);
     args.onProgress?.(1);
     return { output, frames: frameCount, preset, pipelineUsed: "layered" as const, fallbackReason: undefined, timingsMs: { graphics: Math.round(graphicsMs), encode: Math.round(encodeMs) } };
@@ -239,23 +243,21 @@ function videoEncoder(preset: RenderPreset) {
   }
   if (required) throw new Error(`layered export unsupported: required hardware encoder ${preferred.join(" or ")} is unavailable`);
   if (preset.crf === undefined) throw new Error(`layered export unsupported: ${codec} preset needs a CRF for software encoding`);
-  return { name: codec === "h264" ? "libx264" : "libx265", options: ["-preset", "medium", "-crf", String(preset.crf)] };
+  return { name: codec === "h264" ? "libx264" : "libx265", options: ["-preset", "medium", "-crf", String(preset.crf), ...(codec === "h265" ? ["-x265-params", "pools=2:frame-threads=2"] : [])] };
 }
 
-function makeVideoChain(plan: LayeredPlan, project: Project, dir: string, filters: string[], firstInput: number) {
+function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput: number) {
   filters.push(`color=c=${safeColor(plan.background)}:s=${plan.width}x${plan.height}:r=${plan.fps}:d=${time(plan.to, plan.fps)},format=rgba[bg]`);
   let videoLabel = "bg";
   let index = firstInput;
   for (const segment of plan.video) {
-    const path = resolveProjectAsset(dir, project.assets[segment.item.assetId].path);
     const item = segment.item;
     const clipStart = item.start - segment.lead;
     const duration = segment.lead + item.duration + segment.tail;
-    const sourceIn = segment.sourceIn - seconds(segment.lead, plan.fps);
     const fit = item.fit === "cover"
       ? [`scale=${plan.width}:${plan.height}:force_original_aspect_ratio=increase`, `crop=${plan.width}:${plan.height}`]
       : [`scale=${plan.width}:${plan.height}:force_original_aspect_ratio=decrease`, "format=rgba", `pad=${plan.width}:${plan.height}:(ow-iw)/2:(oh-ih)/2:color=black@0`];
-    const chain = [`[${index}:v:0]trim=start=${sourceTime(sourceIn, plan.fps)}:duration=${time(duration, plan.fps)}`, "setpts=PTS-STARTPTS", `fps=${plan.fps}`, ...fit, "setsar=1", "format=rgba"];
+    const chain = [`[${index}:v:0]trim=duration=${time(duration, plan.fps)}`, "setpts=PTS-STARTPTS", `fps=${plan.fps}`, ...fit, "setsar=1", "format=rgba"];
     const effects: string[] = [];
     addVideoFade(effects, { start: segment.lead, duration: item.fadeIn ?? 0, alpha: true }, plan.fps, "in");
     addVideoFade(effects, { start: segment.lead + item.duration - (item.fadeOut ?? 0), duration: item.fadeOut ?? 0, alpha: true }, plan.fps, "out");
@@ -266,7 +268,7 @@ function makeVideoChain(plan: LayeredPlan, project: Project, dir: string, filter
     chain.push(...effects, `setpts=PTS+${time(clipStart, plan.fps)}/TB[${label}]`);
     filters.push(chain.join(","));
     const next = `base${index}`;
-    filters.push(`[${videoLabel}][${label}]overlay=eof_action=pass:shortest=0:enable='between(t,${time(Math.max(0, clipStart), plan.fps)},${time(clipStart + duration, plan.fps)})'[${next}]`);
+    filters.push(`[${videoLabel}][${label}]overlay=format=rgb:eof_action=pass:shortest=0:enable='gte(t,${time(Math.max(0, clipStart), plan.fps)})*lt(t,${time(clipStart + duration, plan.fps)})'[${next}]`);
     videoLabel = next;
     index++;
   }

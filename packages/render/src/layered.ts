@@ -54,12 +54,15 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
   const videoTrackIndex = project.tracks.indexOf(videoTrack);
   if (project.tracks.some((track, index) => !track.hidden && index < videoTrackIndex && (track.kind === "overlay" || track.kind === "caption") && track.items.length))
     fail("graphics tracks below the video track cannot be preserved by layered composition");
-  if (Math.round(project.meta.width * scale) % 2 || Math.round(project.meta.height * scale) % 2) fail("output dimensions must be even for 4:2:0 video");
+  if (Math.round(project.meta.width * scale) < 2 || Math.round(project.meta.height * scale) < 2 || Math.round(project.meta.width * scale) % 2 || Math.round(project.meta.height * scale) % 2)
+    fail("output dimensions must be positive and even for 4:2:0 video");
   const ordered = [...videoTrack.items].sort((a, b) => a.start - b.start);
   if (!ordered.length) fail("requires at least one video item");
   const segments: LayeredSegment[] = [];
   for (let index = 0; index < ordered.length; index++) {
     const item = ordered[index];
+    if (index > 0 && ordered[index - 1].start + ordered[index - 1].duration > item.start)
+      fail(`overlapping video items before ${item.id} are unsupported`);
     const asset = project.assets[item.assetId];
     const probe = probes[item.assetId];
     if (!asset || asset.kind !== "video") fail(`item ${item.id} must use a video asset`);

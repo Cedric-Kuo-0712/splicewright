@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { Writable } from "node:stream";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,14 +8,16 @@ import { fingerprint } from "@splicewright/core/node";
 import type { Project } from "@splicewright/core";
 import { estimateGraphicsStagingBytes, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
 
-const state = vi.hoisted(() => ({ fail: false, commands: [] as string[][], graphics: [] as Record<string, any>[], probes: 0 }));
+const state = vi.hoisted(() => ({ fail: false, reverse: false, commands: [] as string[][], graphics: [] as Record<string, any>[], written: [] as string[], probes: 0 }));
 vi.mock("@remotion/renderer", () => ({
   renderFrames: async (options: Record<string, any>) => {
     state.graphics.push(options);
-    mkdirSync(options.outputDir, { recursive: true });
-    writeFileSync(join(options.outputDir, "frame-030.png"), "stub frame");
-    options.onFrameUpdate(1);
-    return { assetsInfo: { imageSequenceName: join(options.outputDir, "frame-%03d.png"), firstFrameIndex: 30 } };
+    expect(options.outputDir).toBeNull();
+    const frames = options.frames as number[];
+    const delivered = state.reverse ? [...frames].reverse() : frames;
+    await Promise.all(delivered.map(frame => options.onFrameBuffer(Buffer.from(`png-${frame}`), frame)));
+    options.onFrameUpdate(frames.length);
+    return {};
   },
 }));
 vi.mock("node:child_process", () => ({
@@ -23,6 +26,7 @@ vi.mock("node:child_process", () => ({
     state.commands.push(args);
     const child = new EventEmitter() as any;
     child.stderr = new EventEmitter(); child.stderr.setEncoding = () => child.stderr;
+    child.stdin = new Writable({ write(chunk, _encoding, callback) { state.written.push(chunk.toString()); callback(); } });
     child.kill = vi.fn();
     queueMicrotask(() => { writeFileSync(args.at(-1)!, "new output"); child.emit("close", state.fail ? 1 : 0); });
     return child;
@@ -32,7 +36,7 @@ vi.mock("node:child_process", () => ({
 let root: string | undefined;
 afterEach(() => {
   if (root) rmSync(root, { recursive: true, force: true });
-  root = undefined; state.fail = false; state.commands.length = 0; state.graphics.length = 0; state.probes = 0;
+  root = undefined; state.fail = false; state.reverse = false; state.commands.length = 0; state.graphics.length = 0; state.written.length = 0; state.probes = 0;
 });
 function setup(): LayeredRenderArgs {
   root = mkdtempSync(join(tmpdir(), "swr-layered-lifecycle-"));
@@ -54,21 +58,27 @@ describe("layered output lifecycle", () => {
   it("composes lossless alpha frames at their actual start number and commits the output", async () => {
     const args = setup(); const result = await renderLayered(args);
     expect(result.pipelineUsed).toBe("layered");
-    expect(state.graphics[0]).toMatchObject({ imageFormat: "png", muted: true, frameRange: [30, 59], inputProps: { graphicsOnly: true } });
+    expect(state.graphics[0]).toMatchObject({ imageFormat: "png", muted: true, frames: Array.from({ length: 90 }, (_, i) => i), inputProps: { graphicsOnly: true } });
     expect(state.graphics[0].composition.props.graphicsOnly).toBe(true);
-    expect(state.commands[0]).toContain("-start_number");
-    expect(state.commands[0][state.commands[0].indexOf("-start_number") + 1]).toBe("30");
+    expect(state.commands[0]).toContain("image2pipe");
+    expect(state.commands[0]).toContain("pipe:0");
     expect(state.commands[0].join(" ")).not.toContain("vp9");
     expect(readFileSync(args.output, "utf8")).toBe("new output");
     expect(readdirSync(root!).filter(name => name.includes("layered-"))).toEqual([]);
-    expect(() => readFileSync(join(state.graphics[0].outputDir, "frame-030.png"))).toThrow();
+    expect(state.graphics[0].outputDir).toBeNull();
+  });
+  it("reorders concurrent PNG callbacks by global frame before writing to the single encoder", async () => {
+    state.reverse = true;
+    const args = setup();
+    await renderLayered(args);
+    expect(state.written).toEqual(Array.from({ length: 90 }, (_, frame) => `png-${frame}`));
   });
   it("preserves existing output and cleans both graphics and staging on encoder failure", async () => {
     state.fail = true; const args = setup();
     await expect(renderLayered(args)).rejects.toThrow(/ffmpeg exited/);
     expect(readFileSync(args.output, "utf8")).toBe("previous output");
     expect(readdirSync(root!).filter(name => name.includes("layered-"))).toEqual([]);
-    expect(() => readFileSync(join(state.graphics[0].outputDir, "frame-030.png"))).toThrow();
+    expect(state.graphics[0].outputDir).toBeNull();
   });
   it("schedules sparse caption windows once without renumbering their FFmpeg inputs", async () => {
     const args = setup();
@@ -77,18 +87,18 @@ describe("layered output lifecycle", () => {
     await renderLayered(args);
     expect(state.graphics).toHaveLength(1);
     expect(state.graphics[0].frameRange).toBeUndefined();
-    expect(state.graphics[0].frames).toEqual([...Array.from({ length: 30 }, (_, i) => 30 + i), 70, 71, 72, 73, 74]);
+    expect(state.graphics[0].frames).toEqual(Array.from({ length: 90 }, (_, i) => i));
     expect(state.graphics[0].concurrency).toBe(3);
     const command = state.commands[0];
-    expect(command.filter((_, i) => command[i - 1] === "-start_number")).toEqual(["30", "70"]);
+    expect(command).toContain("image2pipe");
     expect(command.filter((_, i) => command[i - 1] === "-filter_complex_threads")).toEqual(["4"]);
     // Decoder budgets stay at two; only the final software encoder changes.
-    expect(command.filter((_, i) => command[i - 1] === "-threads")).toEqual(["2", "2", "2", "2"]);
+    expect(command.filter((_, i) => command[i - 1] === "-threads")).toEqual(["2", "2"]);
   });
   it("seeks native video to the requested range and keeps the output timeline range local", async () => {
     const args = setup(); args.range = [30, 50];
     await renderLayered(args);
-    expect(state.graphics[0].frameRange).toEqual([30, 49]);
+    expect(state.graphics[0].frames).toEqual(Array.from({ length: 20 }, (_, i) => 30 + i));
     const command = state.commands[0];
     expect(command[command.indexOf("-ss") + 1]).toBe("3.000000000");
     expect(command.join(" ")).toContain("trim=duration=0.666666667");
@@ -97,12 +107,13 @@ describe("layered output lifecycle", () => {
     expect(command).toContain("-t");
     expect(command[command.indexOf("-t") + 1]).toBe("0.666666667");
   });
-  it("refuses graphics staging beyond the fixed disk estimate before rendering", async () => {
+  it("refuses live graphics working sets beyond the fixed memory estimate before rendering", async () => {
     expect(estimateGraphicsStagingBytes(1280, 720, 30)).toBeLessThan(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES);
-    expect(estimateGraphicsStagingBytes(1920, 1080, 126)).toBeLessThan(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES);
-    expect(estimateGraphicsStagingBytes(4096, 2304, 30)).toBeGreaterThan(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES);
+    expect(estimateGraphicsStagingBytes(1920, 1080, 2)).toBeLessThan(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES);
+    expect(estimateGraphicsStagingBytes(20000, 20000, 3)).toBeGreaterThan(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES);
     const args = setup(); args.project.meta.width = 4096; args.project.meta.height = 2304;
-    await expect(renderLayered(args)).rejects.toThrow(/graphics staging estimate .* exceeds .*byte limit/);
+    args.project.meta.width = 30000; args.project.meta.height = 30000;
+    await expect(renderLayered(args)).rejects.toThrow(/estimated live graphics working set .* exceeds .*byte limit/);
     expect(state.graphics).toHaveLength(0); expect(state.commands).toHaveLength(0);
     expect(readFileSync(args.output, "utf8")).toBe("previous output");
   });
@@ -111,7 +122,7 @@ describe("layered output lifecycle", () => {
     args.presetOptions.codec = "h265";
     await renderLayered(args);
     const command = state.commands[0];
-    expect(command.filter((_, i) => command[i - 1] === "-threads")).toEqual(["2", "2", "4"]);
+    expect(command.filter((_, i) => command[i - 1] === "-threads")).toEqual(["2", "4"]);
     expect(command[command.indexOf("-filter_complex_threads") + 1]).toBe("2");
     expect(command[command.indexOf("-x265-params") + 1]).toBe("pools=4:frame-threads=4");
   });
@@ -138,6 +149,6 @@ describe("layered output lifecycle", () => {
     await expect(renderLayered(args)).rejects.toThrow("render cancelled");
     expect(state.commands).toHaveLength(0);
     expect(readFileSync(args.output, "utf8")).toBe("previous output");
-    expect(() => readFileSync(join(state.graphics[0].outputDir, "frame-030.png"))).toThrow();
+    expect(state.graphics).toHaveLength(0);
   });
 });

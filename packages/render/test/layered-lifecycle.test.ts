@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fingerprint } from "@splicewright/core/node";
 import type { Project } from "@splicewright/core";
-import { renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
+import { estimateGraphicsStagingBytes, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
 
 const state = vi.hoisted(() => ({ fail: false, commands: [] as string[][], graphics: [] as Record<string, any>[] }));
 vi.mock("@remotion/renderer", () => ({
@@ -42,7 +42,7 @@ function setup(): LayeredRenderArgs {
     schemaVersion: 1, revision: 0, meta: { title: "lifecycle", fps: 30, width: 1280, height: 720 },
     assets: { a: { id: "a", kind: "video", path: "raw/source.mp4" } },
     tracks: [{ id: "v", name: "V1", kind: "video", items: [{ id: "clip", assetId: "a", start: 0, duration: 90, sourceIn: 2 }] },
-      { id: "c", name: "Captions", kind: "caption", items: [{ id: "caption", mode: "free", start: 30, duration: 30, text: "字幕" }] }], ids: {},
+      { id: "c", name: "Captions", kind: "overlay", items: [{ id: "caption", component: "CaptionLayer", start: 30, duration: 30, props: { texts: ["字幕"], css: { backdropFilter: "none" } } }] }], ids: {},
   };
   return { dir: root, output, preset: "h264-cpu", project,
     probes: { a: { path: "raw/source.mp4", fingerprint: fingerprint(join(root, "raw/source.mp4"))!, kind: "video", duration: 10, width: 1280, height: 720, fps: 30, audio: false } },
@@ -72,7 +72,7 @@ describe("layered output lifecycle", () => {
   });
   it("schedules sparse caption windows once without renumbering their FFmpeg inputs", async () => {
     const args = setup();
-    args.project.tracks[1].items.push({ id: "later", mode: "free", start: 70, duration: 5, text: "第二段" } as any);
+    args.project.tracks[1].items.push({ id: "later", component: "CaptionLayer", start: 70, duration: 5, props: { texts: ["第二段"], css: { backdropFilter: "none" } } } as any);
     args.resources = { graphicsScheduling: "grouped", concurrency: 3, filterThreads: 4, encoderThreads: 2 };
     await renderLayered(args);
     expect(state.graphics).toHaveLength(1);
@@ -84,6 +84,27 @@ describe("layered output lifecycle", () => {
     expect(command.filter((_, i) => command[i - 1] === "-filter_complex_threads")).toEqual(["4"]);
     // Decoder budgets stay at two; only the final software encoder changes.
     expect(command.filter((_, i) => command[i - 1] === "-threads")).toEqual(["2", "2", "2", "2"]);
+  });
+  it("seeks native video to the requested range and keeps the output timeline range local", async () => {
+    const args = setup(); args.range = [30, 50];
+    await renderLayered(args);
+    expect(state.graphics[0].frameRange).toEqual([30, 49]);
+    const command = state.commands[0];
+    expect(command[command.indexOf("-ss") + 1]).toBe("3.000000000");
+    expect(command.join(" ")).toContain("trim=duration=0.666666667");
+    expect(command.join(" ")).not.toContain("trim=start=1.000000000");
+    expect(command.join(" ")).toContain("setpts=PTS+0.000000000/TB");
+    expect(command).toContain("-t");
+    expect(command[command.indexOf("-t") + 1]).toBe("0.666666667");
+  });
+  it("refuses graphics staging beyond the fixed disk estimate before rendering", async () => {
+    expect(estimateGraphicsStagingBytes(1280, 720, 30)).toBeLessThan(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES);
+    expect(estimateGraphicsStagingBytes(1920, 1080, 126)).toBeLessThan(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES);
+    expect(estimateGraphicsStagingBytes(4096, 2304, 30)).toBeGreaterThan(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES);
+    const args = setup(); args.project.meta.width = 4096; args.project.meta.height = 2304;
+    await expect(renderLayered(args)).rejects.toThrow(/graphics staging estimate .* exceeds .*byte limit/);
+    expect(state.graphics).toHaveLength(0); expect(state.commands).toHaveLength(0);
+    expect(readFileSync(args.output, "utf8")).toBe("previous output");
   });
   it("sets the software encoder budget separately from filter and decoder budgets", async () => {
     const args = setup(); args.resources = { encoderThreads: 4 };

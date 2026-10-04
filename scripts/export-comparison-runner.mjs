@@ -38,6 +38,7 @@ function verify() {
   for (const c of config.cases) {
     if (!/^[a-z0-9-]+$/.test(c.id) || !(c.frames > 0 && c.fps > 0 && c.width > 0 && c.height > 0)) throw new Error('Invalid case');
     if (!existsSync(join(c.project, 'project.json'))) throw new Error(`Missing project: ${c.id}`);
+    if (c.range && (!Array.isArray(c.range) || c.range.length !== 2 || !c.range.every(Number.isInteger) || c.range[0] < 0 || c.range[1] - c.range[0] !== c.frames)) throw new Error(`Invalid range: ${c.id}`);
   }
   for (const m of config.methods) if (!/^[a-z0-9-]+$/.test(m.id)) throw new Error('Invalid method');
 }
@@ -59,15 +60,22 @@ if (args.includes('--check')) {
   let progressBucket = -1;
   try {
     const start = performance.now();
-    record.renderResult = await render(c.project, { ...m.options, output,
-      onEncoding: encoderArgs => appendFileSync(join(root, `${name}-encoding.jsonl`), JSON.stringify(encoderArgs) + '\n'),
+    record.renderResult = await render(c.project, { ...m.options, ...(c.range ? { range: c.range } : {}), output,
+      onEncoding: encoderArgs => {
+        appendFileSync(join(root, `${name}-encoding.jsonl`), JSON.stringify(encoderArgs) + '\n');
+        const index = encoderArgs.findIndex(arg => arg === '-c:v' || arg === '-vcodec' || arg === '-codec:v');
+        if (index >= 0) record.encoder = encoderArgs[index + 1];
+        if (m.expectedEncoder && record.encoder !== m.expectedEncoder) throw new Error(`Unexpected encoder: ${record.encoder}`);
+      },
       onProgress: progress => { const bucket = Math.floor(progress * 50); if (bucket !== progressBucket) { progressBucket = bucket; appendFileSync(join(root, `${name}-progress.jsonl`), JSON.stringify({ elapsedMs: performance.now() - start, progress }) + '\n'); } },
     });
     record.renderMs = performance.now() - start;
     record.bytes = statSync(output).size;
-    record.metadata = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration:stream=codec_type,codec_name,width,height,nb_frames,r_frame_rate,sample_rate,channels,color_space,color_range', '-of', 'json', output], { encoding: 'utf8', timeout: 10000 }));
+    record.metadata = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration:stream=codec_type,codec_name,codec_tag_string,width,height,nb_frames,r_frame_rate,sample_rate,channels,color_space,color_range', '-of', 'json', output], { encoding: 'utf8', timeout: 10000 }));
     const video = record.metadata.streams.find(s => s.codec_type === 'video');
     if (!video || Number(video.nb_frames) !== c.frames || video.width !== c.width || video.height !== c.height || Number(video.r_frame_rate.split('/')[0]) / Number(video.r_frame_rate.split('/')[1]) !== c.fps) throw new Error('Output dimensions/frame count/fps mismatch');
+    if (m.expectedCodec && video.codec_name !== m.expectedCodec) throw new Error(`Unexpected output codec: ${video.codec_name}`);
+    if (m.expectedTag && video.codec_tag_string !== m.expectedTag) throw new Error(`Unexpected codec tag: ${video.codec_tag_string}`);
     if (c.audio && !record.metadata.streams.some(s => s.codec_type === 'audio')) throw new Error('Missing audio');
     if (m.options.pipeline && record.renderResult.pipelineUsed !== m.options.pipeline) throw new Error('Unexpected render route');
     const fd = openSync(join(root, `${name}-decode.log`), 'wx');

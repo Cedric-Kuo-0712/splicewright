@@ -46,11 +46,51 @@ describe("layered export planning", () => {
     expect(audioTransitionFades(plan.video[1]).incoming).toBe(30);
   });
 
+  it("prunes native media to the requested range while retaining transition handles and global phase", () => {
+    const items = [video("v1", 0, { kind: "dissolve", duration: 30 }), video("v2", 90), video("v3", 180)];
+    const music: AudioItem = { id: "music", assetId: "music", start: 90, duration: 60, sourceIn: 2, fadeIn: 20 };
+    const p = project(items, [{ id: "music-track", kind: "audio", items: [music] } as unknown as Track]);
+    p.assets.music = { id: "music", kind: "audio", path: "raw/music.wav" } as Project["assets"][string];
+    const plan = planLayeredExport(p, {
+      ...probes(items), music: { path: "raw/music.wav", fingerprint: "x", kind: "audio", duration: 10, audio: true },
+    }, 96, 100);
+    expect(plan.video.map((segment) => ({ id: segment.item.id, renderStart: segment.renderStart, renderEnd: segment.renderEnd, decodeStart: segment.decodeStart, lead: segment.lead, tail: segment.tail }))).toEqual([
+      { id: "v1", renderStart: 96, renderEnd: 100, decodeStart: 75, lead: 0, tail: 15 },
+      { id: "v2", renderStart: 96, renderEnd: 100, decodeStart: 75, lead: 15, tail: 0 },
+    ]);
+    expect(plan.video.map((segment) => segment.sourceIn - segment.lead / plan.fps + (segment.decodeStart - (segment.start - segment.lead)) / plan.fps)).toEqual([3.5, 0.5]);
+    expect(plan.audio).toEqual([{ item: music, start: 90, duration: 60, renderStart: 96, renderEnd: 100, decodeStart: 90 }]);
+    expect(plan.video.map(audioTransitionFades)).toEqual([
+      { incoming: undefined, outgoing: { start: 75, duration: 30 } },
+      { incoming: 30, outgoing: undefined },
+    ]);
+  });
+
+  it("refuses default caption blur and accepts an overlay CaptionLayer explicitly set to none", () => {
+    const items = [video("v1", 0)];
+    const caption = { id: "c1", mode: "free", start: 10, duration: 20, text: "default" };
+    const withCaption = project(items, [{ id: "captions", kind: "caption", items: [caption] } as unknown as Track]);
+    expect(() => planLayeredExport(withCaption, probes(items))).toThrow("uses CaptionLayer's backdrop blur");
+
+    const overlay = { id: "c2", component: "CaptionLayer", start: 10, duration: 20, props: { texts: ["safe"], css: { backdropFilter: "none" } } };
+    const safe = project(items, [{ id: "overlay", kind: "overlay", items: [overlay] } as unknown as Track]);
+    expect(planLayeredExport(safe, probes(items)).windows).toEqual([[10, 30]]);
+
+    const glass = { id: "glass", component: "Text", start: 10, duration: 20, props: { text: "glass", style: { backdropFilter: "blur(4px)" } } };
+    const withGlass = project(items, [{ id: "graphics", kind: "overlay", items: [glass] } as unknown as Track]);
+    expect(() => planLayeredExport(withGlass, probes(items))).toThrow("backdrop-dependent");
+    overlay.props.css = { backdropFilter: "none", mixBlendMode: "multiply" } as typeof overlay.props.css;
+    expect(() => planLayeredExport(safe, probes(items))).toThrow("backdrop-dependent");
+    overlay.props.css = { backdropFilter: "none" };
+    Object.assign(overlay.props, { words: [[{ text: "safe", on: true }]], hiCss: { backdropFilter: "blur(4px)" } });
+    expect(() => planLayeredExport(safe, probes(items))).toThrow("backdrop-dependent");
+  });
+
   it("merges adjacent caption windows while preserving anchored caption timing", () => {
     const items = [video("v1", 0), video("v2", 90)];
-    const caption = { id: "c1", mode: "free", start: 10, duration: 20, text: "first" };
-    const caption2 = { id: "c2", mode: "anchored", start: 0, duration: 1, itemId: "v2", sourceStart: 1, sourceEnd: 2, text: "second" };
-    const p = project(items, [{ id: "captions", kind: "caption", items: [caption, caption2] } as unknown as Track]);
+    const caption = { id: "c1", component: "CaptionLayer", start: 10, duration: 20, props: { texts: ["first"], css: { backdropFilter: "none" } } };
+    const caption2 = { id: "c2", component: "CaptionLayer", start: 90, duration: 30, props: { texts: ["second"], css: { backdropFilter: "none" } } };
+    const p = project(items, [{ id: "captions", kind: "overlay", items: [caption, caption2] } as unknown as Track]);
     const plan = planLayeredExport(p, probes(items));
     expect(plan.windows).toEqual([[10, 30], [90, 120]]);
   });
@@ -62,7 +102,7 @@ describe("layered export planning", () => {
     const plan = planLayeredExport({ ...p, assets: { ...p.assets, music: { id: "music", kind: "audio", path: "raw/music.wav" } } }, {
       ...probes(items), music: { path: "raw/music.wav", fingerprint: "x", kind: "audio", duration: 10, audio: true },
     });
-    expect(plan.audio).toEqual([{ item: audio, start: 15, duration: 60 }]);
+    expect(plan.audio).toEqual([{ item: audio, start: 15, duration: 60, renderStart: 15, renderEnd: 75, decodeStart: 15 }]);
   });
 
   it("refuses native audio trims that exceed the probed source duration", () => {

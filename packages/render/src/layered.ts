@@ -8,6 +8,11 @@ export interface LayeredSegment {
   sourceIn: number;
   lead: number;
   tail: number;
+  /** Visible portion of the clip's transition-extended span for this export range. */
+  renderStart: number;
+  renderEnd: number;
+  /** Earliest bounded pre-roll needed to preserve an in-progress fade at renderStart. */
+  decodeStart: number;
   incoming?: { kind: "dissolve" | "dip"; before: number; after: number };
   outgoing?: { kind: "dissolve" | "dip"; before: number; after: number };
   videoAudio: boolean;
@@ -21,7 +26,7 @@ export interface LayeredPlan {
   height: number;
   background: string;
   video: LayeredSegment[];
-  audio: { item: AudioItem; start: number; duration: number }[];
+  audio: { item: AudioItem; start: number; duration: number; renderStart: number; renderEnd: number; decodeStart: number }[];
   windows: [number, number][];
 }
 
@@ -38,6 +43,11 @@ export function audioTransitionFades(segment: LayeredSegment) {
 
 const supportedOverlayComponents = new Set(["Text", "Image", "Sticker", "CaptionLayer"]);
 const fail = (reason: string): never => { throw new Error(`layered export unsupported: ${reason}`); };
+const styleHasSafeBackdrop = (style: unknown, captionDefault = false) => {
+  const css = style && typeof style === "object" ? style as Record<string, unknown> : {};
+  const safe = ["backdropFilter", "WebkitBackdropFilter", "webkitBackdropFilter"].every((key) => css[key] === undefined || css[key] === "none");
+  return safe && (css.mixBlendMode === undefined || css.mixBlendMode === "normal") && (!captionDefault || css.backdropFilter === "none");
+};
 const isIdentityTransform = (transform: VideoItem["transform"]) => !transform || Object.entries(transform).every(([key, value]) =>
   (key === "x" || key === "y" || key === "rotation") ? value === 0 : key === "scale" || key === "opacity" ? value === 1 : false,
 );
@@ -83,7 +93,20 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
     if (item.sourceIn - lead / project.meta.fps < -1e-6 || probe.duration !== undefined && item.sourceIn + (item.duration + tail) / project.meta.fps > probe.duration + 1e-6)
       fail(`transition handles for ${item.id} exceed its probed source range`);
     if (item.fadeIn && incoming || item.fadeOut && outgoing) fail(`item ${item.id} combines clip fades with transitions`);
-    segments.push({ item, start: item.start, duration: item.duration, sourceIn: item.sourceIn, lead, tail, incoming, outgoing, videoAudio: !videoTrack.muted && probe.audio === true });
+    const clipStart = item.start - lead;
+    const clipEnd = item.start + item.duration + tail;
+    const renderStart = Math.max(from, clipStart);
+    const renderEnd = Math.min(to, clipEnd);
+    if (renderEnd > renderStart) {
+      const phaseWindows: [number, number][] = [];
+      if (item.fadeIn) phaseWindows.push([item.start, item.start + item.fadeIn]);
+      if (item.fadeOut) phaseWindows.push([item.start + item.duration - item.fadeOut, item.start + item.duration]);
+      if (incoming?.kind === "dissolve") phaseWindows.push([clipStart, clipStart + incoming.before + incoming.after]);
+      if (incoming?.kind === "dip") phaseWindows.push([item.start, item.start + incoming.after]);
+      if (outgoing) phaseWindows.push([item.start + item.duration - outgoing.before, item.start + item.duration + (outgoing.kind === "dissolve" ? outgoing.after : 0)]);
+      const decodeStart = Math.min(renderStart, ...phaseWindows.filter(([start, end]) => start < renderStart && end > renderStart).map(([start]) => start));
+      segments.push({ item, start: item.start, duration: item.duration, sourceIn: item.sourceIn, lead, tail, renderStart, renderEnd, decodeStart, incoming, outgoing, videoAudio: !videoTrack.muted && probe.audio === true });
+    }
   }
 
   const audio: LayeredPlan["audio"] = [];
@@ -96,7 +119,15 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
       if (!probe || probe.kind !== "audio" || probe.audio !== true) fail(`audio item ${item.id} needs a current audio probe`);
       if (probe.duration !== undefined && item.sourceIn + item.duration / project.meta.fps > probe.duration + 1e-6)
         fail(`audio source range for ${item.id} exceeds its probed duration`);
-      audio.push({ item, start: item.start, duration: item.duration });
+      const renderStart = Math.max(from, item.start);
+      const renderEnd = Math.min(to, item.start + item.duration);
+      if (renderEnd > renderStart) {
+        const phaseStarts = [
+          item.fadeIn && item.start < renderStart && item.start + item.fadeIn > renderStart ? item.start : undefined,
+          item.fadeOut && item.start + item.duration - item.fadeOut < renderStart && item.start + item.duration > renderStart ? item.start + item.duration - item.fadeOut : undefined,
+        ].filter((start): start is number => start !== undefined);
+        audio.push({ item, start: item.start, duration: item.duration, renderStart, renderEnd, decodeStart: Math.min(renderStart, ...phaseStarts) });
+      }
     }
   }
 
@@ -104,6 +135,15 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
     if (track.hidden || track.kind !== "caption" && track.kind !== "overlay") continue;
     if (track.kind === "caption" && track.style && track.style !== "CaptionLayer") fail(`caption track ${track.id} uses a custom component`);
     if (track.kind === "overlay" && track.items.some((item) => !supportedOverlayComponents.has(item.component) || item.blend && item.blend !== "normal")) fail(`overlay track ${track.id} uses a custom component or underlying-video blend mode`);
+    if (track.kind === "caption" && track.items.some((item) => "text" in item && !!item.text))
+      fail(`caption track ${track.id} uses CaptionLayer's backdrop blur; use an overlay CaptionLayer with css.backdropFilter set to none`);
+    if (track.kind === "overlay") for (const item of track.items) {
+      const css = item.component === "CaptionLayer" ? item.props.css : undefined;
+      const style = item.props.style;
+      if (!styleHasSafeBackdrop(style) || !styleHasSafeBackdrop(css, item.component === "CaptionLayer") || !styleHasSafeBackdrop(item.props.hiCss) ||
+        Object.keys(item.keyframes ?? {}).some((key) => key === "props.style" || key.startsWith("props.style.") || key === "props.css" || key.startsWith("props.css.")))
+        fail(`overlay ${item.component} on ${track.id} uses a backdrop-dependent or animated style`);
+    }
   }
 
   const intervals: [number, number][] = [];

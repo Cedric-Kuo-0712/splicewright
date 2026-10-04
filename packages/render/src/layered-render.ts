@@ -278,6 +278,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
                 }));
               } finally {
                 setExportMemoryPhase("graphics-batch-cleanup-end", batch);
+                setExportMemoryPhase("graphics-batch-end", batch);
               }
             }
           },

@@ -1,17 +1,32 @@
 import { Writable } from "node:stream";
 import { expect, it } from "vitest";
-import { pipeGraphicsFrames, writePng } from "../src/graphics-stream.ts";
+import { graphicsFrameBatches, pipeGraphicsFrames, writePng } from "../src/graphics-stream.ts";
+
+it("batches global frames with serial windows and grouped windows using bounded arrays", () => {
+  const windows = [[2, 5], [10, 15]] as const;
+  expect([...graphicsFrameBatches(windows, "serial", 4)]).toEqual([[2, 3, 4], [10, 11, 12, 13], [14]]);
+  expect([...graphicsFrameBatches(windows, "grouped", 4)]).toEqual([[2, 3, 4, 10], [11, 12, 13, 14]]);
+});
+
+it("starts a long graphics range without traversing future windows", () => {
+  const windows: [number, number][] = [[0, 216000], [216010, 216020]];
+  Object.defineProperty(windows, 1, { get() { throw new Error("future window traversed eagerly"); } });
+  const batches = graphicsFrameBatches(windows, "grouped");
+  expect(batches.next().value).toEqual(Array.from({ length: 300 }, (_, frame) => frame));
+  expect(batches.next().value).toEqual(Array.from({ length: 300 }, (_, frame) => 300 + frame));
+  batches.return(undefined);
+});
 
 it("bounds outstanding frames while reordering workers and filling sparse gaps for a slow consumer", async () => {
   const written: Buffer[] = [];
   const input = new Writable({ highWaterMark: 1, write(buffer, _encoding, callback) { written.push(buffer); setImmediate(callback); } });
   const frames = [2, 3, 10, 11];
   let acknowledged = 0;
-  await pipeGraphicsFrames({ input, from: 0, to: 20, width: 2, height: 2, frames, concurrency: 2, limitBytes: 32,
+  await pipeGraphicsFrames({ input, from: 0, to: 20, width: 2, height: 2, batches: [frames], concurrency: 2, limitBytes: 32,
     signal: new AbortController().signal,
-    render: async callback => {
-      for (let index = 0; index < frames.length; index += 2) {
-        await Promise.all(frames.slice(index, index + 2).reverse().map(async frame => { await callback(Buffer.from(`frame-${frame}`), frame); acknowledged++; }));
+    render: async (batch, callback) => {
+      for (let index = 0; index < batch.length; index += 2) {
+        await Promise.all(batch.slice(index, index + 2).reverse().map(async frame => { await callback(Buffer.from(`frame-${frame}`), frame); acknowledged++; }));
         expect(acknowledged).toBe(index + 2);
       }
     },
@@ -23,10 +38,23 @@ it("bounds outstanding frames while reordering workers and filling sparse gaps f
 
 it("rejects a producer exceeding the in-flight bound instead of accumulating the timeline", async () => {
   const input = new Writable({ write(_buffer, _encoding, callback) { callback(); } });
-  await expect(pipeGraphicsFrames({ input, from: 0, to: 3, width: 2, height: 2, frames: [0, 1, 2], concurrency: 1, limitBytes: 32,
+  await expect(pipeGraphicsFrames({ input, from: 0, to: 3, width: 2, height: 2, batches: [[0, 1, 2]], concurrency: 1, limitBytes: 32,
     signal: new AbortController().signal,
-    render: async callback => { await Promise.all([callback(Buffer.from("later"), 1), callback(Buffer.from("too-many"), 2)]); },
+    render: async (_batch, callback) => { await Promise.all([callback(Buffer.from("later"), 1), callback(Buffer.from("too-many"), 2)]); },
   })).rejects.toThrow("bounded in-flight queue");
+});
+
+it("releases batch state and keeps global frame order across successive batches", async () => {
+  const written: string[] = [];
+  const input = new Writable({ write(buffer, _encoding, callback) { written.push(buffer.toString()); callback(); } });
+  const batches = [[3, 4], [12, 13]];
+  await pipeGraphicsFrames({ input, from: 0, to: 15, width: 1, height: 1, batches, concurrency: 2, limitBytes: 64,
+    signal: new AbortController().signal,
+    render: async (batch, callback) => { await Promise.all([...batch].reverse().map(frame => callback(Buffer.from(`f${frame}`), frame))); },
+  });
+  expect(written[3]).toBe("f3"); expect(written[4]).toBe("f4");
+  expect(written[12]).toBe("f12"); expect(written[13]).toBe("f13");
+  expect(written).toHaveLength(15);
 });
 
 it("settles blocked writes when the encoder closes or cancellation arrives", async () => {

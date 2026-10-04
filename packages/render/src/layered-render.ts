@@ -4,12 +4,12 @@ import { existsSync, mkdirSync, realpathSync, renameSync, rmSync } from "node:fs
 import type { Writable } from "node:stream";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { renderFrames, renderMedia } from "@remotion/renderer";
+import { openBrowser, renderFrames, renderMedia } from "@remotion/renderer";
 import type { Project } from "@splicewright/core";
 import { fingerprint, type Probe } from "@splicewright/core/node";
 import { audioTransitionFades, planLayeredExport, type LayeredPlan } from "./layered.ts";
 import { withExportContainerTag } from "./export-preset.ts";
-import { pipeGraphicsFrames } from "./graphics-stream.ts";
+import { graphicsFrameBatches, pipeGraphicsFrames } from "./graphics-stream.ts";
 
 type RenderPreset = { crf?: number; scale?: number; concurrency?: number; codec?: "h264" | "h265"; videoBitrate?: string; hardwareAcceleration?: "disable" | "if-possible" | "required" };
 type RenderLike = Parameters<typeof renderMedia>[0];
@@ -41,7 +41,7 @@ export interface LayeredRenderArgs {
 const seconds = (frames: number, fps: number) => Number((frames / fps).toFixed(9));
 const time = (frames: number, fps: number) => seconds(frames, fps).toFixed(9);
 const sourceTime = (value: number, fps: number) => (Math.round(value * fps) / fps).toFixed(9);
-/** Historical staging name; the 4 GiB ceiling now bounds live graphics working memory. */
+/** Historical public name retained for compatibility; streamed frame buffers use the queue limit below. */
 export const LAYERED_GRAPHICS_STAGING_LIMIT_BYTES = 4 * 1024 * 1024 * 1024;
 export const LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES = 256 * 1024 * 1024;
 export function estimateGraphicsStagingBytes(width: number, height: number, frames: number) {
@@ -201,28 +201,60 @@ export async function renderLayered(args: LayeredRenderArgs) {
     const produceGraphics = async (input: Writable, signal: AbortSignal) => {
       const overlayStart = performance.now();
       if (shouldCancel()) throw new Error("render cancelled");
-      const frames = plan.windows.flatMap(([start, end]) => Array.from({ length: end - start }, (_, index) => start + index));
-      const callbacks = new Set<() => void>();
-      const cancelGraphics = () => { for (const callback of callbacks) callback(); };
-      const graphicsCancelSignal: NonNullable<RenderLike["cancelSignal"]> = callback => { callbacks.add(callback); if (signal.aborted) callback(); };
+      const activeFrameCount = plan.windows.reduce((count, [start, end]) => count + end - start, 0);
+      let completedFrames = 0;
+      // Remotion registers several cancellation listeners per call. Retain all
+      // of the current batch's listeners, then release them before the next one.
+      const batchCancelCallbacks = new Set<() => void>();
+      const graphicsCancelSignal: NonNullable<RenderLike["cancelSignal"]> = callback => { batchCancelCallbacks.add(callback); if (signal.aborted) callback(); };
+      const cancelGraphics = () => { for (const callback of batchCancelCallbacks) callback(); };
       signal.addEventListener("abort", cancelGraphics, { once: true });
+      let browser: Awaited<ReturnType<typeof openBrowser>> | undefined;
+      const ownsBrowser = !args.remotion.puppeteerInstance;
       try {
+        browser = args.remotion.puppeteerInstance ?? await openBrowser("chrome", {
+          browserExecutable: args.remotion.browserExecutable,
+          chromiumOptions: args.remotion.chromiumOptions,
+          chromeMode: args.remotion.chromeMode,
+          logLevel: args.remotion.logLevel,
+        });
         await pipeGraphicsFrames({ input, from: plan.from, to: plan.to, width: outputWidth, height: outputHeight,
-          frames, concurrency: frameConcurrency, limitBytes: LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, signal,
-          render: onFrameBuffer => renderFrames({
-            ...args.remotion,
-            inputProps: { ...args.remotion.inputProps, graphicsOnly: true },
-            composition: { ...args.remotion.composition, props: { ...args.remotion.composition.props, graphicsOnly: true } },
-            outputDir: null, frames, imageFormat: "png", muted: true, onStart: () => {}, concurrency: frameConcurrency,
-            ...(args.resources?.mediaCacheSizeInBytes !== undefined ? { mediaCacheSizeInBytes: args.resources.mediaCacheSizeInBytes } : {}),
-            ...(args.resources?.offthreadVideoCacheSizeInBytes !== undefined ? { offthreadVideoCacheSizeInBytes: args.resources.offthreadVideoCacheSizeInBytes } : {}),
-            scale: args.presetOptions.scale ?? 1, cancelSignal: graphicsCancelSignal,
-            onFrameUpdate: count => { graphicsProgress = Math.max(graphicsProgress, count / frames.length); reportProgress(); },
-            onFrameBuffer: async (buffer, frame) => { if (shouldCancel()) throw new Error("render cancelled"); await onFrameBuffer(buffer, frame); },
-          }),
+          batches: graphicsFrameBatches(plan.windows, scheduling), concurrency: frameConcurrency, limitBytes: LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, signal,
+          render: async (frames, onFrameBuffer) => {
+            const pagesBefore = new Set(await browser!.pages());
+            try {
+              await renderFrames({
+                ...args.remotion,
+                inputProps: { ...args.remotion.inputProps, graphicsOnly: true },
+                composition: { ...args.remotion.composition, props: { ...args.remotion.composition.props, graphicsOnly: true } },
+                outputDir: null, frames, imageFormat: "png", muted: true, onStart: () => {}, concurrency: frameConcurrency,
+                ...(args.resources?.mediaCacheSizeInBytes !== undefined ? { mediaCacheSizeInBytes: args.resources.mediaCacheSizeInBytes } : {}),
+                ...(args.resources?.offthreadVideoCacheSizeInBytes !== undefined ? { offthreadVideoCacheSizeInBytes: args.resources.offthreadVideoCacheSizeInBytes } : {}),
+                scale: args.presetOptions.scale ?? 1, puppeteerInstance: browser, cancelSignal: graphicsCancelSignal,
+                onFrameUpdate: count => { graphicsProgress = Math.max(graphicsProgress, (completedFrames + Math.min(count, frames.length)) / activeFrameCount); reportProgress(); },
+                onFrameBuffer: async (buffer, frame) => { if (shouldCancel()) throw new Error("render cancelled"); await onFrameBuffer(buffer, frame); },
+              });
+              completedFrames += frames.length;
+            } finally {
+              // Remotion closes these pages asynchronously for a caller-owned browser.
+              batchCancelCallbacks.clear();
+              if (browser) await Promise.all((await browser.pages()).filter(page => !pagesBefore.has(page)).map(async page => {
+                try { await page.close(); }
+                catch (error) {
+                  // Remotion can win the concurrent close. Ignore that race only
+                  // after verifying that the page is actually gone.
+                  if ((await browser!.pages()).includes(page)) throw error;
+                }
+              }));
+            }
+          },
         });
         graphicsProgress = 1; reportProgress(); graphicsMs = performance.now() - overlayStart;
-      } finally { signal.removeEventListener("abort", cancelGraphics); }
+      } finally {
+        batchCancelCallbacks.clear();
+        signal.removeEventListener("abort", cancelGraphics);
+        if (browser && ownsBrowser) await browser.close({ silent: true });
+      }
     };
 
     const inputs: string[] = [];

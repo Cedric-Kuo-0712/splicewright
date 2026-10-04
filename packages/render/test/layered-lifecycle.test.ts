@@ -8,16 +8,19 @@ import { fingerprint } from "@splicewright/core/node";
 import type { Project } from "@splicewright/core";
 import { estimateGraphicsStagingBytes, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
 
-const state = vi.hoisted(() => ({ fail: false, graphicsFail: false, reverse: false, commands: [] as string[][], graphics: [] as Record<string, any>[], written: [] as string[], probes: 0 }));
+const state = vi.hoisted(() => ({ fail: false, graphicsFail: false, graphicsFailAt: 0, graphicsFailAfterFrame: -1, reverse: false, commands: [] as string[][], graphics: [] as Record<string, any>[], written: [] as string[], probes: 0, browserOpens: 0, browserCloses: 0, onRender: undefined as ((options: Record<string, any>) => Promise<void>) | undefined }));
 vi.mock("@remotion/renderer", () => ({
+  openBrowser: async () => { state.browserOpens++; return { pages: async () => [], close: async () => { state.browserCloses++; } }; },
   renderFrames: async (options: Record<string, any>) => {
     state.graphics.push(options);
     expect(options.outputDir).toBeNull();
     const frames = options.frames as number[];
-    if (state.graphicsFail) throw new Error("graphics producer failed");
+    await state.onRender?.(options);
+    if (state.graphicsFail || state.graphicsFailAt === state.graphics.length) throw new Error("graphics producer failed");
     for (let index = 0; index < frames.length; index += options.concurrency) {
       const batch = frames.slice(index, index + options.concurrency);
       await Promise.all((state.reverse ? batch.reverse() : batch).map(frame => options.onFrameBuffer(Buffer.from(`png-${frame}`), frame)));
+      if (batch.includes(state.graphicsFailAfterFrame)) throw new Error("graphics producer failed after frame delivery");
     }
     options.onFrameUpdate(frames.length);
     return {};
@@ -40,8 +43,9 @@ vi.mock("node:child_process", () => ({
 
 let root: string | undefined;
 afterEach(() => {
+  state.onRender = undefined;
   if (root) rmSync(root, { recursive: true, force: true });
-  root = undefined; state.fail = false; state.graphicsFail = false; state.reverse = false; state.commands.length = 0; state.graphics.length = 0; state.written.length = 0; state.probes = 0;
+  root = undefined; state.fail = false; state.graphicsFail = false; state.graphicsFailAt = 0; state.graphicsFailAfterFrame = -1; state.reverse = false; state.commands.length = 0; state.graphics.length = 0; state.written.length = 0; state.probes = 0; state.browserOpens = 0; state.browserCloses = 0;
 });
 function setup(): LayeredRenderArgs {
   root = mkdtempSync(join(tmpdir(), "swr-layered-lifecycle-"));
@@ -60,6 +64,43 @@ function setup(): LayeredRenderArgs {
   };
 }
 describe("layered output lifecycle", () => {
+  it("notifies every current-batch cancel listener and releases previous listeners", async () => {
+    const args = setup(); const parentCallbacks: (() => void)[] = [];
+    args.remotion.composition.durationInFrames = 700;
+    args.project.tracks[0].items[0].duration = 700; args.probes.a.duration = 30;
+    args.project.tracks[1].items[0].duration = 601; args.range = [0, 700];
+    args.cancelSignal = callback => { parentCallbacks.push(callback); };
+    const cancelled: number[][] = [];
+    state.onRender = async options => {
+      const seen = [0, 0]; cancelled.push(seen);
+      options.cancelSignal(() => { seen[0]++; });
+      options.cancelSignal(() => { seen[1]++; });
+      if (cancelled.length === 2) parentCallbacks.at(-1)?.();
+    };
+    await expect(renderLayered(args)).rejects.toThrow("render cancelled");
+    expect(cancelled).toEqual([[0, 0], [1, 1]]);
+    expect(state.browserCloses).toBe(1);
+    expect(readFileSync(args.output, "utf8")).toBe("previous output");
+  });
+  it("awaits batch page cleanup without closing a caller's existing page or browser", async () => {
+    const args = setup(); const existing = { close: vi.fn() };
+    const pages: any[] = [existing]; const closed: number[] = [];
+    args.remotion.composition.durationInFrames = 700;
+    args.project.tracks[0].items[0].duration = 700; args.probes.a.duration = 30;
+    args.project.tracks[1].items[0].duration = 601; args.range = [0, 700];
+    const browser = { pages: async () => [...pages], close: vi.fn() };
+    args.remotion.puppeteerInstance = browser as any;
+    state.onRender = async () => {
+      expect(pages).toEqual([existing]);
+      const index = closed.length;
+      const page = { close: async () => { await new Promise<void>(resolve => setImmediate(resolve)); pages.splice(pages.indexOf(page), 1); closed.push(index); } };
+      pages.push(page);
+    };
+    await renderLayered(args);
+    expect(closed).toEqual([0, 1, 2]); expect(pages).toEqual([existing]);
+    expect(existing.close).not.toHaveBeenCalled(); expect(browser.close).not.toHaveBeenCalled();
+    expect(state.browserOpens).toBe(0);
+  });
   it("composes lossless alpha frames at their actual start number and commits the output", async () => {
     const args = setup(); const result = await renderLayered(args);
     expect(result.pipelineUsed).toBe("layered");
@@ -91,6 +132,25 @@ describe("layered output lifecycle", () => {
     await expect(renderLayered(args)).rejects.toThrow("graphics producer failed");
     expect(readFileSync(args.output, "utf8")).toBe("previous output");
     expect(readdirSync(root!).filter(name => name.includes("layered-"))).toEqual([]);
+    expect(state.browserCloses).toBe(1);
+  });
+  it("preserves output and closes the shared browser when a batch fails after frame delivery", async () => {
+    const args = setup(); state.graphicsFailAfterFrame = 30;
+    await expect(renderLayered(args)).rejects.toThrow("graphics producer failed after frame delivery");
+    expect(readFileSync(args.output, "utf8")).toBe("previous output");
+    expect(state.browserOpens).toBe(1); expect(state.browserCloses).toBe(1);
+    expect(readdirSync(root!).filter(name => name.includes("layered-"))).toEqual([]);
+  });
+  it("preserves output when a later batch fails after earlier batches drained", async () => {
+    const args = setup();
+    args.remotion.composition.durationInFrames = 700;
+    args.project.tracks[0].items[0].duration = 700; args.probes.a.duration = 30;
+    args.project.tracks[1].items[0].duration = 601; args.range = [0, 700];
+    state.graphicsFailAt = 2;
+    await expect(renderLayered(args)).rejects.toThrow("graphics producer failed");
+    expect(state.graphics.map(call => call.frames.length)).toEqual([300, 300]);
+    expect(readFileSync(args.output, "utf8")).toBe("previous output");
+    expect(state.browserOpens).toBe(1); expect(state.browserCloses).toBe(1);
   });
   it("schedules sparse caption windows once without renumbering their FFmpeg inputs", async () => {
     const args = setup();
@@ -106,6 +166,37 @@ describe("layered output lifecycle", () => {
     expect(command.filter((_, i) => command[i - 1] === "-filter_complex_threads")).toEqual(["4"]);
     // Decoder budgets stay at two; only the final software encoder changes.
     expect(command.filter((_, i) => command[i - 1] === "-threads")).toEqual(["2", "2", "2"]);
+    expect(state.browserOpens).toBe(1); expect(state.browserCloses).toBe(1);
+  });
+  it("renders more than one bounded batch with one shared browser and monotonic progress", async () => {
+    const args = setup();
+    args.remotion.composition.durationInFrames = 700;
+    args.project.tracks[0].items[0].duration = 700;
+    args.probes.a.duration = 30;
+    args.project.tracks[1].items[0].duration = 601;
+    args.range = [0, 700];
+    const progress: number[] = []; args.onProgress = value => progress.push(value);
+    await renderLayered(args);
+    expect(state.graphics.map(call => call.frames.length)).toEqual([300, 300, 1]);
+    expect(state.graphics.flatMap(call => call.frames)).toEqual(Array.from({ length: 601 }, (_, i) => i + 30));
+    expect(new Set(state.graphics.map(call => call.puppeteerInstance)).size).toBe(1);
+    expect(state.browserOpens).toBe(1); expect(state.browserCloses).toBe(1);
+    expect(progress.every((value, index) => index === 0 || value >= progress[index - 1])).toBe(true);
+  });
+  it("keeps serial windows in separate render calls", async () => {
+    const serial = setup();
+    serial.project.tracks[1].items[0].duration = 5;
+    serial.project.tracks[1].items.push({ id: "later", component: "CaptionLayer", start: 70, duration: 5, props: { texts: ["later"], css: { backdropFilter: "none" } } } as any);
+    await renderLayered(serial);
+    expect(state.graphics.map(call => call.frames)).toEqual([[30, 31, 32, 33, 34], [70, 71, 72, 73, 74]]);
+  });
+  it("groups sparse windows into the same bounded batch when requested", async () => {
+    const grouped = setup();
+    grouped.project.tracks[1].items[0].duration = 5;
+    grouped.project.tracks[1].items.push({ id: "later", component: "CaptionLayer", start: 70, duration: 5, props: { texts: ["later"], css: { backdropFilter: "none" } } } as any);
+    grouped.resources = { graphicsScheduling: "grouped" };
+    await renderLayered(grouped);
+    expect(state.graphics.map(call => call.frames)).toEqual([[30, 31, 32, 33, 34, 70, 71, 72, 73, 74]]);
   });
   it("seeks native video to the requested range and keeps the output timeline range local", async () => {
     const args = setup(); args.range = [30, 50];
@@ -161,5 +252,17 @@ describe("layered output lifecycle", () => {
     expect(state.commands).toHaveLength(0);
     expect(readFileSync(args.output, "utf8")).toBe("previous output");
     expect(state.graphics).toHaveLength(0);
+  });
+  it("cancels after a drained graphics batch and preserves the existing output", async () => {
+    const args = setup(); const callbacks: (() => void)[] = [];
+    args.remotion.composition.durationInFrames = 700;
+    args.project.tracks[0].items[0].duration = 700; args.probes.a.duration = 30;
+    args.project.tracks[1].items[0].duration = 601; args.range = [0, 700];
+    args.cancelSignal = callback => { callbacks.push(callback); };
+    args.onProgress = value => { if (value > 0.35) callbacks.at(-1)?.(); };
+    await expect(renderLayered(args)).rejects.toThrow("render cancelled");
+    expect(state.graphics.map(call => call.frames.length)).toEqual([300]);
+    expect(state.browserOpens).toBe(1); expect(state.browserCloses).toBe(1);
+    expect(readFileSync(args.output, "utf8")).toBe("previous output");
   });
 });

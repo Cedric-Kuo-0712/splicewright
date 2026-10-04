@@ -374,6 +374,7 @@ export const CanvasVideoPath: React.FC<{
 }> = ({ itemName, src, trimBefore, speed, volume, muted, fit, style, keyLook, grade, luts, itemId, sample }) => {
   const [decodeError, setDecodeError] = useState<Error | null>(null);
   const { isPlayer } = useRemotionEnvironment();
+  const requiresEffects = !!grade || !!keyLook || sample;
   // Embedded Players may support native AAC playback without WebCodecs audio decoding.
   // Keep canvas effects, but use the same native audio path as ungraded preview clips.
   const separateAudio = isPlayer || speed !== 1;
@@ -390,8 +391,10 @@ export const CanvasVideoPath: React.FC<{
           muted={muted || separateAudio}
           objectFit={fit ?? "contain"}
           style={{ ...style, objectFit: undefined }}
-          disallowFallbackToOffthreadVideo
-          onError={canvasVideoErrorHandler(itemName, setDecodeError)}
+          // A native fallback cannot apply pixel effects. Plain clips may use it
+          // when the embedded browser does not support their WebCodecs decoder.
+          disallowFallbackToOffthreadVideo={requiresEffects}
+          onError={requiresEffects ? canvasVideoErrorHandler(itemName, setDecodeError) : undefined}
           effects={lookEffects(itemId, grade, keyLook, luts, sample)}
         />
       )}
@@ -427,7 +430,7 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
   const processedAudio = raw.audioFx ? audioSourceFor(raw, asset.path, audioFx, reverseAudioFx) : undefined;
   const volume = (v: number) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain;
   // A missing .cube must not take the whole preview down, but a render keeps failing on it (lookEffects throws) rather than writing an ungraded clip.
-  const { isRendering } = useRemotionEnvironment();
+  const { isRendering, isPlayer } = useRemotionEnvironment();
   const lutMissing = !!item.grade?.lut && !luts[item.grade.lut.assetId];
   const media = item.reverse && !reverseProxies?.includes(item.assetId) && !isRendering ? (
     <div style={lookOffStyle}>reverse proxy is missing; prepare it in the inspector ({raw.label ?? raw.id})</div>
@@ -439,10 +442,11 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
     <div data-look-item-id={raw.id} style={{ display: "contents" }}><Img src={staticFile(source)} style={style} effects={lookEffects(raw.id, item.grade, item.key, luts, sampleItemId === raw.id)} /></div>
   ) : asset.kind === "image" ? (
     <Img src={staticFile(source)} style={style} />
-  ) : item.key || item.grade ? (
+  ) : isPlayer || item.key || item.grade ? (
     <CanvasVideoPath key={source} itemName={raw.label ?? raw.id} itemId={raw.id} sample={sampleItemId === raw.id} src={staticFile(source)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted || !!raw.audioFx} fit={item.fit} style={style} keyLook={item.key} grade={item.grade} luts={luts} />
   ) : (
-    // Legacy items stay on OffthreadVideo; only pixel-look items opt into the canvas decoder.
+    // Keep exports on the existing decoder. In the Player, canvas frames follow
+    // the timeline instead of a free-running native video clock seeking backward.
     <OffthreadVideo
       src={staticFile(source)}
       trimBefore={trimBefore}

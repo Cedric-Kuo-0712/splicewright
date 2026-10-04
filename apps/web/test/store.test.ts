@@ -29,6 +29,27 @@ it.each(["proxy", "thumbs", "waveform"])("refreshes published %s while backgroun
   expect(requests.filter((url) => url === "/api/project")).toHaveLength(1);
 });
 
+it("refreshes project state when the event stream reconnects", async () => {
+  let source: { onopen: (() => void) | null };
+  vi.stubGlobal("EventSource", class {
+    onopen = null;
+    onmessage = null;
+    constructor() { source = this; }
+  });
+  const requests: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    requests.push(url);
+    return { status: 200, json: async () => ({ empty: true, recent: [] }) };
+  }));
+  const { listen } = await import("../src/store.ts");
+  listen();
+  source!.onopen!(); // Initial connection; app startup already called refresh().
+  expect(requests).toHaveLength(0);
+  source!.onopen!(); // Reconnection after an API server restart.
+  await vi.waitFor(() => expect(requests).toContain("/api/project"));
+  expect(requests.filter((url) => url === "/api/project")).toHaveLength(1);
+});
+
 /** `/api/project` answers with the queued snapshots; `/api/lut` with `tables` (or 404 when absent). */
 function server(snapshots: ReturnType<typeof payload>[], tables: Record<string, unknown> = { a_lut: lut }) {
   const queue = [...snapshots];

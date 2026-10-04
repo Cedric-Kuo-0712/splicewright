@@ -371,7 +371,15 @@ export async function history(which: "undo" | "redo", steps = 1) {
 
 /** Agents edit project.json too; the server pushes each new revision, and ingest progress for UI imports. */
 export function listen() {
-  new EventSource("/api/events").onmessage = (e) => {
+  const events = new EventSource("/api/events");
+  let connected = false;
+  events.onopen = () => {
+    // The server sends no initial state on SSE connect. Refresh after reconnect so a
+    // restarted/replaced server cannot leave this editor on an obsolete project revision.
+    if (connected) void refresh();
+    connected = true;
+  };
+  events.onmessage = (e) => {
     const m = JSON.parse(e.data);
     if (m.ingest) {
       const { id, step, error } = m.ingest as { id: string; step: string | null; error?: string };

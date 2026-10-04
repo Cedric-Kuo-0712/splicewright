@@ -17,7 +17,7 @@ vi.mock("remotion", async (original) => ({
   Audio: (props: unknown) => { state.audio(props); return null; },
 }));
 
-import { CanvasVideoPath } from "../src/Composition.tsx";
+import { CanvasVideoPath, lookEffects } from "../src/Composition.tsx";
 
 const volume = (frame: number) => frame / 100;
 const props = {
@@ -66,4 +66,13 @@ it("retains the existing native audio path for speed-adjusted exports", () => {
   expect(state.video.mock.calls[0][0].muted).toBe(true);
   expect(state.audio).toHaveBeenCalledOnce();
   expect(state.audio.mock.calls[0][0]).toMatchObject({ playbackRate: 2, trimBefore: 17, volume });
+});
+
+it("skips only exact identity-curve shaders and retains sampling and real grading", () => {
+  const curves = { all: [[0, 0], [1, 1]] as [number, number][] };
+  expect(lookEffects("clip", { curves }, undefined, {}, false)).toHaveLength(0);
+  expect(lookEffects("clip", { curves, highlights: 1 }, undefined, {}, false)).toHaveLength(1);
+  expect(lookEffects("clip", { curves }, undefined, {}, true)).toHaveLength(1);
+  expect(lookEffects("clip", { curves: { all: [[0, 0], [1, 0.9]] } }, undefined, {}, false)).toHaveLength(1);
+  expect(lookEffects("clip", { curves, levels: { inBlack: 0, inWhite: 1, gamma: 1, outBlack: 0.1, outWhite: 1 } }, undefined, {}, false)).toHaveLength(2);
 });

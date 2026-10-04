@@ -336,14 +336,17 @@ const samplingCanvasEffect = createEffect<{}, null>({
 
 export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: VideoItem["key"], luts: Record<string, GradeLut>, sample: boolean): EffectsProp {
   if (grade?.lut && !luts[grade.lut.assetId]) throw new Error(`Look item ${itemId} references unavailable LUT asset ${grade.lut.assetId}`);
+  const curves = grade?.curves ?? {};
+  const hasCurves = Object.values(curves).some((points) => points && !(points.length === 2 && points[0][0] === 0 && points[0][1] === 0 && points[1][0] === 1 && points[1][1] === 1));
   const effects: EffectsProp = [
     ...(grade?.exposure !== undefined ? [exposure({ stops: grade.exposure })] : []),
     ...(grade?.temperature !== undefined || grade?.tint !== undefined ? [whiteBalance({ temperature: grade.temperature, tint: grade.tint })] : []),
     ...(grade?.vibrance !== undefined ? [vibrance({ amount: grade.vibrance })] : []),
     ...(grade?.shadows !== undefined || grade?.highlights !== undefined ? [shadowsHighlights({ shadows: grade.shadows, highlights: grade.highlights })] : []),
     ...(grade?.levels ? [levels({ blackPoint: grade.levels.inBlack, whitePoint: grade.levels.inWhite, gamma: grade.levels.gamma })] : []),
-    // The shader only does curves, a LUT and the output levels; skip it (and its WebGL2 context) for the built-in effects alone.
-    ...(grade && (Object.keys(grade.curves ?? {}).length || grade.lut || (grade.levels && (grade.levels.outBlack > 0 || grade.levels.outWhite < 1))) ? [gradeEffect({ curves: grade.curves ?? {}, lut: grade.lut ? luts[grade.lut.assetId] : undefined, strength: grade.lut?.strength ?? 1, outBlack: grade.levels?.outBlack, outWhite: grade.levels?.outWhite })] : []),
+    // Exact two-point identity curves do not need a shader or another WebGL2 context.
+    // Keep all other curve shapes on the pixel pipeline, along with LUTs and output levels.
+    ...(grade && (hasCurves || grade.lut || (grade.levels && (grade.levels.outBlack > 0 || grade.levels.outWhite < 1))) ? [gradeEffect({ curves, lut: grade.lut ? luts[grade.lut.assetId] : undefined, strength: grade.lut?.strength ?? 1, outBlack: grade.levels?.outBlack, outWhite: grade.levels?.outWhite })] : []),
     ...(!sample && keyLook?.kind === "chroma" ? [colorKey({ keyColor: keyLook.color, similarity: keyLook.similarity, smoothness: keyLook.smoothness, spillSuppression: keyLook.spill })] : []),
     ...(!sample && keyLook?.kind === "luma" ? [lumaKey({ low: keyLook.low, high: keyLook.high, invert: keyLook.invert })] : []),
   ];

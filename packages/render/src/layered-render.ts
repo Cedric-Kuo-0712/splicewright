@@ -12,7 +12,15 @@ import { withExportContainerTag } from "./export-preset.ts";
 
 type RenderPreset = { crf?: number; scale?: number; concurrency?: number; codec?: "h264" | "h265"; videoBitrate?: string; hardwareAcceleration?: "disable" | "if-possible" | "required" };
 type RenderLike = Parameters<typeof renderMedia>[0];
-export interface RenderResources { concurrency?: number; mediaCacheSizeInBytes?: number | null; offthreadVideoCacheSizeInBytes?: number | null }
+export interface RenderResources {
+  concurrency?: number;
+  mediaCacheSizeInBytes?: number | null;
+  offthreadVideoCacheSizeInBytes?: number | null;
+  /** Opt-in layered experiments; defaults preserve the original scheduling. */
+  graphicsScheduling?: "serial" | "grouped";
+  filterThreads?: number;
+  encoderThreads?: number;
+}
 export interface LayeredRenderArgs {
   dir: string;
   output: string;
@@ -102,6 +110,12 @@ async function runFfmpeg(args: string[], cancelSignal: RenderLike["cancelSignal"
 
 export async function renderLayered(args: LayeredRenderArgs) {
   const { dir, output, preset, range, project, probes } = args;
+  const scheduling = args.resources?.graphicsScheduling ?? "serial";
+  if (scheduling !== "serial" && scheduling !== "grouped") throw new Error("invalid layered graphics scheduling");
+  const filterThreads = args.resources?.filterThreads ?? 2;
+  const encoderThreads = args.resources?.encoderThreads ?? 2;
+  for (const count of [filterThreads, encoderThreads])
+    if (!Number.isInteger(count) || count < 1 || count > 4) throw new Error("layered experiment threads must be an integer from 1 to 4");
   let cancelled = false;
   args.cancelSignal?.(() => { cancelled = true; });
   const shouldCancel = () => cancelled || !!args.shouldCancel?.();
@@ -132,7 +146,8 @@ export async function renderLayered(args: LayeredRenderArgs) {
     let renderedFrames = 0;
     const overlayStart = performance.now();
     const overlayPaths: { path: string; firstFrame: number; start: number; end: number }[] = [];
-    for (const [windowIndex, [start, end]] of plan.windows.entries()) {
+    const graphicsGroups = scheduling === "grouped" && plan.windows.length ? [plan.windows] : plan.windows.map(window => [window]);
+    for (const [windowIndex, windows] of graphicsGroups.entries()) {
       if (shouldCancel()) throw new Error("render cancelled");
       const path = join(work, `graphics-${windowIndex}`);
       const inputProps = { ...args.remotion.inputProps, graphicsOnly: true };
@@ -143,7 +158,11 @@ export async function renderLayered(args: LayeredRenderArgs) {
         inputProps,
         composition: { ...args.remotion.composition, props: { ...args.remotion.composition.props, graphicsOnly: true } },
         outputDir: path,
-        frameRange: [start, end - 1],
+        // Multi-range frameRange renumbers images from zero in Remotion.
+        // Explicit frames keeps original timeline numbers across sparse windows.
+        ...(scheduling === "grouped"
+          ? { frames: windows.flatMap(([start, end]) => Array.from({ length: end - start }, (_, i) => start + i)) }
+          : { frameRange: [windows[0][0], windows[0][1] - 1] as [number, number] }),
         imageFormat: "png",
         muted: true,
         onStart: () => {},
@@ -154,8 +173,9 @@ export async function renderLayered(args: LayeredRenderArgs) {
         onFrameUpdate: (count) => args.onProgress?.(activeFrames ? 0.72 * (renderedFrames + count) / activeFrames : 0.72),
         cancelSignal: args.cancelSignal,
       });
-      renderedFrames += end - start;
-      overlayPaths.push({ path: frames.assetsInfo.imageSequenceName, firstFrame: frames.assetsInfo.firstFrameIndex, start, end });
+      renderedFrames += windows.reduce((sum, [start, end]) => sum + end - start, 0);
+      for (const [start, end] of windows)
+        overlayPaths.push({ path: frames.assetsInfo.imageSequenceName, firstFrame: scheduling === "grouped" ? start : frames.assetsInfo.firstFrameIndex, start, end });
     }
     const graphicsMs = performance.now() - overlayStart;
 
@@ -214,8 +234,8 @@ export async function renderLayered(args: LayeredRenderArgs) {
     if (audioLabels.length) {
       filters.push(`${audioLabels.join("")}amix=inputs=${audioLabels.length}:duration=longest:normalize=0,atrim=start=${time(plan.from, plan.fps)}:duration=${time(frameCount, plan.fps)},asetpts=PTS-STARTPTS${project.meta.limiter ? ",alimiter=limit=0.891:attack=1:release=120:level=disabled" : ""}[aout]`);
     }
-    const encoder = videoEncoder(args.presetOptions);
-    const ffmpegArgs = ["-filter_complex_threads", "2", ...inputs, "-filter_complex", filters.join(";"), "-map", "[vout]", ...(audioLabels.length ? ["-map", "[aout]"] : []), "-c:v", encoder.name, "-pix_fmt", "yuv420p", "-threads", "2", ...encoder.options, ...(audioLabels.length ? ["-c:a", "aac", "-b:a", "320k", "-ar", "48000"] : []), ...(/\.(?:mp4|mov)$/i.test(outputExt) ? ["-movflags", "+faststart"] : []), "-t", time(frameCount, plan.fps), "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv", stagedOutput];
+    const encoder = videoEncoder(args.presetOptions, encoderThreads);
+    const ffmpegArgs = ["-filter_complex_threads", String(filterThreads), ...inputs, "-filter_complex", filters.join(";"), "-map", "[vout]", ...(audioLabels.length ? ["-map", "[aout]"] : []), "-c:v", encoder.name, "-pix_fmt", "yuv420p", "-threads", String(encoderThreads), ...encoder.options, ...(audioLabels.length ? ["-c:a", "aac", "-b:a", "320k", "-ar", "48000"] : []), ...(/\.(?:mp4|mov)$/i.test(outputExt) ? ["-movflags", "+faststart"] : []), "-t", time(frameCount, plan.fps), "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv", stagedOutput];
     const tagged = withExportContainerTag(ffmpegArgs, args.presetOptions.codec ?? "h264", stagedOutput);
     args.onEncoding?.(tagged);
     const encodeStart = performance.now();
@@ -232,7 +252,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
   }
 }
 
-function videoEncoder(preset: RenderPreset) {
+function videoEncoder(preset: RenderPreset, threads: number) {
   const codec = preset.codec ?? "h264";
   const required = preset.hardwareAcceleration === "required";
   const optional = preset.hardwareAcceleration === "if-possible";
@@ -247,7 +267,7 @@ function videoEncoder(preset: RenderPreset) {
   }
   if (required) throw new Error(`layered export unsupported: required hardware encoder ${preferred.join(" or ")} is unavailable`);
   if (preset.crf === undefined) throw new Error(`layered export unsupported: ${codec} preset needs a CRF for software encoding`);
-  return { name: codec === "h264" ? "libx264" : "libx265", options: ["-preset", "medium", "-crf", String(preset.crf), ...(codec === "h265" ? ["-x265-params", "pools=2:frame-threads=2"] : [])] };
+  return { name: codec === "h264" ? "libx264" : "libx265", options: ["-preset", "medium", "-crf", String(preset.crf), ...(codec === "h265" ? ["-x265-params", `pools=${threads}:frame-threads=${threads}`] : [])] };
 }
 
 export function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput: number) {

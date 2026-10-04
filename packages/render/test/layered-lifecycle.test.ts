@@ -70,6 +70,36 @@ describe("layered output lifecycle", () => {
     expect(readdirSync(root!).filter(name => name.includes("layered-"))).toEqual([]);
     expect(() => readFileSync(join(state.graphics[0].outputDir, "frame-030.png"))).toThrow();
   });
+  it("schedules sparse caption windows once without renumbering their FFmpeg inputs", async () => {
+    const args = setup();
+    args.project.tracks[1].items.push({ id: "later", mode: "free", start: 70, duration: 5, text: "第二段" } as any);
+    args.resources = { graphicsScheduling: "grouped", concurrency: 3, filterThreads: 4, encoderThreads: 2 };
+    await renderLayered(args);
+    expect(state.graphics).toHaveLength(1);
+    expect(state.graphics[0].frameRange).toBeUndefined();
+    expect(state.graphics[0].frames).toEqual([...Array.from({ length: 30 }, (_, i) => 30 + i), 70, 71, 72, 73, 74]);
+    expect(state.graphics[0].concurrency).toBe(3);
+    const command = state.commands[0];
+    expect(command.filter((_, i) => command[i - 1] === "-start_number")).toEqual(["30", "70"]);
+    expect(command.filter((_, i) => command[i - 1] === "-filter_complex_threads")).toEqual(["4"]);
+    // Decoder budgets stay at two; only the final software encoder changes.
+    expect(command.filter((_, i) => command[i - 1] === "-threads")).toEqual(["2", "2", "2", "2"]);
+  });
+  it("sets the software encoder budget separately from filter and decoder budgets", async () => {
+    const args = setup(); args.resources = { encoderThreads: 4 };
+    args.presetOptions.codec = "h265";
+    await renderLayered(args);
+    const command = state.commands[0];
+    expect(command.filter((_, i) => command[i - 1] === "-threads")).toEqual(["2", "2", "4"]);
+    expect(command[command.indexOf("-filter_complex_threads") + 1]).toBe("2");
+    expect(command[command.indexOf("-x265-params") + 1]).toBe("pools=4:frame-threads=4");
+  });
+  it.each([0, 5, 1.5, NaN])("refuses unsafe thread count %s before rendering or replacing output", async count => {
+    const args = setup(); args.resources = { filterThreads: count };
+    await expect(renderLayered(args)).rejects.toThrow(/integer from 1 to 4/);
+    expect(state.graphics).toHaveLength(0); expect(state.commands).toHaveLength(0);
+    expect(readFileSync(args.output, "utf8")).toBe("previous output");
+  });
   it("honors cancellation between graphics and encoding without replacing the existing output", async () => {
     const args = setup(); const callbacks: (() => void)[] = [];
     args.cancelSignal = callback => { callbacks.push(callback); };

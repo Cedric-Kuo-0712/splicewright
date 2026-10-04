@@ -11,7 +11,7 @@ vi.mock("@splicewright/core/node", () => ({
   fingerprint: () => "fingerprint", load: () => state.project, loadCtx: () => ({}), readAssets: () => state.probes, sizesOf: () => ({}),
 }));
 vi.mock("@splicewright/ingest", () => ({ audioFxPath: vi.fn(), ffmpeg: vi.fn(), grid: vi.fn(), measureFinalMix: vi.fn(), reverseAudioPath: vi.fn(), scratch: vi.fn(), spread: vi.fn() }));
-vi.mock("../src/layered-render.ts", () => ({ renderLayered: state.layered, validateLayeredMedia: vi.fn(), estimateGraphicsStagingBytes: () => 0, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES: 2 * 1024 * 1024 * 1024, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES: 4 * 1024 * 1024 * 1024 }));
+vi.mock("../src/layered-render.ts", () => ({ renderLayered: state.layered, setExportMemoryPhase: vi.fn(), validateLayeredMedia: vi.fn(), estimateGraphicsStagingBytes: () => 0, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES: 2 * 1024 * 1024 * 1024, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES: 4 * 1024 * 1024 * 1024 }));
 
 import { render } from "../src/node.ts";
 

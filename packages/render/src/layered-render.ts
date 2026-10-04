@@ -1,6 +1,6 @@
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import type { Writable } from "node:stream";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -13,6 +13,7 @@ import { graphicsFrameBatches, pipeGraphicsFrames } from "./graphics-stream.ts";
 
 type RenderPreset = { crf?: number; scale?: number; concurrency?: number; codec?: "h264" | "h265"; videoBitrate?: string; hardwareAcceleration?: "disable" | "if-possible" | "required" };
 type RenderLike = Parameters<typeof renderMedia>[0];
+type BrowserPage = Awaited<ReturnType<Awaited<ReturnType<typeof openBrowser>>["pages"]>>[number];
 export interface RenderResources {
   concurrency?: number;
   mediaCacheSizeInBytes?: number | null;
@@ -43,7 +44,13 @@ const time = (frames: number, fps: number) => seconds(frames, fps).toFixed(9);
 const sourceTime = (value: number, fps: number) => (Math.round(value * fps) / fps).toFixed(9);
 export function setExportMemoryPhase(stage: string, batch: number | null = null) {
   const path = process.env.SPLICEWRIGHT_EXPORT_MEMORY_PHASE_FILE;
-  if (path) writeFileSync(path, JSON.stringify({ stage, batch, at: new Date().toISOString() }));
+  if (!path?.endsWith("-phase.json")) return;
+  const eventPath = process.env.SPLICEWRIGHT_EXPORT_MEMORY_EVENTS_FILE;
+  const event = JSON.stringify({ stage, batch, at: new Date().toISOString() });
+  try {
+    writeFileSync(path, event);
+    if (eventPath?.endsWith("-events.jsonl")) appendFileSync(eventPath, `${event}\n`);
+  } catch { /* Optional telemetry must not change render or cleanup outcomes. */ }
 }
 export function filterBufferedFramesArgs(value: number | undefined, supportsOption: boolean) {
   if (value === undefined) return [];
@@ -227,6 +234,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
       signal.addEventListener("abort", cancelGraphics, { once: true });
       let browser: Awaited<ReturnType<typeof openBrowser>> | undefined;
       const ownsBrowser = !args.remotion.puppeteerInstance;
+      let graphicsCompleted = false;
       try {
         browser = args.remotion.puppeteerInstance ?? await openBrowser("chrome", {
           browserExecutable: args.remotion.browserExecutable,
@@ -237,9 +245,11 @@ export async function renderLayered(args: LayeredRenderArgs) {
         await pipeGraphicsFrames({ input, from: plan.from, to: plan.to, width: outputWidth, height: outputHeight,
           batches: graphicsFrameBatches(plan.windows, scheduling), concurrency: frameConcurrency, limitBytes: LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, signal,
           render: async (frames, onFrameBuffer) => {
-            setExportMemoryPhase("graphics-batch", graphicsBatchIndex++);
-            const pagesBefore = new Set(await browser!.pages());
+            const batch = graphicsBatchIndex++;
+            setExportMemoryPhase("graphics-batch-start", batch);
+            let pagesBefore: Set<BrowserPage> | undefined;
             try {
+              pagesBefore = new Set(await browser!.pages());
               await renderFrames({
                 ...args.remotion,
                 inputProps: { ...args.remotion.inputProps, graphicsOnly: true },
@@ -253,24 +263,32 @@ export async function renderLayered(args: LayeredRenderArgs) {
               });
               completedFrames += frames.length;
             } finally {
-              // Remotion closes these pages asynchronously for a caller-owned browser.
-              batchCancelCallbacks.clear();
-              if (browser) await Promise.all((await browser.pages()).filter(page => !pagesBefore.has(page)).map(async page => {
-                try { await page.close(); }
-                catch (error) {
-                  // Remotion can win the concurrent close. Ignore that race only
-                  // after verifying that the page is actually gone.
-                  if ((await browser!.pages()).includes(page)) throw error;
-                }
-              }));
+              setExportMemoryPhase("graphics-batch-cleanup-start", batch);
+              try {
+                // Remotion closes these pages asynchronously for a caller-owned browser.
+                batchCancelCallbacks.clear();
+                const priorPages = pagesBefore;
+                if (browser && priorPages) await Promise.all((await browser.pages()).filter(page => !priorPages.has(page)).map(async page => {
+                  try { await page.close(); }
+                  catch (error) {
+                    // Remotion can win the concurrent close. Ignore that race only
+                    // after verifying that the page is actually gone.
+                    if ((await browser!.pages()).includes(page)) throw error;
+                  }
+                }));
+              } finally {
+                setExportMemoryPhase("graphics-batch-cleanup-end", batch);
+              }
             }
           },
         });
+        graphicsCompleted = true;
         graphicsProgress = 1; reportProgress(); graphicsMs = performance.now() - overlayStart;
       } finally {
         batchCancelCallbacks.clear();
         signal.removeEventListener("abort", cancelGraphics);
         if (browser && ownsBrowser) await browser.close({ silent: true });
+        if (graphicsCompleted) setExportMemoryPhase("native-encode-after-graphics");
       }
     };
 

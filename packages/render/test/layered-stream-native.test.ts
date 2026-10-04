@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
@@ -55,4 +55,36 @@ it.skipIf(!available)("matches staged PNG pixels and PCM through real FFmpeg acr
     expect(audioHash(output)).toBe(audioHash(reference));
     expect(progress.every((value, index) => index === 0 || value >= progress[index - 1])).toBe(true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+it.skipIf(!available)("cleans failed capped encodes and preserves an existing destination", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "swr-filter-cap-failure-"));
+  const oldPath = process.env.PATH, oldCap = process.env.SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES;
+  try {
+    const raw = join(dir, "raw"); mkdirSync(raw);
+    const source = join(raw, "source.mp4"), output = join(dir, "output.mp4");
+    ffmpeg(["-f", "lavfi", "-i", "testsrc2=s=32x32:r=30", "-frames:v", "30", "-c:v", "libx264", "-threads", "1", source]);
+    const fakeBin = join(dir, "bin"); mkdirSync(fakeBin);
+    const fakeFfmpeg = join(fakeBin, "ffmpeg");
+    writeFileSync(fakeFfmpeg, '#!/bin/sh\ncase "$*" in *"-h full"*) echo "-filter_buffered_frames"; exit 0;; esac\necho "Too many frames buffered in filtergraph" >&2\nexit 1\n'); chmodSync(fakeFfmpeg, 0o755);
+    writeFileSync(output, "preserve-this-output");
+    process.env.PATH = `${fakeBin}:${oldPath ?? ""}`;
+    process.env.SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES = "64";
+    const project = createProject({ title: "cap failure", width: 32, height: 32, fps: 30 });
+    project.assets = { a: { id: "a", kind: "video", path: "raw/source.mp4" } };
+    project.tracks = [
+      { id: "v", name: "Video", kind: "video", items: [{ id: "clip", assetId: "a", start: 0, duration: 30, sourceIn: 0 }] },
+      { id: "g", name: "Graphics", kind: "overlay", items: [{ id: "g1", component: "CaptionLayer", start: 0, duration: 30, props: { texts: ["test"], css: { backdropFilter: "none" } } }] },
+    ];
+    await expect(renderLayered({ dir, output, preset: "h264-cpu", project,
+      probes: { a: { kind: "video", path: "raw/source.mp4", fingerprint: fingerprint(source)!, width: 32, height: 32, fps: 30, duration: 1, audio: false } },
+      presetOptions: { codec: "h264", crf: 18 }, remotion: { composition: { durationInFrames: 30 }, inputProps: { project } } as unknown as LayeredRenderArgs["remotion"],
+    })).rejects.toThrow(/Too many frames buffered/);
+    expect(readFileSync(output, "utf8")).toBe("preserve-this-output");
+    expect(readdirSync(dir).some(name => name.includes(".layered-") && name.endsWith(".mp4"))).toBe(false);
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+    if (oldCap === undefined) delete process.env.SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES; else process.env.SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES = oldCap;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

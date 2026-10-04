@@ -38,6 +38,10 @@ function verify() {
   if ((config.exactAudioRequired || config.exactVideoMethods?.length) && !config.decodedHashChecks) throw new Error('Exact output checks require decodedHashChecks');
   if (!(config.guards?.rssMiB > 0 && config.guards.trialSeconds > 0 && config.guards.swapGrowthMiB >= 0 && (config.guards.samplingMs === undefined || config.guards.samplingMs >= 250))) throw new Error('Invalid guards');
   for (const file of config.fingerprints ?? []) if (hash(file.path) !== file.sha256) throw new Error(`Input changed: ${file.path}`);
+  for (const entry of config.provenance?.generatedEntries ?? []) {
+    const accepted = [entry.templateSha256, ...Object.values(entry.emittedSha256ByRenderer ?? {})];
+    if (!existsSync(entry.path) || !accepted.includes(hash(entry.path))) throw new Error(`Generated renderer entry changed: ${entry.path}`);
+  }
   for (const c of config.cases) {
     if (!/^[a-z0-9-]+$/.test(c.id) || !(c.frames > 0 && c.fps > 0 && c.width > 0 && c.height > 0)) throw new Error('Invalid case');
     if (!existsSync(join(c.project, 'project.json'))) throw new Error(`Missing project: ${c.id}`);
@@ -50,10 +54,11 @@ function verify() {
       if (!m.options?.preset || !m.expectedEncoder) throw new Error(`Method ${m.id} must pin preset and expectedEncoder`);
       if (m.options.preset !== config.qualityPolicy.preset) throw new Error(`Method ${m.id} violates shared qualityPolicy.preset`);
     }
-    if (config.methods.length !== 2 || JSON.stringify(config.methods[0].options) !== JSON.stringify(config.methods[1].options) ||
+    if (config.methods.length < 2 || config.methods.some(method => JSON.stringify(method.options) !== JSON.stringify(config.methods[0].options)) ||
         config.methods.some(method => method.expectedEncoder !== config.qualityPolicy.expectedEncoder ||
           method.expectedCodec !== config.qualityPolicy.expectedCodec || method.expectedTag !== config.qualityPolicy.expectedTag))
       throw new Error('Comparison methods must pin identical render options and the quality-policy encoder/container');
+    if (config.qualityOptions && JSON.stringify(config.methods[0].options) !== JSON.stringify(config.qualityOptions)) throw new Error('Render options differ from the declared quality policy');
   }
 }
 verify();
@@ -75,7 +80,12 @@ if (args.includes('--check')) {
   if (existsSync(output) || existsSync(resultFile)) throw new Error('Refusing to overwrite trial');
   const record = { status: 'RUNNING', case: c.id, method: m.id, options: m.options, startedAt: new Date().toISOString(), output };
   const phaseFile = join(root, `${name}-phase.json`);
-  const setPhase = (stage, batch = null) => writeFileSync(phaseFile, JSON.stringify({ stage, batch, at: new Date().toISOString() }));
+  const eventsFile = join(root, `${name}-events.jsonl`);
+  const setPhase = (stage, batch = null) => {
+    const event = JSON.stringify({ stage, batch, at: new Date().toISOString() });
+    try { writeFileSync(phaseFile, event); appendFileSync(eventsFile, `${event}\n`); }
+    catch { /* Optional stage telemetry cannot interrupt rendering. */ }
+  };
   setPhase('render-startup');
   save(resultFile, record);
   let progressBucket = -1;
@@ -133,7 +143,7 @@ if (args.includes('--check')) {
         const scratch = join(root, `${name}-scratch`); mkdirSync(scratch);
         const projectScratch = join(c.project, '.splicewright'), initialProjectBytes = scratchBytes(projectScratch);
         const phaseFile = join(root, `${name}-phase.json`);
-        const child = spawn(process.execPath, [import.meta.filename, '--config', resolve(configFile), '--trial', c.id, m.id], { cwd: config.repo, detached: true, env: { ...process.env, TMPDIR: scratch, TEMP: scratch, TMP: scratch, SPLICEWRIGHT_EXPORT_MEMORY_PHASE_FILE: phaseFile, ...(m.experimentalFilterBufferedFrames === undefined ? {} : { SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES: String(m.experimentalFilterBufferedFrames) }) }, stdio: ['ignore', fd, fd] });
+        const child = spawn(process.execPath, [import.meta.filename, '--config', resolve(configFile), '--trial', c.id, m.id], { cwd: config.repo, detached: true, env: { ...process.env, TMPDIR: scratch, TEMP: scratch, TMP: scratch, SPLICEWRIGHT_EXPORT_MEMORY_PHASE_FILE: phaseFile, SPLICEWRIGHT_EXPORT_MEMORY_EVENTS_FILE: join(root, `${name}-events.jsonl`), ...(m.experimentalFilterBufferedFrames === undefined ? {} : { SPLICEWRIGHT_EXPERIMENTAL_FILTER_BUFFERED_FRAMES: String(m.experimentalFilterBufferedFrames) }) }, stdio: ['ignore', fd, fd] });
         const entry = { name, pid: child.pid, startedAt: new Date().toISOString(), experimentalFilterBufferedFrames: m.experimentalFilterBufferedFrames ?? null, peakRssMiB: 0, peakCpuPercent: 0, peakSwapGrowthMiB: 0, peakScratchDiskMiB: 0, samples: 0 };
         record.trials.push(entry); persist(); console.log(JSON.stringify({ event: 'START', name, pid: child.pid }));
         let force;

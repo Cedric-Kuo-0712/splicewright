@@ -42,6 +42,17 @@ it('preflights pinned method entrypoints, encoder, and shared quality policy wit
   expect(JSON.parse(invoke({}))).toMatchObject({ status: 'PREFLIGHT_PASSED', methods: 2, cases: 1 });
 });
 
+it('requires identical quality options across four no-cap/cap methods', () => {
+  const options = { preset: 'h265-hardware', resources: { concurrency: 2 } };
+  const methods = ['baseline', 'current', 'cap64', 'cap128'].map((id, index) => ({
+    id, options: structuredClone(options), expectedEncoder: 'hevc_videotoolbox', expectedCodec: 'hevc', expectedTag: 'hvc1',
+    ...(index === 2 ? { experimentalFilterBufferedFrames: 64 } : index === 3 ? { experimentalFilterBufferedFrames: 128 } : {}),
+  }));
+  expect(JSON.parse(invoke({ methods, qualityOptions: options }))).toMatchObject({ status: 'PREFLIGHT_PASSED', methods: 4 });
+  methods[3].options.resources.concurrency = 1;
+  expect(() => invoke({ methods, qualityOptions: options })).toThrow(/identical render options/);
+});
+
 it('refuses different quality presets across the pair during preflight', () => {
   expect(() => invoke({ methods: [
     { id: 'baseline', expectedEncoder: 'hevc_videotoolbox', options: { preset: 'h265-hardware' } },

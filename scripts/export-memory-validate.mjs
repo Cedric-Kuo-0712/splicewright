@@ -6,6 +6,8 @@ const resultFile = resolve(process.argv[2] ?? '');
 if (!process.argv[2]) throw new Error('Usage: node scripts/export-memory-validate.mjs <result.json>');
 const result = JSON.parse(readFileSync(resultFile, 'utf8'));
 if (result.status !== 'DONE' || !result.config?.validationBaseline) throw new Error('Requires a completed comparison with validationBaseline');
+if (!Array.isArray(result.config.cases) || result.config.cases.length !== 1 || result.config.cases[0].audio !== true) throw new Error('Decoded equality validation requires exactly one audio-enabled case');
+if (!Array.isArray(result.trials) || result.trials.length !== result.config.methods?.length) throw new Error('Decoded equality validation requires one completed trial per configured method');
 const outputPath = join(dirname(resultFile), 'validation.json');
 if (existsSync(outputPath)) throw new Error(`Refusing to overwrite validation evidence: ${outputPath}`);
 const hash = (file, audio) => {

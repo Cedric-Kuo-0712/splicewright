@@ -336,14 +336,17 @@ const samplingCanvasEffect = createEffect<{}, null>({
 
 export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: VideoItem["key"], luts: Record<string, GradeLut>, sample: boolean): EffectsProp {
   if (grade?.lut && !luts[grade.lut.assetId]) throw new Error(`Look item ${itemId} references unavailable LUT asset ${grade.lut.assetId}`);
+  const curves = grade?.curves ?? {};
+  const hasCurves = Object.values(curves).some((points) => points && !(points.length === 2 && points[0][0] === 0 && points[0][1] === 0 && points[1][0] === 1 && points[1][1] === 1));
   const effects: EffectsProp = [
     ...(grade?.exposure !== undefined ? [exposure({ stops: grade.exposure })] : []),
     ...(grade?.temperature !== undefined || grade?.tint !== undefined ? [whiteBalance({ temperature: grade.temperature, tint: grade.tint })] : []),
     ...(grade?.vibrance !== undefined ? [vibrance({ amount: grade.vibrance })] : []),
     ...(grade?.shadows !== undefined || grade?.highlights !== undefined ? [shadowsHighlights({ shadows: grade.shadows, highlights: grade.highlights })] : []),
     ...(grade?.levels ? [levels({ blackPoint: grade.levels.inBlack, whitePoint: grade.levels.inWhite, gamma: grade.levels.gamma })] : []),
-    // The shader only does curves, a LUT and the output levels; skip it (and its WebGL2 context) for the built-in effects alone.
-    ...(grade && (Object.keys(grade.curves ?? {}).length || grade.lut || (grade.levels && (grade.levels.outBlack > 0 || grade.levels.outWhite < 1))) ? [gradeEffect({ curves: grade.curves ?? {}, lut: grade.lut ? luts[grade.lut.assetId] : undefined, strength: grade.lut?.strength ?? 1, outBlack: grade.levels?.outBlack, outWhite: grade.levels?.outWhite })] : []),
+    // Exact two-point identity curves do not need a shader or another WebGL2 context.
+    // Keep all other curve shapes on the pixel pipeline, along with LUTs and output levels.
+    ...(grade && (hasCurves || grade.lut || (grade.levels && (grade.levels.outBlack > 0 || grade.levels.outWhite < 1))) ? [gradeEffect({ curves, lut: grade.lut ? luts[grade.lut.assetId] : undefined, strength: grade.lut?.strength ?? 1, outBlack: grade.levels?.outBlack, outWhite: grade.levels?.outWhite })] : []),
     ...(!sample && keyLook?.kind === "chroma" ? [colorKey({ keyColor: keyLook.color, similarity: keyLook.similarity, smoothness: keyLook.smoothness, spillSuppression: keyLook.spill })] : []),
     ...(!sample && keyLook?.kind === "luma" ? [lumaKey({ low: keyLook.low, high: keyLook.high, invert: keyLook.invert })] : []),
   ];
@@ -354,7 +357,7 @@ export function lookEffects(itemId: string, grade: VideoItem["grade"], keyLook: 
 
 const lookOffStyle: React.CSSProperties = { position: "absolute", top: 8, right: 8, zIndex: 10, padding: "4px 8px", color: "#fff", background: "#9b1c1c", borderRadius: 4, font: "12px sans-serif" };
 
-const CanvasVideoPath: React.FC<{
+export const CanvasVideoPath: React.FC<{
   itemName: string;
   src: string;
   trimBefore: number;
@@ -370,6 +373,12 @@ const CanvasVideoPath: React.FC<{
   sample: boolean;
 }> = ({ itemName, src, trimBefore, speed, volume, muted, fit, style, keyLook, grade, luts, itemId, sample }) => {
   const [decodeError, setDecodeError] = useState<Error | null>(null);
+  const { isPlayer } = useRemotionEnvironment();
+  const effects = lookEffects(itemId, grade, keyLook, luts, sample);
+  const requiresEffects = effects.length > 0;
+  // Embedded Players may support native AAC playback without WebCodecs audio decoding.
+  // Keep canvas effects, but use the same native audio path as ungraded preview clips.
+  const separateAudio = isPlayer || speed !== 1;
   return (
     <div data-look-item-id={itemId} style={{ display: "contents" }}>
       {decodeError ? (
@@ -380,15 +389,17 @@ const CanvasVideoPath: React.FC<{
           trimBefore={trimBefore}
           playbackRate={speed}
           volume={volume}
-          muted={muted || speed !== 1}
+          muted={muted || separateAudio}
           objectFit={fit ?? "contain"}
           style={{ ...style, objectFit: undefined }}
-          disallowFallbackToOffthreadVideo
-          onError={canvasVideoErrorHandler(itemName, setDecodeError)}
-          effects={lookEffects(itemId, grade, keyLook, luts, sample)}
+          // A native fallback cannot apply pixel effects. Plain clips may use it
+          // when the embedded browser does not support their WebCodecs decoder.
+          disallowFallbackToOffthreadVideo={requiresEffects}
+          onError={requiresEffects ? canvasVideoErrorHandler(itemName, setDecodeError) : undefined}
+          effects={effects}
         />
       )}
-      {!decodeError && speed !== 1 && <Audio src={src} trimBefore={trimBefore} playbackRate={speed} volume={volume} muted={muted} />}
+      {!decodeError && separateAudio && <Audio src={src} trimBefore={trimBefore} playbackRate={speed} volume={volume} muted={muted} />}
     </div>
   );
 };
@@ -420,7 +431,7 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
   const processedAudio = raw.audioFx ? audioSourceFor(raw, asset.path, audioFx, reverseAudioFx) : undefined;
   const volume = (v: number) => (valueAt(p, raw, "volume", from + v) ?? raw.volume ?? 1) * look(raw, from + v, inc, out).gain;
   // A missing .cube must not take the whole preview down, but a render keeps failing on it (lookEffects throws) rather than writing an ungraded clip.
-  const { isRendering } = useRemotionEnvironment();
+  const { isRendering, isPlayer } = useRemotionEnvironment();
   const lutMissing = !!item.grade?.lut && !luts[item.grade.lut.assetId];
   const media = item.reverse && !reverseProxies?.includes(item.assetId) && !isRendering ? (
     <div style={lookOffStyle}>reverse proxy is missing; prepare it in the inspector ({raw.label ?? raw.id})</div>
@@ -432,10 +443,11 @@ const Video: React.FC<{ p: Project; item: VideoItem; size?: [number, number]; an
     <div data-look-item-id={raw.id} style={{ display: "contents" }}><Img src={staticFile(source)} style={style} effects={lookEffects(raw.id, item.grade, item.key, luts, sampleItemId === raw.id)} /></div>
   ) : asset.kind === "image" ? (
     <Img src={staticFile(source)} style={style} />
-  ) : item.key || item.grade ? (
+  ) : isPlayer || item.key || item.grade ? (
     <CanvasVideoPath key={source} itemName={raw.label ?? raw.id} itemId={raw.id} sample={sampleItemId === raw.id} src={staticFile(source)} trimBefore={trimBefore} speed={speed} volume={volume} muted={muted || !!raw.audioFx} fit={item.fit} style={style} keyLook={item.key} grade={item.grade} luts={luts} />
   ) : (
-    // Legacy items stay on OffthreadVideo; only pixel-look items opt into the canvas decoder.
+    // Keep exports on the existing decoder. In the Player, canvas frames follow
+    // the timeline instead of a free-running native video clock seeking backward.
     <OffthreadVideo
       src={staticFile(source)}
       trimBefore={trimBefore}

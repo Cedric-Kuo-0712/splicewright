@@ -32,6 +32,10 @@ export interface LayeredRenderArgs {
 const seconds = (frames: number, fps: number) => Number((frames / fps).toFixed(9));
 const time = (frames: number, fps: number) => seconds(frames, fps).toFixed(9);
 const sourceTime = (value: number, fps: number) => (Math.round(value * fps) / fps).toFixed(9);
+// Honor source packet timestamps before establishing a continuous mix clock.
+// Resetting PTS first compresses gaps/overlaps (observed in DJI AAC sources).
+export const audioClipFilters = (frames: number, fps: number) =>
+  `aresample=48000:async=1:min_hard_comp=0.000020833:first_pts=0,apad,atrim=end_sample=${Math.round(frames * 48000 / fps)},asetpts=N/SR/TB`;
 const safeColor = (color: string) => {
   if (color === "transparent") return "black";
   if (/^#[\da-f]{3}$/i.test(color)) return `0x${[...color.slice(1)].map((value) => value + value).join("")}`;
@@ -174,7 +178,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
           out: transitionFades.outgoing?.duration,
         });
         const label = `aud${inputIndex}`;
-        filters.push(`[${inputIndex}:a:0]atrim=duration=${time(duration, plan.fps)},asetpts=PTS-STARTPTS,aresample=48000,${effects.join(",")},adelay=delays=${Math.round((segment.item.start - segment.lead) * 48000 / plan.fps)}S:all=1[${label}]`);
+        filters.push(`[${inputIndex}:a:0]${audioClipFilters(duration, plan.fps)},${effects.join(",")},adelay=delays=${Math.round((segment.item.start - segment.lead) * 48000 / plan.fps)}S:all=1[${label}]`);
         audioLabels.push(`[${label}]`);
       }
       inputIndex++;
@@ -191,7 +195,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
       if (entry.item.fadeIn) effects.push(`afade=t=in:st=0:d=${time(entry.item.fadeIn, plan.fps)}`);
       if (entry.item.fadeOut) effects.push(`afade=t=out:st=${time(entry.duration - entry.item.fadeOut, plan.fps)}:d=${time(entry.item.fadeOut, plan.fps)}`);
       const label = `aud${inputIndex}`;
-      filters.push(`[${inputIndex}:a:0]atrim=duration=${time(entry.duration, plan.fps)},asetpts=PTS-STARTPTS,aresample=48000,${effects.join(",")},adelay=delays=${Math.round(entry.start * 48000 / plan.fps)}S:all=1[${label}]`);
+      filters.push(`[${inputIndex}:a:0]${audioClipFilters(entry.duration, plan.fps)},${effects.join(",")},adelay=delays=${Math.round(entry.start * 48000 / plan.fps)}S:all=1[${label}]`);
       audioLabels.push(`[${label}]`);
       inputIndex++;
     }
@@ -246,7 +250,7 @@ function videoEncoder(preset: RenderPreset) {
   return { name: codec === "h264" ? "libx264" : "libx265", options: ["-preset", "medium", "-crf", String(preset.crf), ...(codec === "h265" ? ["-x265-params", "pools=2:frame-threads=2"] : [])] };
 }
 
-function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput: number) {
+export function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput: number) {
   filters.push(`color=c=${safeColor(plan.background)}:s=${plan.width}x${plan.height}:r=${plan.fps}:d=${time(plan.to, plan.fps)},format=rgba[bg]`);
   let videoLabel = "bg";
   let index = firstInput;
@@ -257,13 +261,17 @@ function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput: number
     const fit = item.fit === "cover"
       ? [`scale=${plan.width}:${plan.height}:force_original_aspect_ratio=increase`, `crop=${plan.width}:${plan.height}`]
       : [`scale=${plan.width}:${plan.height}:force_original_aspect_ratio=decrease`, "format=rgba", `pad=${plan.width}:${plan.height}:(ow-iw)/2:(oh-ih)/2:color=black@0`];
-    const chain = [`[${index}:v:0]trim=duration=${time(duration, plan.fps)}`, "setpts=PTS-STARTPTS", `fps=${plan.fps}`, ...fit, "setsar=1", "format=rgba"];
+    // FFmpeg's RGB fade also fades the alpha channel on RGBA input, which
+    // squares dip brightness after overlay. Darken opaque RGB before fitting
+    // and adding transparency for letterboxing/dissolves/clip fades.
+    const brightness: string[] = [];
+    if (segment.incoming?.kind === "dip") addVideoFade(brightness, { start: 0, duration: segment.incoming.after, color: true }, plan.fps, "in");
+    if (segment.outgoing?.kind === "dip") addVideoFade(brightness, { start: segment.lead + segment.duration - segment.outgoing.before, duration: segment.outgoing.before, color: true }, plan.fps, "out");
+    const chain = [`[${index}:v:0]trim=duration=${time(duration, plan.fps)}`, "setpts=PTS-STARTPTS", `fps=${plan.fps}`, "format=rgb24", ...brightness, ...fit, "setsar=1", "format=rgba"];
     const effects: string[] = [];
     addVideoFade(effects, { start: segment.lead, duration: item.fadeIn ?? 0, alpha: true }, plan.fps, "in");
     addVideoFade(effects, { start: segment.lead + item.duration - (item.fadeOut ?? 0), duration: item.fadeOut ?? 0, alpha: true }, plan.fps, "out");
     if (segment.incoming?.kind === "dissolve") addVideoFade(effects, { start: 0, duration: segment.incoming.before + segment.incoming.after, alpha: true }, plan.fps, "in");
-    if (segment.incoming?.kind === "dip") addVideoFade(effects, { start: 0, duration: segment.incoming.after, color: true }, plan.fps, "in");
-    if (segment.outgoing?.kind === "dip") addVideoFade(effects, { start: segment.lead + segment.duration - segment.outgoing.before, duration: segment.outgoing.before, color: true }, plan.fps, "out");
     const label = `vc${index}`;
     chain.push(...effects, `setpts=PTS+${time(clipStart, plan.fps)}/TB[${label}]`);
     filters.push(chain.join(","));

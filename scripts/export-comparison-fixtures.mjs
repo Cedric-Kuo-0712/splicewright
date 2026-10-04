@@ -9,7 +9,6 @@ import { fingerprint } from "@splicewright/core/node";
 import { validate } from "@splicewright/core";
 
 export const DEFAULT_SEED = 20261004;
-export const DEFAULT_MEDIA_ROOT = "/path/to/test-project/raw";
 const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".m4v", ".mkv"]);
 const CAPTION_TEMPLATES = [
   "開場 · Ready", "沿著海岸 / Coastline", "慢一點 · Take it slow", "轉個彎 / Next turn",
@@ -68,6 +67,8 @@ export function createFixtureProject({ caseId, variant, seed = DEFAULT_SEED, med
   ];
   if (sources.length !== 2 || sources.some((source) => !source || !Number.isFinite(source.duration) || source.duration < 3.4 || !Number.isFinite(source.fps) || source.fps <= 0))
     throw new Error(`${caseId}: both source segments require positive fps and at least 3.4 seconds of media`);
+  if (sources.some(({ path }) => typeof path !== "string" || isAbsolute(path) || path.split(/[\\/]/).includes("..")))
+    throw new Error(`${caseId}: fixture asset paths must remain under the project directory`);
   const snappedSourceIn = (source) => Number((Math.round(source.sourceInSeconds * source.fps) / source.fps).toFixed(9));
   const captions = makeCaptions(seed, caseId === "diagnostic" ? 0 : 101);
   const isDiagnostic = caseId === "diagnostic";
@@ -228,7 +229,7 @@ export async function buildExportComparisonFixtures({ projectDir, outDir, mediaR
     fixtures: [],
   };
   const sourceFiles = [
-    { id: "diagnostic_source", caseId: "diagnostic", file: diagnostic, path: "../shared/diagnostic.mp4", info: diag },
+    { id: "diagnostic_source", caseId: "diagnostic", file: diagnostic, path: "shared/diagnostic.mp4", info: diag },
     ...realSources.map((item) => ({ id: item.id, caseId: "real", name: item.name, file: item.file, info: item, path: `raw/${item.name}` })),
   ];
   for (const item of sourceFiles) {
@@ -247,8 +248,8 @@ export async function buildExportComparisonFixtures({ projectDir, outDir, mediaR
     {
       caseId: "diagnostic",
       media: [
-        { ...diag, id: "diagnostic_source", path: "../shared/diagnostic.mp4", sourceInSeconds: 0.5 },
-        { ...diag, id: "diagnostic_source", path: "../shared/diagnostic.mp4", sourceInSeconds: 4.1 },
+        { ...diag, id: "diagnostic_source", path: "shared/diagnostic.mp4", sourceInSeconds: 0.5 },
+        { ...diag, id: "diagnostic_source", path: "shared/diagnostic.mp4", sourceInSeconds: 4.1 },
       ],
     },
     { caseId: "real", media: realSources.map((item) => ({ ...item, path: `raw/${item.name}` })) },
@@ -258,6 +259,8 @@ export async function buildExportComparisonFixtures({ projectDir, outDir, mediaR
       const projectDirPath = resolve(output, `${fixtureCase.caseId}-${variant}`);
       await mkdir(resolve(projectDirPath, ".splicewright"), { recursive: true });
       await symlink(rawLinkTarget, resolve(projectDirPath, "raw"), "dir");
+      if (fixtureCase.caseId === "diagnostic")
+        await symlink(resolve(output, "shared"), resolve(projectDirPath, "shared"), "dir");
       const project = createFixtureProject({ caseId: fixtureCase.caseId, variant, seed, media: fixtureCase.media });
       const mediaById = Object.fromEntries(fixtureCase.media.map((item) => [item.id, item]));
       const cache = {};

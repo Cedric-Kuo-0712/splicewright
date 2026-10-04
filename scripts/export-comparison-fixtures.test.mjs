@@ -5,6 +5,11 @@ import { createFixtureProject, makeCaptions } from "./export-comparison-fixtures
 const source = { path: "raw/source.mp4", duration: 31, width: 3840, height: 2160, fps: 30, audio: true };
 
 describe("export comparison fixture configuration", () => {
+  it("rejects asset paths that escape the public project directory", () => {
+    expect(() => createFixtureProject({ caseId: "diagnostic", variant: "hardcut", media: { ...source, path: "../shared/diagnostic.mp4" } })).toThrow(/asset paths/);
+    const project = createFixtureProject({ caseId: "diagnostic", variant: "hardcut", media: { ...source, path: "shared/diagnostic.mp4" } });
+    expect(project.assets.diagnostic_source.path).toBe("shared/diagnostic.mp4");
+  });
   it("emits stable seven-caption schedules for a fixed seed", () => {
     const first = makeCaptions(20261004);
     expect(makeCaptions(20261004)).toEqual(first);

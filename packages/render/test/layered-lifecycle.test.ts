@@ -8,13 +8,14 @@ import { fingerprint } from "@splicewright/core/node";
 import type { Project } from "@splicewright/core";
 import { estimateGraphicsStagingBytes, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
 
-const state = vi.hoisted(() => ({ fail: false, graphicsFail: false, graphicsFailAt: 0, graphicsFailAfterFrame: -1, reverse: false, commands: [] as string[][], graphics: [] as Record<string, any>[], written: [] as string[], probes: 0, browserOpens: 0, browserCloses: 0 }));
+const state = vi.hoisted(() => ({ fail: false, graphicsFail: false, graphicsFailAt: 0, graphicsFailAfterFrame: -1, reverse: false, commands: [] as string[][], graphics: [] as Record<string, any>[], written: [] as string[], probes: 0, browserOpens: 0, browserCloses: 0, onRender: undefined as ((options: Record<string, any>) => Promise<void>) | undefined }));
 vi.mock("@remotion/renderer", () => ({
   openBrowser: async () => { state.browserOpens++; return { pages: async () => [], close: async () => { state.browserCloses++; } }; },
   renderFrames: async (options: Record<string, any>) => {
     state.graphics.push(options);
     expect(options.outputDir).toBeNull();
     const frames = options.frames as number[];
+    await state.onRender?.(options);
     if (state.graphicsFail || state.graphicsFailAt === state.graphics.length) throw new Error("graphics producer failed");
     for (let index = 0; index < frames.length; index += options.concurrency) {
       const batch = frames.slice(index, index + options.concurrency);
@@ -42,6 +43,7 @@ vi.mock("node:child_process", () => ({
 
 let root: string | undefined;
 afterEach(() => {
+  state.onRender = undefined;
   if (root) rmSync(root, { recursive: true, force: true });
   root = undefined; state.fail = false; state.graphicsFail = false; state.graphicsFailAt = 0; state.graphicsFailAfterFrame = -1; state.reverse = false; state.commands.length = 0; state.graphics.length = 0; state.written.length = 0; state.probes = 0; state.browserOpens = 0; state.browserCloses = 0;
 });
@@ -62,6 +64,43 @@ function setup(): LayeredRenderArgs {
   };
 }
 describe("layered output lifecycle", () => {
+  it("notifies every current-batch cancel listener and releases previous listeners", async () => {
+    const args = setup(); const parentCallbacks: (() => void)[] = [];
+    args.remotion.composition.durationInFrames = 700;
+    args.project.tracks[0].items[0].duration = 700; args.probes.a.duration = 30;
+    args.project.tracks[1].items[0].duration = 601; args.range = [0, 700];
+    args.cancelSignal = callback => { parentCallbacks.push(callback); };
+    const cancelled: number[][] = [];
+    state.onRender = async options => {
+      const seen = [0, 0]; cancelled.push(seen);
+      options.cancelSignal(() => { seen[0]++; });
+      options.cancelSignal(() => { seen[1]++; });
+      if (cancelled.length === 2) parentCallbacks.at(-1)?.();
+    };
+    await expect(renderLayered(args)).rejects.toThrow("render cancelled");
+    expect(cancelled).toEqual([[0, 0], [1, 1]]);
+    expect(state.browserCloses).toBe(1);
+    expect(readFileSync(args.output, "utf8")).toBe("previous output");
+  });
+  it("awaits batch page cleanup without closing a caller's existing page or browser", async () => {
+    const args = setup(); const existing = { close: vi.fn() };
+    const pages: any[] = [existing]; const closed: number[] = [];
+    args.remotion.composition.durationInFrames = 700;
+    args.project.tracks[0].items[0].duration = 700; args.probes.a.duration = 30;
+    args.project.tracks[1].items[0].duration = 601; args.range = [0, 700];
+    const browser = { pages: async () => [...pages], close: vi.fn() };
+    args.remotion.puppeteerInstance = browser as any;
+    state.onRender = async () => {
+      expect(pages).toEqual([existing]);
+      const index = closed.length;
+      const page = { close: async () => { await new Promise<void>(resolve => setImmediate(resolve)); pages.splice(pages.indexOf(page), 1); closed.push(index); } };
+      pages.push(page);
+    };
+    await renderLayered(args);
+    expect(closed).toEqual([0, 1, 2]); expect(pages).toEqual([existing]);
+    expect(existing.close).not.toHaveBeenCalled(); expect(browser.close).not.toHaveBeenCalled();
+    expect(state.browserOpens).toBe(0);
+  });
   it("composes lossless alpha frames at their actual start number and commits the output", async () => {
     const args = setup(); const result = await renderLayered(args);
     expect(result.pipelineUsed).toBe("layered");

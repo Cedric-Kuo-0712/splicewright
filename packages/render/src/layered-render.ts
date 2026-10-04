@@ -203,9 +203,11 @@ export async function renderLayered(args: LayeredRenderArgs) {
       if (shouldCancel()) throw new Error("render cancelled");
       const activeFrameCount = plan.windows.reduce((count, [start, end]) => count + end - start, 0);
       let completedFrames = 0;
-      let cancelCurrentBatch: (() => void) | undefined;
-      const graphicsCancelSignal: NonNullable<RenderLike["cancelSignal"]> = callback => { cancelCurrentBatch = callback; if (signal.aborted) callback(); };
-      const cancelGraphics = () => cancelCurrentBatch?.();
+      // Remotion registers several cancellation listeners per call. Retain all
+      // of the current batch's listeners, then release them before the next one.
+      const batchCancelCallbacks = new Set<() => void>();
+      const graphicsCancelSignal: NonNullable<RenderLike["cancelSignal"]> = callback => { batchCancelCallbacks.add(callback); if (signal.aborted) callback(); };
+      const cancelGraphics = () => { for (const callback of batchCancelCallbacks) callback(); };
       signal.addEventListener("abort", cancelGraphics, { once: true });
       let browser: Awaited<ReturnType<typeof openBrowser>> | undefined;
       const ownsBrowser = !args.remotion.puppeteerInstance;
@@ -235,14 +237,21 @@ export async function renderLayered(args: LayeredRenderArgs) {
               completedFrames += frames.length;
             } finally {
               // Remotion closes these pages asynchronously for a caller-owned browser.
-              cancelCurrentBatch = undefined;
-              if (browser) await Promise.all((await browser.pages()).filter(page => !pagesBefore.has(page)).map(page => page.close()));
+              batchCancelCallbacks.clear();
+              if (browser) await Promise.all((await browser.pages()).filter(page => !pagesBefore.has(page)).map(async page => {
+                try { await page.close(); }
+                catch (error) {
+                  // Remotion can win the concurrent close. Ignore that race only
+                  // after verifying that the page is actually gone.
+                  if ((await browser!.pages()).includes(page)) throw error;
+                }
+              }));
             }
           },
         });
         graphicsProgress = 1; reportProgress(); graphicsMs = performance.now() - overlayStart;
       } finally {
-        cancelCurrentBatch = undefined;
+        batchCancelCallbacks.clear();
         signal.removeEventListener("abort", cancelGraphics);
         if (browser && ownsBrowser) await browser.close({ silent: true });
       }

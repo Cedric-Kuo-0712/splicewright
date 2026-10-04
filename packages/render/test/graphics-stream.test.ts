@@ -8,6 +8,15 @@ it("batches global frames with serial windows and grouped windows using bounded 
   expect([...graphicsFrameBatches(windows, "grouped", 4)]).toEqual([[2, 3, 4, 10], [11, 12, 13, 14]]);
 });
 
+it("starts a long graphics range without traversing future windows", () => {
+  const windows: [number, number][] = [[0, 216000], [216010, 216020]];
+  Object.defineProperty(windows, 1, { get() { throw new Error("future window traversed eagerly"); } });
+  const batches = graphicsFrameBatches(windows, "grouped");
+  expect(batches.next().value).toEqual(Array.from({ length: 300 }, (_, frame) => frame));
+  expect(batches.next().value).toEqual(Array.from({ length: 300 }, (_, frame) => 300 + frame));
+  batches.return(undefined);
+});
+
 it("bounds outstanding frames while reordering workers and filling sparse gaps for a slow consumer", async () => {
   const written: Buffer[] = [];
   const input = new Writable({ highWaterMark: 1, write(buffer, _encoding, callback) { written.push(buffer); setImmediate(callback); } });

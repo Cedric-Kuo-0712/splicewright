@@ -1,5 +1,5 @@
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, appendFileSync, openSync, closeSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -13,7 +13,19 @@ const configFile = args[args.indexOf('--config') + 1];
 if (!args.includes('--config') || !configFile) throw new Error('Usage: --config comparison.json [--check]');
 const config = JSON.parse(readFileSync(resolve(configFile), 'utf8'));
 const root = dirname(resolve(configFile));
-const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
+const hash = file => {
+  const digest = createHash('sha256'), buffer = Buffer.allocUnsafe(1024 * 1024), fd = openSync(file, 'r');
+  try { let bytes; while ((bytes = readSync(fd, buffer, 0, buffer.length, null))) digest.update(buffer.subarray(0, bytes)); }
+  finally { closeSync(fd); }
+  return digest.digest('hex');
+};
+function scratchBytes(dir) {
+  if (!existsSync(dir)) return 0;
+  return readdirSync(dir, { withFileTypes: true }).reduce((sum, entry) => {
+    const path = join(dir, entry.name);
+    return sum + (entry.isSymbolicLink() ? 0 : entry.isDirectory() ? scratchBytes(path) : entry.isFile() ? statSync(path).size : 0);
+  }, 0);
+}
 const save = (file, data) => writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
 function verify() {
   if (!config.cases?.length || !config.methods?.length || !config.renderer) throw new Error('Missing cases/methods/renderer');
@@ -77,17 +89,20 @@ if (args.includes('--check')) {
       for (const m of i % 2 ? [...config.methods].reverse() : config.methods) {
         verify();
         const name = `${c.id}-${m.id}`, fd = openSync(join(root, `${name}.log`), 'wx');
-        const child = spawn(process.execPath, [import.meta.filename, '--config', resolve(configFile), '--trial', c.id, m.id], { cwd: config.repo, detached: true, stdio: ['ignore', fd, fd] });
-        const entry = { name, pid: child.pid, startedAt: new Date().toISOString(), peakRssMiB: 0, peakCpuPercent: 0, peakSwapGrowthMiB: 0, samples: 0 };
+        const scratch = join(root, `${name}-scratch`); mkdirSync(scratch);
+        const projectScratch = join(c.project, '.splicewright'), initialProjectBytes = scratchBytes(projectScratch);
+        const child = spawn(process.execPath, [import.meta.filename, '--config', resolve(configFile), '--trial', c.id, m.id], { cwd: config.repo, detached: true, env: { ...process.env, TMPDIR: scratch, TEMP: scratch, TMP: scratch }, stdio: ['ignore', fd, fd] });
+        const entry = { name, pid: child.pid, startedAt: new Date().toISOString(), peakRssMiB: 0, peakCpuPercent: 0, peakSwapGrowthMiB: 0, peakScratchDiskMiB: 0, samples: 0 };
         record.trials.push(entry); persist(); console.log(JSON.stringify({ event: 'START', name, pid: child.pid }));
         let force;
         const abort = reason => { if (entry.abortReason) return; entry.abortReason = reason; record.stopReason = reason; persist(); signal(child.pid, 'SIGTERM'); force = setTimeout(() => signal(child.pid, 'SIGKILL'), 3000); };
         const ceiling = setTimeout(() => abort('trial timeout'), config.guards.trialSeconds * 1000);
         const sample = setInterval(() => {
           try {
-            const rows = execFileSync('ps', ['-axo', 'pgid=,rss=,%cpu='], { encoding: 'utf8', timeout: 2000 }).trim().split('\n').map(row => row.trim().split(/\s+/).map(Number)).filter(row => row[0] === child.pid);
-            const rss = rows.reduce((sum, row) => sum + row[1], 0) / 1024, cpu = rows.reduce((sum, row) => sum + row[2], 0), growth = record.initialSwapMiB === null ? 0 : Math.max(0, swap() - record.initialSwapMiB);
+            const rows = execFileSync('ps', ['-axo', 'pid=,pgid=,rss=,%cpu='], { encoding: 'utf8', timeout: 2000 }).trim().split('\n').map(row => row.trim().split(/\s+/).map(Number)).filter(row => row[1] === child.pid || row[0] === process.pid);
+            const rss = rows.reduce((sum, row) => sum + row[2], 0) / 1024, cpu = rows.reduce((sum, row) => sum + row[3], 0), growth = record.initialSwapMiB === null ? 0 : Math.max(0, swap() - record.initialSwapMiB);
             entry.peakRssMiB = Math.max(entry.peakRssMiB, rss); entry.peakCpuPercent = Math.max(entry.peakCpuPercent, cpu); entry.peakSwapGrowthMiB = Math.max(entry.peakSwapGrowthMiB, growth); entry.samples++;
+            entry.peakScratchDiskMiB = Math.max(entry.peakScratchDiskMiB, (scratchBytes(scratch) + Math.max(0, scratchBytes(projectScratch) - initialProjectBytes)) / 1048576);
             if (rss > config.guards.rssMiB) abort('process group RSS ceiling');
             if (growth > config.guards.swapGrowthMiB) abort('system swap growth ceiling');
             persist();

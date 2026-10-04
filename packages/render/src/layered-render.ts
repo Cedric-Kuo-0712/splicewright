@@ -132,11 +132,11 @@ function addAudioEffects(item: { fadeIn?: number; fadeOut?: number }, offset: nu
 }
 
 function activeWindowPlan(project: Project, probes: Record<string, Probe>, plan: LayeredPlan, scale: number) {
-  if (scale !== 1 || plan.windows.length || plan.audio.length || project.tracks.some(track => track.kind === "video" && !track.hidden && !track.muted)) return false;
+  if (scale !== 1 || plan.windows.length) return false;
   if (plan.video.some(segment => segment.lead || segment.tail || segment.incoming || segment.outgoing || segment.item.fadeIn || segment.item.fadeOut ||
     segment.item.speed && segment.item.speed !== 1 || segment.item.reverse || segment.item.grade || segment.item.key || segment.item.lutKeyframes?.length ||
     segment.item.mask || segment.item.crop || segment.item.effects || segment.item.blend && segment.item.blend !== "normal" ||
-    Object.keys(segment.item.keyframes ?? {}).length || segment.videoAudio || segment.decodeStart !== segment.renderStart ||
+    Object.keys(segment.item.keyframes ?? {}).length || segment.decodeStart !== segment.renderStart ||
     probesDimensionsMismatch(project, probes, segment.item.assetId, plan.width, plan.height))) return false;
   if (!plan.video.length || plan.video[0].renderStart !== plan.from || plan.video.at(-1)!.renderEnd !== plan.to) return false;
   return plan.video.every((segment, index) => index === 0 || plan.video[index - 1]!.renderEnd === segment.renderStart);
@@ -364,47 +364,74 @@ export async function renderLayered(args: LayeredRenderArgs) {
     const verifiedMediaCache = new Map<string, string>();
     const filters: string[] = [];
     const audioLabels: string[] = [];
-    let inputIndex = 0;
-    for (const segment of plan.video) {
+    // Shared by the classic graph and the active-window graph so audio filter strings stay identical.
+    const segmentInput = (segment: LayeredPlan["video"][number]) => {
       const path = resolveProjectAsset(dir, project.assets[segment.item.assetId].path);
       verifiedMediaProperties(path, verifiedMediaCache);
       const clipStart = segment.item.start - segment.lead;
       const offset = segment.decodeStart - clipStart;
       const sourceIn = segment.sourceIn - seconds(segment.lead, plan.fps) + seconds(offset, plan.fps);
-      inputs.push("-threads", "2", "-ss", sourceTime(sourceIn, plan.fps), "-i", path);
-      if (segment.videoAudio) {
-        const duration = segment.renderEnd - segment.decodeStart;
-        const effects = [`volume=${segment.item.volume ?? 1}`];
-        const transitionFades = audioTransitionFades(segment);
-        addAudioEffects(segment.item, segment.lead, segment.duration, effects, plan.fps, {
-          in: transitionFades.incoming,
-          outStart: transitionFades.outgoing?.start,
-          out: transitionFades.outgoing?.duration,
-        }, -offset);
-        const label = `aud${inputIndex}`;
-        const preroll = segment.renderStart - segment.decodeStart;
-        filters.push(`[${inputIndex}:a:0]${audioClipFilters(duration, plan.fps)},${effects.join(",")},atrim=start=${time(preroll, plan.fps)}:duration=${time(segment.renderEnd - segment.renderStart, plan.fps)},asetpts=PTS-STARTPTS,adelay=delays=${Math.round((segment.renderStart - plan.from) * 48000 / plan.fps)}S:all=1[${label}]`);
-        audioLabels.push(`[${label}]`);
-      }
-      inputIndex++;
-    }
-    const videoChain = makeVideoChain(plan, filters, 0);
-    inputIndex = videoChain.nextInput;
-    for (const entry of plan.audio) {
+      return { offset, args: ["-threads", "2", "-ss", sourceTime(sourceIn, plan.fps), "-i", path] };
+    };
+    const addVideoAudio = (segment: LayeredPlan["video"][number], offset: number, index: number) => {
+      const duration = segment.renderEnd - segment.decodeStart;
+      const effects = [`volume=${segment.item.volume ?? 1}`];
+      const transitionFades = audioTransitionFades(segment);
+      addAudioEffects(segment.item, segment.lead, segment.duration, effects, plan.fps, {
+        in: transitionFades.incoming,
+        outStart: transitionFades.outgoing?.start,
+        out: transitionFades.outgoing?.duration,
+      }, -offset);
+      const label = `aud${index}`;
+      const preroll = segment.renderStart - segment.decodeStart;
+      filters.push(`[${index}:a:0]${audioClipFilters(duration, plan.fps)},${effects.join(",")},atrim=start=${time(preroll, plan.fps)}:duration=${time(segment.renderEnd - segment.renderStart, plan.fps)},asetpts=PTS-STARTPTS,adelay=delays=${Math.round((segment.renderStart - plan.from) * 48000 / plan.fps)}S:all=1[${label}]`);
+      audioLabels.push(`[${label}]`);
+    };
+    // Pushes the input args for an audio-track item (prefixed by `inputPrefix`) and its filter; returns false when skipped.
+    const addTrackAudio = (entry: LayeredPlan["audio"][number], index: number, inputPrefix: string[] = []) => {
       const track = project.tracks.find((candidate) => candidate.items.some((item) => item.id === entry.item.id));
-      if (track?.kind !== "audio" || track.muted) continue;
+      if (track?.kind !== "audio" || track.muted) return false;
       const path = resolveProjectAsset(dir, project.assets[entry.item.assetId].path);
       const offset = entry.decodeStart - entry.start;
       const preroll = entry.renderStart - entry.decodeStart;
       const duration = entry.renderEnd - entry.decodeStart;
-      inputs.push("-threads", "2", "-ss", sourceTime(entry.item.sourceIn + seconds(offset, plan.fps), plan.fps), "-i", path);
+      inputs.push(...inputPrefix, "-threads", "2", "-ss", sourceTime(entry.item.sourceIn + seconds(offset, plan.fps), plan.fps), "-i", path);
       const gain = (entry.item.volume ?? 1) * (track.volume ?? 1);
       const effects = [`volume=${gain}`];
       addAudioEffects(entry.item, entry.start - entry.decodeStart, entry.duration, effects, plan.fps);
-      const label = `aud${inputIndex}`;
-      filters.push(`[${inputIndex}:a:0]${audioClipFilters(duration, plan.fps)},${effects.join(",")},atrim=start=${time(preroll, plan.fps)}:duration=${time(entry.renderEnd - entry.renderStart, plan.fps)},asetpts=PTS-STARTPTS,adelay=delays=${Math.round((entry.renderStart - plan.from) * 48000 / plan.fps)}S:all=1[${label}]`);
+      const label = `aud${index}`;
+      filters.push(`[${index}:a:0]${audioClipFilters(duration, plan.fps)},${effects.join(",")},atrim=start=${time(preroll, plan.fps)}:duration=${time(entry.renderEnd - entry.renderStart, plan.fps)},asetpts=PTS-STARTPTS,adelay=delays=${Math.round((entry.renderStart - plan.from) * 48000 / plan.fps)}S:all=1[${label}]`);
       audioLabels.push(`[${label}]`);
-      inputIndex++;
+      return true;
+    };
+    let inputIndex = 0;
+    if (!activeWindowUsed) {
+      for (const segment of plan.video) {
+        const input = segmentInput(segment);
+        inputs.push(...input.args);
+        if (segment.videoAudio) addVideoAudio(segment, input.offset, inputIndex);
+        inputIndex++;
+      }
+    }
+    // Active-window: input 0 is the rawvideo pipe; audio-only inputs (-vn) follow it.
+    if (activeWindowUsed) {
+      inputIndex = 1;
+      for (const segment of plan.video) {
+        if (!segment.videoAudio) continue;
+        const input = segmentInput(segment);
+        inputs.push("-vn", ...input.args);
+        addVideoAudio(segment, input.offset, inputIndex++);
+      }
+      for (const entry of plan.audio) {
+        if (addTrackAudio(entry, inputIndex, ["-vn"])) inputIndex++;
+      }
+    }
+    const videoChain = activeWindowUsed ? { videoLabel: "", nextInput: inputIndex } : makeVideoChain(plan, filters, 0);
+    if (!activeWindowUsed) {
+      inputIndex = videoChain.nextInput;
+      for (const entry of plan.audio) {
+        if (addTrackAudio(entry, inputIndex)) inputIndex++;
+      }
     }
     if (plan.windows.length) {
       inputs.push("-threads", "2", "-thread_queue_size", "2", "-f", "image2pipe", "-vcodec", "png", "-framerate", String(plan.fps), "-i", "pipe:0");
@@ -417,7 +444,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
     }
     // Keep composition in RGB until this single, explicit output conversion.
     // Merely tagging a default BT.601 conversion as BT.709 changes colors.
-    filters.push(`[${videoChain.videoLabel}]trim=duration=${time(frameCount, plan.fps)},setpts=PTS-STARTPTS,fps=${plan.fps},scale=in_range=pc:out_range=tv:out_color_matrix=bt709,format=yuv420p[vout]`);
+    if (!activeWindowUsed) filters.push(`[${videoChain.videoLabel}]trim=duration=${time(frameCount, plan.fps)},setpts=PTS-STARTPTS,fps=${plan.fps},scale=in_range=pc:out_range=tv:out_color_matrix=bt709,format=yuv420p[vout]`);
     if (audioLabels.length) {
       filters.push(`${audioLabels.join("")}amix=inputs=${audioLabels.length}:duration=longest:normalize=0,atrim=duration=${time(frameCount, plan.fps)},asetpts=PTS-STARTPTS${project.meta.limiter ? ",alimiter=limit=0.891:attack=1:release=120:level=disabled" : ""}[aout]`);
     }
@@ -430,9 +457,10 @@ export async function renderLayered(args: LayeredRenderArgs) {
         "[0:v:0]format=rgba,setpts=PTS-STARTPTS[vseq]",
         "[bg][vseq]overlay=format=rgb:eof_action=pass:shortest=0[composited]",
         `[composited]trim=duration=${time(frameCount, plan.fps)},setpts=PTS-STARTPTS,fps=${plan.fps},scale=in_range=pc:out_range=tv:out_color_matrix=bt709,format=yuv420p[vout]`,
+        ...filters,
       ].join(";");
       const rawInput = ["-threads", "2", "-thread_queue_size", "2", "-f", "rawvideo", "-pixel_format", "rgba", "-video_size", `${plan.width}x${plan.height}`, "-framerate", String(plan.fps), "-i", "pipe:0"];
-      ffmpegArgs = ["-filter_complex_threads", String(filterThreads), ...rawInput, "-filter_complex", filter, "-map", "[vout]", "-c:v", encoder.name, "-pix_fmt", "yuv420p", "-threads", String(encoderThreads), ...encoder.options, ...(/\.(?:mp4|mov)$/i.test(outputExt) ? ["-movflags", "+faststart"] : []), "-t", time(frameCount, plan.fps), "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv", stagedOutput];
+      ffmpegArgs = ["-filter_complex_threads", String(filterThreads), ...rawInput, ...inputs, "-filter_complex", filter, "-map", "[vout]", ...(audioLabels.length ? ["-map", "[aout]"] : []), "-c:v", encoder.name, "-pix_fmt", "yuv420p", "-threads", String(encoderThreads), ...encoder.options, ...(audioLabels.length ? ["-c:a", "aac", "-b:a", "320k", "-ar", "48000"] : []), ...(/\.(?:mp4|mov)$/i.test(outputExt) ? ["-movflags", "+faststart"] : []), "-t", time(frameCount, plan.fps), "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv", stagedOutput];
       activeWindowProducer = async (input, signal) => {
         for (const [batch, segment] of plan.video.entries()) {
           if (shouldCancel() || signal.aborted) throw signal.reason ?? new Error("render cancelled");

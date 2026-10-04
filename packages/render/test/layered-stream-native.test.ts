@@ -156,8 +156,8 @@ it.skipIf(!available)("matches the existing graph when a video stream ends befor
   }
 });
 
-it.skipIf(!available)("keeps an unmuted audio source on the existing FFmpeg graph", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "swr-active-window-audio-fallback-"));
+it.skipIf(!available)("streams an unmuted audio source through the active-window path with an audio stream", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "swr-active-window-audio-"));
   const previousMode = process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW;
   try {
     mkdirSync(join(dir, "raw"));
@@ -172,7 +172,7 @@ it.skipIf(!available)("keeps an unmuted audio source on the existing FFmpeg grap
     await renderLayered({ dir, output, preset: "h264-cpu", project, probes, presetOptions: { codec: "h264", crf: 18 }, onEncoding: args => { activeEncoderArgs = args; },
       remotion: { composition: { durationInFrames: 30 }, inputProps: { project } } as unknown as LayeredRenderArgs["remotion"],
     });
-    expect(activeEncoderArgs).not.toContain("pipe:0");
+    expect(activeEncoderArgs).toContain("pipe:0");
     const streams = JSON.parse(execFileSync("ffprobe", ["-v", "error", "-show_entries", "stream=codec_type", "-of", "json", output], { encoding: "utf8" })).streams;
     expect(streams.map((stream: { codec_type: string }) => stream.codec_type)).toContain("audio");
   } finally {
@@ -300,4 +300,98 @@ it.skipIf(!available)("cancels and closes both the active decoder and encoder", 
     if (previousEvents === undefined) delete process.env.SPLICEWRIGHT_EXPORT_MEMORY_EVENTS_FILE; else process.env.SPLICEWRIGHT_EXPORT_MEMORY_EVENTS_FILE = previousEvents;
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// Renders `project` with and without the active-window flag; asserts the flagged render's pixels and PCM match the classic graph.
+async function expectActiveAudioEquality(dir: string, project: ReturnType<typeof createProject>, probes: Record<string, any>, range: [number, number] | undefined, frames: number, expectActive = true) {
+  const previousMode = process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW;
+  try {
+    const common = { dir, preset: "h264-cpu", ...(range ? { range } : {}), project, probes,
+      presetOptions: { codec: "h264" as const, crf: 18 }, remotion: { composition: { durationInFrames: frames }, inputProps: { project } } as unknown as LayeredRenderArgs["remotion"] };
+    const reference = join(dir, "reference.mp4"), candidate = join(dir, "active.mp4");
+    delete process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW;
+    await renderLayered({ ...common, output: reference });
+    process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW = "1";
+    let encoderArgs: readonly string[] = [];
+    await renderLayered({ ...common, output: candidate, onEncoding: args => { encoderArgs = args; } });
+    if (expectActive) expect(encoderArgs).toContain("pipe:0"); else expect(encoderArgs).not.toContain("pipe:0");
+    const video = (file: string) => createHash("sha256").update(ffmpeg(["-threads", "2", "-i", file, "-map", "0:v:0", "-pix_fmt", "rgb24", "-f", "hash", "-hash", "sha256", "-"])).digest("hex");
+    const pcm = (file: string) => createHash("sha256").update(ffmpeg(["-i", file, "-map", "0:a:0", "-f", "s16le", "-"])).digest("hex");
+    expect(video(candidate)).toBe(video(reference));
+    expect(pcm(candidate)).toBe(pcm(reference));
+  } finally {
+    if (previousMode === undefined) delete process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW; else process.env.SPLICEWRIGHT_EXPERIMENTAL_ACTIVE_WINDOW = previousMode;
+  }
+}
+
+const probeOf = (kind: "video" | "audio", file: string, path: string, audio: boolean) => ({ kind, path, fingerprint: fingerprint(file)!, width: 32, height: 32, fps: 30, duration: 2, audio });
+const makeAv = (dir: string) => {
+  mkdirSync(join(dir, "raw"));
+  const first = join(dir, "raw/first.mp4"), second = join(dir, "raw/second.mp4"), music = join(dir, "raw/music.m4a");
+  ffmpeg(["-f", "lavfi", "-i", "testsrc2=s=32x32:r=30:d=2", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:d=2", "-frames:v", "60", "-c:v", "libx264", "-threads", "1", "-c:a", "aac", first]);
+  ffmpeg(["-f", "lavfi", "-i", "color=c=blue:s=32x32:r=30:d=2", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:d=2", "-frames:v", "60", "-c:v", "libx264", "-threads", "1", "-c:a", "aac", second]);
+  ffmpeg(["-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:d=2", "-c:a", "aac", music]);
+  return { first, second, music };
+};
+const twoClips = (muted = false) => ({ id: "v", name: "Video", kind: "video" as const, ...(muted ? { muted: true } : {}), items: [
+  { id: "a1", assetId: "a", start: 0, duration: 18, sourceIn: 0.15 },
+  { id: "b1", assetId: "b", start: 18, duration: 18, sourceIn: 0.27, volume: 0.5 },
+] });
+const avAssets = { a: { id: "a", kind: "video" as const, path: "raw/first.mp4" }, b: { id: "b", kind: "video" as const, path: "raw/second.mp4" }, m: { id: "m", kind: "audio" as const, path: "raw/music.m4a" } };
+const avProbes = (f: ReturnType<typeof makeAv>) => ({ a: probeOf("video", f.first, "raw/first.mp4", true), b: probeOf("video", f.second, "raw/second.mp4", true), m: probeOf("audio", f.music, "raw/music.m4a", true) });
+
+it.skipIf(!available)("matches the classic graph for two unmuted clips with embedded audio over a partial range", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "swr-active-window-embedded-audio-"));
+  try {
+    const f = makeAv(dir);
+    const project = createProject({ title: "embedded audio", width: 32, height: 32, fps: 30 });
+    project.assets = avAssets;
+    project.tracks = [twoClips()];
+    await expectActiveAudioEquality(dir, project, avProbes(f), [3, 30], 36);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+it.skipIf(!available)("matches the classic graph for a faded audio-track item with the limiter on", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "swr-active-window-track-audio-"));
+  try {
+    const f = makeAv(dir);
+    const project = createProject({ title: "track audio", width: 32, height: 32, fps: 30 });
+    project.meta.limiter = true;
+    project.assets = avAssets;
+    project.tracks = [twoClips(true), { id: "au", name: "Audio", kind: "audio", items: [{ id: "m1", assetId: "m", start: 2, duration: 30, sourceIn: 0.1, volume: 1.5, fadeIn: 6, fadeOut: 8 }] }];
+    await expectActiveAudioEquality(dir, project, avProbes(f), undefined, 36);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+it.skipIf(!available)("matches the classic graph for unmuted clips mixed with an audio-track item", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "swr-active-window-mix-"));
+  try {
+    const f = makeAv(dir);
+    const project = createProject({ title: "mix", width: 32, height: 32, fps: 30 });
+    project.assets = avAssets;
+    project.tracks = [twoClips(), { id: "au", name: "Audio", kind: "audio", items: [{ id: "m1", assetId: "m", start: 0, duration: 36, sourceIn: 0.2 }] }];
+    await expectActiveAudioEquality(dir, project, avProbes(f), [3, 30], 36);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+it.skipIf(!available)("matches the classic graph for muted video plus an audio-track item", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "swr-active-window-muted-mix-"));
+  try {
+    const f = makeAv(dir);
+    const project = createProject({ title: "muted mix", width: 32, height: 32, fps: 30 });
+    project.assets = avAssets;
+    project.tracks = [twoClips(true), { id: "au", name: "Audio", kind: "audio", items: [{ id: "m1", assetId: "m", start: 0, duration: 36, sourceIn: 0.2 }] }];
+    await expectActiveAudioEquality(dir, project, avProbes(f), [3, 30], 36);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+it.skipIf(!available)("still falls back to the classic graph when a clip has a fade", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "swr-active-window-fade-fallback-"));
+  try {
+    const f = makeAv(dir);
+    const project = createProject({ title: "fade fallback", width: 32, height: 32, fps: 30 });
+    project.assets = avAssets;
+    project.tracks = [{ id: "v", name: "Video", kind: "video", items: [{ id: "a1", assetId: "a", start: 0, duration: 30, sourceIn: 0, fadeIn: 6 }] }];
+    await expectActiveAudioEquality(dir, project, avProbes(f), undefined, 30, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

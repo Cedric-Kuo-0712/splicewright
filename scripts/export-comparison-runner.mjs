@@ -1,3 +1,4 @@
+import { outputVideoEncoder } from "./export-output-encoder.mjs";
 import { trialProcesses } from "./export-resource-processes.mjs";
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readSync, writeFileSync, appendFileSync, openSync, closeSync, statSync, mkdirSync, readdirSync } from 'node:fs';
@@ -77,8 +78,7 @@ if (args.includes('--check')) {
     record.renderResult = await render(c.project, { ...m.options, ...(c.range ? { range: c.range } : {}), output,
       onEncoding: encoderArgs => {
         appendFileSync(join(root, `${name}-encoding.jsonl`), JSON.stringify(encoderArgs) + '\n');
-        const index = encoderArgs.findIndex(arg => arg === '-c:v' || arg === '-vcodec' || arg === '-codec:v');
-        if (index >= 0) record.encoder = encoderArgs[index + 1];
+        record.encoder = outputVideoEncoder(encoderArgs);
         record.encoderArgsSha256 = createHash('sha256').update(JSON.stringify(encoderArgs)).digest('hex');
         if (m.expectedEncoder && record.encoder !== m.expectedEncoder) throw new Error(`Unexpected encoder: ${record.encoder}`);
       },

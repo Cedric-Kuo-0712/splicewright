@@ -1,7 +1,8 @@
 import { STEPS, type Step } from "@splicewright/ingest";
 
 const EDITING_STEPS: Step[] = ["proxy", "thumbs", "waveform"];
-const ALL_STEPS: Step[] = [...STEPS];
+// Reverse proxies are prepared on demand (POST /api/reverse-proxy), never on import.
+const ALL_STEPS: Step[] = STEPS.filter((s) => s !== "reverse");
 
 type Run = (assetId: string, steps: Step[]) => Promise<void>;
 type Notify = (assetId: string, error?: string) => void;

@@ -28,7 +28,7 @@ describe("background ingest scheduling", () => {
       ["old", ["transcript"]],
       ["new", ["proxy", "thumbs", "waveform"]],
       ["backlog", ["beats"]],
-      ["new", ["sourceHealth", "reverse", "analysis", "transcript", "beats", "loudness", "audioFx"]],
+      ["new", ["sourceHealth", "analysis", "transcript", "beats", "loudness", "audioFx"]],
     ]);
     expect(finalized.filter((id) => id === "new")).toHaveLength(1);
     scheduler.close();

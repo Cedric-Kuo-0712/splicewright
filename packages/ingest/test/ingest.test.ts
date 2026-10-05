@@ -118,6 +118,19 @@ describe("ingest", () => {
     expect(run(dir, "insertItem", { assetId: "a_clip", at: 500 })).toMatchObject({ changes: { summary: expect.stringContaining("(60f)") } });
   }, 60_000);
 
+  it("default ingest builds a reverse proxy only for a video a reversed item uses", async () => {
+    const dir = project();
+    expect((await ingest(dir, { only: ["proxy"] })).steps.proxy).toMatchObject({ ran: 1 });
+    const unused = await ingest(dir);
+    expect(unused.steps.reverse).toMatchObject({ ran: 0, skipped: 1 });
+    expect(existsSync(join(dir, ".splicewright/proxies/reverse/a_clip.mp4"))).toBe(false);
+    expect(run(dir, "setProps", { itemId: "i_1", patch: { reverse: true } })).not.toHaveProperty("error");
+    // Default ingest also runs transcript/beats, whose Python deps may be absent; only reverse matters here.
+    const used = await ingest(dir);
+    expect(used.steps.reverse).toMatchObject({ ran: 1, failed: 0 });
+    expect(existsSync(join(dir, ".splicewright/proxies/reverse/a_clip.mp4"))).toBe(true);
+  }, 60_000);
+
   it("loudness caches integrated LUFS like a direct ebur128 run, and skips silent assets", async () => {
     const dir = project();
     const r = await ingest(dir, { only: ["loudness"] });

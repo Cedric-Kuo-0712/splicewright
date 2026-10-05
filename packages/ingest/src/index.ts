@@ -391,6 +391,8 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
   save();
 
   const idOf = new Map(ready.map((e) => [e, Object.keys(cache).find((k) => cache[k] === e)!]));
+  // A reverse proxy costs several times the source decode; build it on request or for reversed items only.
+  const reversed = new Set(project.tracks.flatMap((t) => t.items.flatMap((i) => ("reverse" in i && i.reverse ? [i.assetId] : []))));
   // loudness has no file: its value lives on the probe entry.
   const outputs: Record<Exclude<Step, "loudness" | "audioFx" | "sourceHealth">, (id: string) => string> = {
     proxy: (id) => cacheDir(dir, "proxies", "edit", `${id}.mp4`),
@@ -404,7 +406,7 @@ export async function ingest(dir: string, opts: IngestOptions = {}) {
   const applies: Record<Exclude<Step, "audioFx">, (e: Entry) => boolean> = {
     sourceHealth: (e) => e.kind !== "font",
     proxy: (e) => e.kind === "video",
-    reverse: (e) => e.kind === "video",
+    reverse: (e) => e.kind === "video" && (!!opts.only?.includes("reverse") || reversed.has(idOf.get(e)!)),
     analysis: (e) => e.kind === "video",
     thumbs: (e) => e.kind === "video",
     waveform: (e) => e.kind !== "image" && !!e.audio,

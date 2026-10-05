@@ -66,6 +66,23 @@ describe.skipIf(!available)("layered FFmpeg numeric acceptance", () => {
     expect(samples.readFloatLE(peak * 4)).toBeCloseTo(1, 6);
   });
 
+  it("leaves audio with jittery packet timestamps continuous instead of inserting silence", () => {
+    // DJI AAC wobbles up to ~21 ms around its 1024-sample grid; model it as a sawtooth on each 1024-sample frame.
+    const samples = ffmpeg(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+      "-filter_complex", `[0:a]asetpts=PTS+0.021*mod(N\\,40)/40/TB,${audioClipFilters(30, 30)}[a]`, "-map", "[a]", "-ac", "1", "-f", "f32le", "-"]);
+    const pcm = new Float32Array(samples.buffer, samples.byteOffset, samples.length / 4);
+    expect(pcm.length).toBe(48000);
+    // A pure tone has a tiny second difference; an inserted-silence seam or dropped run is orders of magnitude larger.
+    let worst = 0, zeroRun = 0, longestZeroRun = 0;
+    for (let i = 2; i < pcm.length; i++) {
+      worst = Math.max(worst, Math.abs(pcm[i] - 2 * pcm[i - 1] + pcm[i - 2]));
+      zeroRun = Math.abs(pcm[i]) < 1e-6 ? zeroRun + 1 : 0;
+      longestZeroRun = Math.max(longestZeroRun, zeroRun);
+    }
+    expect(worst).toBeLessThan(0.01);
+    expect(longestZeroRun).toBeLessThan(100);
+  });
+
   it("preserves a global video fade phase when the requested range begins mid-fade", () => {
     const plan: LayeredPlan = {
       from: 6, to: 9, fps: 30, width: 4, height: 2, background: "#000", audio: [], windows: [],

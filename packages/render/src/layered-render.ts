@@ -72,7 +72,7 @@ export function estimateGraphicsStagingBytes(width: number, height: number, fram
 // Honor source packet timestamps before establishing a continuous mix clock.
 // Resetting PTS first compresses gaps/overlaps (observed in DJI AAC sources).
 export const audioClipFilters = (frames: number, fps: number) =>
-  `aresample=48000:async=1:min_hard_comp=0.000020833:first_pts=0,apad,atrim=end_sample=${Math.round(frames * 48000 / fps)},asetpts=N/SR/TB`;
+  `aresample=48000:async=1:min_hard_comp=0.05:first_pts=0,apad,atrim=end_sample=${Math.round(frames * 48000 / fps)},asetpts=N/SR/TB`;
 const safeColor = (color: string) => {
   if (color === "transparent") return "black";
   if (/^#[\da-f]{3}$/i.test(color)) return `0x${[...color.slice(1)].map((value) => value + value).join("")}`;
@@ -82,6 +82,9 @@ function verifiedMediaProperties(path: string, cache: Map<string, string>) {
   const canonical = realpathSync(path);
   let output = cache.get(canonical);
   if (output === undefined) {
+// min_hard_comp must exceed the packet-timestamp jitter: DJI sources wobble up to 21.2 ms (peak to peak) around the
+// 1024-sample grid, and a one-sample threshold turned that into ~20 ms of inserted silence about once a second.
+// 50 ms still keeps real gaps (the 100 ms case is tested) while leaving jittery-but-continuous audio untouched.
     output = execFileSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt,color_space,color_transfer,color_primaries,color_range,sample_aspect_ratio", "-of", "json", canonical], { encoding: "utf8" });
     cache.set(canonical, output);
   }

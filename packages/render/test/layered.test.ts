@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fingerprint } from "@splicewright/core/node";
 import type { AudioItem, Project, Track, VideoItem } from "@splicewright/core";
 import type { Probe } from "@splicewright/core/node";
-import { audioTransitionFades, planLayeredExport } from "../src/layered.ts";
+import { audioTransitionFades, planLayeredExport, staticRuns } from "../src/layered.ts";
 import { renderLayered, validateLayeredMedia, type LayeredRenderArgs } from "../src/layered-render.ts";
 
 const video = (id: string, start: number, transition?: VideoItem["transition"]): VideoItem => ({ id, assetId: `a_${id}`, start, duration: 90, sourceIn: 1, transition });
@@ -193,5 +193,33 @@ describe("layered export planning", () => {
   ] as const)("refuses %s", (_name, mutate) => {
     const p = mutate(project()) as Project;
     expect(() => planLayeredExport(p, probes([video("v1", 0), video("v2", 90)]))).toThrow("layered export unsupported:");
+  });
+});
+
+describe("static overlay runs", () => {
+  const item = (id: string, start: number, duration: number, extra: Record<string, unknown> = {}) => ({ id, component: "Text", start, duration, props: { text: id }, ...extra });
+  const runs = (items: unknown[], windows: [number, number][], kind = "overlay") =>
+    [...staticRuns(project([video("v1", 0)], [{ id: "o", kind, items } as unknown as Track]), windows)];
+  it.each([
+    ["one still item is a single run", [item("a", 10, 30)], [[10, 40]], [[10, 30]]],
+    ["a one-frame item is not listed", [item("a", 10, 1)], [[10, 11]], []],
+    ["items changing the showing set split the run", [item("a", 0, 20), item("b", 10, 20)], [[0, 30]], [[0, 10], [10, 10], [20, 10]]],
+    ["touching items are separate runs", [item("a", 0, 10), item("b", 10, 10)], [[0, 20]], [[0, 10], [10, 10]]],
+    ["a window clips the run on both sides", [item("a", 0, 100)], [[20, 50]], [[20, 30]]],
+    ["each window is its own run", [item("a", 0, 100)], [[10, 20], [30, 45]], [[10, 10], [30, 15]]],
+    ["CaptionLayer is still", [item("a", 0, 5, { component: "CaptionLayer" })], [[0, 5]], [[0, 5]]],
+    ["empty keyframes stay still", [item("a", 0, 5, { keyframes: {} })], [[0, 5]], [[0, 5]]],
+    ["keyframes render every frame", [item("a", 0, 5, { keyframes: { opacity: [{ t: 0, v: 1 }] } })], [[0, 5]], []],
+    ["Sticker renders every frame", [item("a", 0, 5, { component: "Sticker" })], [[0, 5]], []],
+    ["Image renders every frame", [item("a", 0, 5, { component: "Image" })], [[0, 5]], []],
+    ["a moving item makes only its own frames per-frame",
+      [item("a", 0, 30), item("m", 10, 5, { keyframes: { x: [{ t: 0, v: 1 }] } })], [[0, 30]], [[0, 10], [15, 15]]],
+  ] as [string, unknown[], [number, number][], number[][]][])("%s", (_name, items, windows, expected) => {
+    expect(runs(items, windows)).toEqual(expected);
+  });
+  it("hidden tracks do not count", () => {
+    const hidden = { id: "h", kind: "overlay", hidden: true, items: [item("m", 0, 5, { keyframes: { x: [{ t: 0, v: 1 }] } })] } as unknown as Track;
+    const shown = { id: "o", kind: "overlay", items: [item("a", 0, 5)] } as unknown as Track;
+    expect([...staticRuns(project([video("v1", 0)], [hidden, shown]), [[0, 5]])]).toEqual([[0, 5]]);
   });
 });

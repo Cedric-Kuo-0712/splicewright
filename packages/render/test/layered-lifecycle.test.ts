@@ -42,6 +42,9 @@ vi.mock("node:child_process", () => ({
   },
 }));
 
+// These cases assert frame-by-frame batching, ordering and cancellation on static captions; deduplication is covered in layered-dedup-native.test.ts.
+process.env.SPLICEWRIGHT_GRAPHICS_DEDUP = "0";
+
 let root: string | undefined;
 afterEach(() => {
   state.onRender = undefined;

@@ -8,7 +8,7 @@ import { performance } from "node:perf_hooks";
 import { openBrowser, renderFrames, renderMedia } from "@remotion/renderer";
 import type { Project } from "@splicewright/core";
 import { fingerprint, type Probe } from "@splicewright/core/node";
-import { audioTransitionFades, planLayeredExport, type LayeredPlan } from "./layered.ts";
+import { audioTransitionFades, LayeredUnsupportedError, planLayeredExport, type LayeredPlan } from "./layered.ts";
 import { withExportContainerTag } from "./export-preset.ts";
 import { graphicsFrameBatches, pipeGraphicsFrames } from "./graphics-stream.ts";
 
@@ -100,11 +100,11 @@ function verifiedMediaProperties(path: string, cache: Map<string, string>) {
     cache.set(canonical, output);
   }
   const stream = (JSON.parse(output) as { streams?: { pix_fmt?: string; color_space?: string; color_transfer?: string; color_primaries?: string; color_range?: string; sample_aspect_ratio?: string }[] }).streams?.[0];
-  if (!stream) throw new Error(`layered export unsupported: cannot probe video stream in ${path}`);
-  if (/(?:p|gray)(?:10|12|14|16)(?:le|be)?|p0(?:10|12|16)/i.test(stream.pix_fmt ?? "")) throw new Error(`layered export unsupported: HDR or high bit depth video (${stream.pix_fmt})`);
-  if (stream.sample_aspect_ratio && !["1:1", "N/A"].includes(stream.sample_aspect_ratio)) throw new Error(`layered export unsupported: non-square pixel aspect ratio ${stream.sample_aspect_ratio}`);
+  if (!stream) throw new LayeredUnsupportedError(`cannot probe video stream in ${path}`);
+  if (/(?:p|gray)(?:10|12|14|16)(?:le|be)?|p0(?:10|12|16)/i.test(stream.pix_fmt ?? "")) throw new LayeredUnsupportedError(`HDR or high bit depth video (${stream.pix_fmt})`);
+  if (stream.sample_aspect_ratio && !["1:1", "N/A"].includes(stream.sample_aspect_ratio)) throw new LayeredUnsupportedError(`non-square pixel aspect ratio ${stream.sample_aspect_ratio}`);
   for (const [name, value] of [["color space", stream.color_space], ["transfer", stream.color_transfer], ["primaries", stream.color_primaries]] as const)
-    if (value && !["bt709", "unknown", "reserved"].includes(value)) throw new Error(`layered export unsupported: ${name} ${value}`);
+    if (value && !["bt709", "unknown", "reserved"].includes(value)) throw new LayeredUnsupportedError(`${name} ${value}`);
 }
 
 function addVideoFade(filters: string[], options: { start: number; duration: number; color?: boolean; alpha?: boolean }, fps: number, direction: "in" | "out") {
@@ -129,7 +129,7 @@ export function validateLayeredMedia(dir: string, project: Project, probes: Reco
     const asset = project.assets[item.assetId];
     const probe = probes[item.assetId];
     if (!asset || !probe || probe.path !== asset.path || probe.fingerprint !== fingerprint(resolveProjectAsset(dir, asset.path)))
-      throw new Error(`layered export unsupported: media probe for ${item.id} is stale`);
+      throw new LayeredUnsupportedError(`media probe for ${item.id} is stale`);
   }
 }
 
@@ -277,7 +277,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
     // Ceiling: arbitrary TS can re-export or compute a custom registry. Source
     // regexes cannot establish eligibility; expose resolved registry metadata
     // before allowing configured projects in this experimental route.
-    throw new Error("layered export unsupported: project configuration requires the Remotion route");
+    throw new LayeredUnsupportedError("project configuration requires the Remotion route");
   }
   const plan = planLayeredExport(project, probes, ...(range ?? [0, Math.max(1, args.remotion.composition.durationInFrames)]), args.presetOptions.scale ?? 1);
   validateLayeredMedia(dir, project, probes, plan);
@@ -291,7 +291,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
   // Include the reusable blank frame and the current pipe write, not timeline duration.
   const liveEstimate = frameEstimate * (frameConcurrency + 2);
   if (plan.windows.length && (!Number.isSafeInteger(liveEstimate) || liveEstimate > LAYERED_GRAPHICS_STAGING_LIMIT_BYTES || liveEstimate > LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES))
-    throw new Error(`layered export unsupported: estimated live graphics working set ${liveEstimate} bytes exceeds the bounded ${LAYERED_GRAPHICS_STAGING_LIMIT_BYTES}-byte limit`);
+    throw new LayeredUnsupportedError(`estimated live graphics working set ${liveEstimate} bytes exceeds the bounded ${LAYERED_GRAPHICS_STAGING_LIMIT_BYTES}-byte limit`);
   const outputExt = extname(output) || ".mp4";
   const stagedOutput = join(dirname(output), `.${basename(output, outputExt)}.layered-${randomUUID()}${outputExt}`);
   try {
@@ -526,10 +526,10 @@ function videoEncoder(preset: RenderPreset, threads: number) {
   const hardware = preferred.find((name) => encoders.includes(name));
   if ((required || optional) && hardware) {
     if (preset.videoBitrate) return { name: hardware, options: ["-b:v", preset.videoBitrate] };
-    if (required) throw new Error(`layered export unsupported: required hardware preset ${codec} needs an explicit bitrate`);
+    if (required) throw new LayeredUnsupportedError(`required hardware preset ${codec} needs an explicit bitrate`);
   }
-  if (required) throw new Error(`layered export unsupported: required hardware encoder ${preferred.join(" or ")} is unavailable`);
-  if (preset.crf === undefined) throw new Error(`layered export unsupported: ${codec} preset needs a CRF for software encoding`);
+  if (required) throw new LayeredUnsupportedError(`required hardware encoder ${preferred.join(" or ")} is unavailable`);
+  if (preset.crf === undefined) throw new LayeredUnsupportedError(`${codec} preset needs a CRF for software encoding`);
   return { name: codec === "h264" ? "libx264" : "libx265", options: ["-preset", "medium", "-crf", String(preset.crf), ...(codec === "h265" ? ["-x265-params", `pools=${threads}:frame-threads=${threads}`] : [])] };
 }
 

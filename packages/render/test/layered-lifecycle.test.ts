@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fingerprint } from "@splicewright/core/node";
 import type { Project } from "@splicewright/core";
-import { defaultGraphicsConcurrency, estimateGraphicsStagingBytes, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
+import { LayeredUnsupportedError } from "../src/layered.ts";
+import { defaultGraphicsConcurrency,estimateGraphicsStagingBytes, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
 
 const state = vi.hoisted(() => ({ fail: false, graphicsFail: false, graphicsFailAt: 0, graphicsFailAfterFrame: -1, reverse: false, commands: [] as string[][], graphics: [] as Record<string, any>[], written: [] as string[], probes: 0, browserOpens: 0, browserCloses: 0, onRender: undefined as ((options: Record<string, any>) => Promise<void>) | undefined }));
 vi.mock("@remotion/renderer", () => ({
@@ -64,6 +65,14 @@ function setup(): LayeredRenderArgs {
   };
 }
 describe("layered output lifecycle", () => {
+  it("raises LayeredUnsupportedError before opening a browser or spawning ffmpeg", async () => {
+    const args = setup();
+    args.presetOptions = { codec: "h264", hardwareAcceleration: "required" };
+    await expect(renderLayered(args)).rejects.toBeInstanceOf(LayeredUnsupportedError);
+    expect(state.browserOpens).toBe(0);
+    expect(state.commands).toHaveLength(0);
+    expect(readFileSync(args.output, "utf8")).toBe("previous output");
+  });
   it("notifies every current-batch cancel listener and releases previous listeners", async () => {
     const args = setup(); const parentCallbacks: (() => void)[] = [];
     args.remotion.composition.durationInFrames = 700;

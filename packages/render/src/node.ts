@@ -12,7 +12,7 @@ import type { Preset } from "./config.ts";
 import { resolveExportPreset, withExportContainerTag } from "./export-preset.ts";
 import type { GradeLut } from "./grade-effect.ts";
 import { duckRanges } from "./duck.ts";
-import { planLayeredExport } from "./layered.ts";
+import { LayeredUnsupportedError, planLayeredExport } from "./layered.ts";
 import { defaultGraphicsConcurrency, defaultLayeredPreset, estimateGraphicsStagingBytes, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, setExportMemoryPhase, validateLayeredMedia, type LayeredRenderArgs, type RenderResources } from "./layered-render.ts";
 
 export { duckRanges };
@@ -259,9 +259,9 @@ export async function render(dir: string, { output, preset, pipeline = defaultPi
       const outputHeight = Math.round(project.meta.height * (exportPreset.scale ?? 1));
       const liveFrameEstimate = estimateGraphicsStagingBytes(outputWidth, outputHeight, (resources?.concurrency ?? exportPreset.concurrency ?? defaultGraphicsConcurrency(estimateGraphicsStagingBytes(outputWidth, outputHeight, 1))) + 2);
       if (plan.windows.length && liveFrameEstimate > Math.min(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES))
-        throw new Error(`layered export unsupported: estimated live graphics queue ${liveFrameEstimate} bytes exceeds ${LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES}-byte limit`);
+        throw new LayeredUnsupportedError(`estimated live graphics queue ${liveFrameEstimate} bytes exceeds ${LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES}-byte limit`);
       if (existsSync(join(dir, "splicewright.config.ts")))
-        throw new Error("layered export unsupported: project configuration requires the Remotion route");
+        throw new LayeredUnsupportedError("project configuration requires the Remotion route");
       let remotion: LayeredRenderArgs["remotion"] | undefined;
       if (plan.windows.length) {
         const graphicsProject = projectForLayeredGraphics(project, plan);
@@ -284,7 +284,7 @@ export async function render(dir: string, { output, preset, pipeline = defaultPi
         resources, cancelSignal, shouldCancel, onProgress, onEncoding });
     } catch (error) {
       // Only a plan-time refusal falls back; a failure while exporting is real and must surface.
-      if (pipeline === "layered" || !(error instanceof Error) || !error.message.startsWith("layered export unsupported")) throw error;
+      if (pipeline === "layered" || !(error instanceof LayeredUnsupportedError)) throw error;
       fallbackReason = error.message;
     }
   }

@@ -27,6 +27,7 @@ vi.mock("@splicewright/ingest", () => ({ audioFxPath: vi.fn(), ffmpeg: vi.fn(), 
 vi.mock("../src/layered-render.ts", () => ({ renderLayered: state.layered, setExportMemoryPhase: vi.fn(), validateLayeredMedia: vi.fn(), estimateGraphicsStagingBytes: () => 0, defaultGraphicsConcurrency: () => 2, defaultLayeredPreset: () => state.defaultPreset(), LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES: 2 * 1024 * 1024 * 1024, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES: 4 * 1024 * 1024 * 1024 }));
 
 import { renderMedia } from "@remotion/renderer";
+import { LayeredUnsupportedError } from "../src/layered.ts";
 import { render } from "../src/node.ts";
 
 let root: string | undefined;
@@ -114,8 +115,14 @@ describe("layered render preparation", () => {
     });
     it("falls back when the layered encoder step reports it is unsupported", async () => {
       const options = setup();
-      state.layered.mockRejectedValue(new Error("layered export unsupported: required hardware encoder is unavailable"));
+      state.layered.mockRejectedValue(new LayeredUnsupportedError("required hardware encoder is unavailable"));
       await expect(render(root!, options)).resolves.toMatchObject({ pipelineUsed: "remotion", fallbackReason: expect.stringContaining("hardware encoder") });
+    });
+    it("does not fall back on a plain Error that merely reads like a refusal", async () => {
+      const options = setup();
+      state.layered.mockRejectedValue(new Error("layered export unsupported: thrown mid-export"));
+      await expect(render(root!, options)).rejects.toThrow("thrown mid-export");
+      expect(renderMedia).not.toHaveBeenCalled();
     });
     it("does not hide a real layered failure behind a Remotion retry", async () => {
       const options = setup();

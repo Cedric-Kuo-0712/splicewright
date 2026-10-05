@@ -42,7 +42,14 @@ export function audioTransitionFades(segment: LayeredSegment) {
 }
 
 const supportedOverlayComponents = new Set(["Text", "Image", "Sticker", "CaptionLayer"]);
-const fail = (reason: string): never => { throw new Error(`layered export unsupported: ${reason}`); };
+/** A preflight refusal: thrown before any browser or ffmpeg starts, so `render()` may fall back to Remotion. */
+export class LayeredUnsupportedError extends Error {
+  constructor(reason: string) {
+    super(`layered export unsupported: ${reason}`);
+    this.name = "LayeredUnsupportedError";
+  }
+}
+const fail = (reason: string): never => { throw new LayeredUnsupportedError(reason); };
 const styleHasSafeBackdrop = (style: unknown, captionDefault = false) => {
   const css = style && typeof style === "object" ? style as Record<string, unknown> : {};
   const safe = ["backdropFilter", "WebkitBackdropFilter", "webkitBackdropFilter"].every((key) => css[key] === undefined || css[key] === "none");

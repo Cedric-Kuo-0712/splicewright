@@ -14,7 +14,6 @@ const Composition: React.FC<Props> = (props) => <SplicewrightProject {...props} 
 
 export function Preview({ p, readOnly = false }: { p: Project; readOnly?: boolean }) {
   const [playing, setPlaying] = React.useState(false);
-  const audioMeter = app.use((s) => s.audioMeter);
   const duck = app.use((s) => s.duck);
   const words = app.use((s) => s.words);
   const proxies = app.use((s) => s.proxies);
@@ -48,6 +47,9 @@ export function Preview({ p, readOnly = false }: { p: Project; readOnly?: boolea
     if (live) out = { ...out, tracks: out.tracks.map((t) => ({ ...t, items: t.items.map((i) => (i.id === live.itemId ? { ...i, ...live.patch } : i)) })) as Project["tracks"] };
     return out;
   }, [p, proxies, useProxies, slip, live]);
+  // A new inputProps identity restarts Remotion's playback loop; keep it stable across unrelated renders.
+  const sampleItemId = sampling ?? undefined;
+  const inputProps = useMemo(() => ({ project: shown, duck, sizes, durations, frameRates, reverseProxies, reverseAudioFx, animated, fontVersions, words, luts, audioFx, sampleItemId }), [shown, duck, sizes, durations, frameRates, reverseProxies, reverseAudioFx, animated, fontVersions, words, luts, audioFx, sampleItemId]);
   const total = Math.max(1, durationFrames(p));
   const range = looping ? (ioRange() ?? [0, total]) : null;
   const ref = useCallback((r: PlayerRef | null) => {
@@ -103,7 +105,7 @@ export function Preview({ p, readOnly = false }: { p: Project; readOnly?: boolea
       <Player
         ref={ref}
         component={Composition}
-        inputProps={{ project: shown, duck, sizes, durations, frameRates, reverseProxies, reverseAudioFx, animated, fontVersions, words, luts, audioFx, sampleItemId: sampling ?? undefined }}
+        inputProps={inputProps}
         durationInFrames={total}
         inFrame={range?.[0]}
         outFrame={range ? Math.min(total - 1, range[1] - 1) : undefined}
@@ -118,11 +120,19 @@ export function Preview({ p, readOnly = false }: { p: Project; readOnly?: boolea
         acknowledgeRemotionLicense
         style={{ width: "100%", height: "100%" }}
       />
-      <div className={`audio-meter${audioMeter.clipping ? " clipped" : ""}`} aria-live="polite" aria-label="Live preview audio meter">
-        <span>Preview mix</span>
-        {audioMeter.status === "unavailable" ? <b>Unmeasured</b> : audioMeter.status === "unmeasured" ? <b>Paused</b> : audioMeter.peakDb === null ? <b>Waiting for audio</b> : audioMeter.clipping ? <b>Clip</b> : <b>{audioMeter.peakDb === -Infinity ? "−∞" : audioMeter.peakDb.toFixed(1)} dBFS</b>}
-      </div>
+      <AudioMeter />
       {!readOnly && <TransformBox p={p} />}
+    </div>
+  );
+}
+
+// Own subscription: 20 Hz meter updates must not re-render Preview (and the Player).
+function AudioMeter() {
+  const audioMeter = app.use((s) => s.audioMeter);
+  return (
+    <div className={`audio-meter${audioMeter.clipping ? " clipped" : ""}`} aria-live="polite" aria-label="Live preview audio meter">
+      <span>Preview mix</span>
+      {audioMeter.status === "unavailable" ? <b>Unmeasured</b> : audioMeter.status === "unmeasured" ? <b>Paused</b> : audioMeter.peakDb === null ? <b>Waiting for audio</b> : audioMeter.clipping ? <b>Clip</b> : <b>{audioMeter.peakDb === -Infinity ? "−∞" : audioMeter.peakDb.toFixed(1)} dBFS</b>}
     </div>
   );
 }

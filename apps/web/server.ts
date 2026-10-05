@@ -233,7 +233,7 @@ function api(dir: string, { home, onInit, switchTo }: Hooks): Plugin {
             const outputDir = join(dir, "exports");
             const output = join(outputDir, `${title}-${preset}-${Date.now()}.mp4`);
             mkdirSync(outputDir, { recursive: true });
-            const job = startRender(dir, { output, preset });
+            const job = startRender(dir, { output, preset: preset === "auto" ? undefined : preset });
             exportIds.add(job.id);
             return send(res, 202, { ...job, output: basename(job.output) });
           }

@@ -27,6 +27,12 @@ it.each(["draft", "master", "h264-cpu", "h264-hardware", "h265-hardware"])("acce
   expect(runtime.start).toHaveBeenLastCalledWith(dir, expect.objectContaining({ preset }));
 });
 
+it("treats auto as no preset, so the render picks the same default as the CLI and MCP", async () => {
+  const response = await fetch(`${server.url}api/export`, { method: "POST", body: JSON.stringify({ preset: "auto" }) });
+  expect(response.status).toBe(202);
+  expect(runtime.start).toHaveBeenLastCalledWith(dir, expect.objectContaining({ preset: undefined, output: expect.stringMatching(/-auto-\d+\.mp4$/) }));
+});
+
 it.each(["h265-cpu", "unknown", null, {}])("rejects an unsupported choice %j", async (preset) => {
   runtime.start.mockClear();
   const response = await fetch(`${server.url}api/export`, { method: "POST", body: JSON.stringify({ preset }) });

@@ -32,7 +32,7 @@ const USAGE = `usage: splicewright <command>
   edit-review show [--snapshots] | edit-review keep|dismiss <id> | edit-review revert <id> [--base <revision>]
   undo | redo [--base <revision>]
   still --at <frame|[hh:]mm:ss[.s]> [-o out/still-<frame>.jpg]
-  render [-o out/final.mp4] [--preset draft|master|h264-cpu|h264-hardware|h265-hardware] [--range a-b]   (default: h265-hardware on macOS with VideoToolbox when the native route applies, else master)
+  render [-o out/final.mp4] [--preset draft|master|h264-cpu|h264-hardware|h265-hardware] [--range a-b]   (default: h264-hardware on macOS with VideoToolbox when the native route applies, else master)
   open [--port 5190]
   mcp
   migrate video-cut <path> [--out <dir>] [--force]`;

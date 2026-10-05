@@ -191,7 +191,7 @@ function Toolbar({ p }: { p: Project }) {
   const gap = app.use((s) => s.gap);
   const recent = app.use((s) => s.recent);
   const exports = app.use((s) => s.exports);
-  const [exportPreset, setExportPreset] = React.useState<ExportPreset>("h265-hardware");
+  const [exportPreset, setExportPreset] = React.useState<ExportPreset>("auto");
   const runningExports = exports.filter((job) => job.status === "running").map((job) => job.id).join(",");
   useEffect(() => {
     const controls = document.querySelectorAll<HTMLElement>(".toolbar > :not(.agent-review):not(.timecode):not(.spacer)");

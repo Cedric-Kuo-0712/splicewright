@@ -75,3 +75,18 @@ it("propagates asynchronous pipe errors even for a write below the high-water ma
   input.on("error", () => {});
   await expect(writePng(input, Buffer.alloc(8), new AbortController().signal)).rejects.toThrow("EPIPE");
 });
+
+it("lists only a run's first frame and writes its PNG for the whole run, keeping the stream frame-aligned", async () => {
+  const windows = [[2, 12], [20, 23]] as const;
+  const repeats = new Map([[2, 5], [7, 5], [20, 3]]);
+  expect([...graphicsFrameBatches(windows, "grouped", 10, repeats)]).toEqual([[2, 7, 20]]);
+  const written: string[] = [];
+  const input = new Writable({ write(buffer, _encoding, callback) { written.push(buffer.toString().startsWith("frame-") ? buffer.toString() : "gap"); callback(); } });
+  await pipeGraphicsFrames({ input, from: 0, to: 25, width: 1, height: 1, batches: graphicsFrameBatches(windows, "grouped", 10, repeats), repeats, concurrency: 3, limitBytes: 64,
+    signal: new AbortController().signal,
+    render: async (frames, callback) => { await Promise.all(frames.slice().reverse().map(frame => callback(Buffer.from(`frame-${frame}`), frame))); },
+  });
+  expect(written).toEqual([
+    "gap", "gap", ...Array(5).fill("frame-2"), ...Array(5).fill("frame-7"), ...Array(8).fill("gap"), ...Array(3).fill("frame-20"), "gap", "gap",
+  ]);
+});

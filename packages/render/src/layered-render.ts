@@ -8,7 +8,7 @@ import { performance } from "node:perf_hooks";
 import { openBrowser, renderFrames, renderMedia } from "@remotion/renderer";
 import type { Project } from "@splicewright/core";
 import { fingerprint, type Probe } from "@splicewright/core/node";
-import { audioTransitionFades, LayeredUnsupportedError, planLayeredExport, type LayeredPlan } from "./layered.ts";
+import { audioTransitionFades, LayeredUnsupportedError, planLayeredExport, staticRuns, type LayeredPlan } from "./layered.ts";
 import { withExportContainerTag } from "./export-preset.ts";
 import { graphicsFrameBatches, pipeGraphicsFrames } from "./graphics-stream.ts";
 
@@ -304,6 +304,9 @@ export async function renderLayered(args: LayeredRenderArgs) {
       if (shouldCancel()) throw new Error("render cancelled");
       const activeFrameCount = plan.windows.reduce((count, [start, end]) => count + end - start, 0);
       let completedFrames = 0;
+      // Runs of identical overlay frames are rendered once and written repeatedly; progress counts the frames they cover.
+      const repeats = process.env.SPLICEWRIGHT_GRAPHICS_DEDUP === "0" ? undefined : staticRuns(project, plan.windows);
+      const covered = (frames: number[]) => frames.reduce((sum, frame) => sum + (repeats?.get(frame) ?? 1), 0);
       let graphicsBatchIndex = 0;
       // Remotion registers several cancellation listeners per call. Retain all
       // of the current batch's listeners, then release them before the next one.
@@ -322,7 +325,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
           logLevel: args.remotion.logLevel,
         });
         await pipeGraphicsFrames({ input, from: plan.from, to: plan.to, width: outputWidth, height: outputHeight,
-          batches: graphicsFrameBatches(plan.windows, scheduling), concurrency: frameConcurrency, limitBytes: LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, signal,
+          batches: graphicsFrameBatches(plan.windows, scheduling, undefined, repeats), repeats, concurrency: frameConcurrency, limitBytes: LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, signal,
           render: async (frames, onFrameBuffer) => {
             const batch = graphicsBatchIndex++;
             setExportMemoryPhase("graphics-batch-start", batch);
@@ -337,10 +340,10 @@ export async function renderLayered(args: LayeredRenderArgs) {
                 ...(args.resources?.mediaCacheSizeInBytes !== undefined ? { mediaCacheSizeInBytes: args.resources.mediaCacheSizeInBytes } : {}),
                 ...(args.resources?.offthreadVideoCacheSizeInBytes !== undefined ? { offthreadVideoCacheSizeInBytes: args.resources.offthreadVideoCacheSizeInBytes } : {}),
                 scale: args.presetOptions.scale ?? 1, puppeteerInstance: browser, cancelSignal: graphicsCancelSignal,
-                onFrameUpdate: count => { graphicsProgress = Math.max(graphicsProgress, (completedFrames + Math.min(count, frames.length)) / activeFrameCount); reportProgress(); },
+                onFrameUpdate: count => { graphicsProgress = Math.max(graphicsProgress, (completedFrames + covered(frames.slice(0, count))) / activeFrameCount); reportProgress(); },
                 onFrameBuffer: async (buffer, frame) => { if (shouldCancel()) throw new Error("render cancelled"); await onFrameBuffer(buffer, frame); },
               });
-              completedFrames += frames.length;
+              completedFrames += covered(frames);
             } finally {
               setExportMemoryPhase("graphics-batch-cleanup-start", batch);
               try {

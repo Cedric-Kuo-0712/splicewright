@@ -192,6 +192,37 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
   return { from, to, fps: project.meta.fps, width: Math.round(project.meta.width * scale), height: Math.round(project.meta.height * scale), background, video: segments, audio, windows };
 }
 
+const stillOverlayComponents = new Set(["Text", "CaptionLayer"]);
+
+/**
+ * Spans inside `windows` whose graphics frame is identical on every frame, as start frame → length.
+ * Only runs longer than one frame are listed. A frame composites every item showing at once, so a run
+ * is a stretch where the showing set is unchanged and all of it is a keyframe-free Text or CaptionLayer.
+ * Image/Sticker are treated as moving (Sticker can be an animated GIF; a still Image is not proven).
+ */
+export function staticRuns(project: Project, windows: readonly (readonly [number, number])[]): Map<number, number> {
+  const items: { start: number; end: number; still: boolean }[] = [];
+  for (const track of project.tracks) {
+    if (track.hidden || track.kind !== "caption" && track.kind !== "overlay") continue;
+    for (const item of track.items) {
+      const span = itemSpan(project, item);
+      if (!span) continue;
+      const overlay = item as OverlayItem;
+      items.push({ start: span.start, end: span.start + span.duration, still: track.kind === "overlay" && stillOverlayComponents.has(overlay.component) && !Object.keys(overlay.keyframes ?? {}).length });
+    }
+  }
+  const runs = new Map<number, number>();
+  for (const [from, to] of windows) {
+    const live = items.filter((item) => item.start < to && item.end > from);
+    const cuts = [...new Set([from, to, ...live.flatMap((item) => [item.start, item.end]).filter((frame) => frame > from && frame < to)])].sort((a, b) => a - b);
+    for (let index = 0; index + 1 < cuts.length; index++) {
+      const [start, end] = [cuts[index], cuts[index + 1]];
+      if (end - start > 1 && live.every((item) => item.end <= start || item.start >= end || item.still)) runs.set(start, end - start);
+    }
+  }
+  return runs;
+}
+
 function timelineEnd(project: Project) {
   return Math.max(1, ...project.tracks.flatMap((track) => track.items.flatMap((item) => {
     const span = itemSpan(project, item);

@@ -38,11 +38,14 @@ export async function writePng(input: Writable, buffer: Buffer, signal: AbortSig
   });
 }
 
-/** Build small global-frame batches without materializing all active frames. */
-export function* graphicsFrameBatches(windows: readonly (readonly [number, number])[], scheduling: "serial" | "grouped", batchSize = 300): Generator<number[]> {
+/**
+ * Build small global-frame batches without materializing all active frames.
+ * `repeats` maps a run's first frame to its length; only that frame is listed, the rest are skipped.
+ */
+export function* graphicsFrameBatches(windows: readonly (readonly [number, number])[], scheduling: "serial" | "grouped", batchSize = 300, repeats?: ReadonlyMap<number, number>): Generator<number[]> {
   let batch: number[] = [];
   for (const [start, end] of windows) {
-    for (let frame = start; frame < end; frame++) {
+    for (let frame = start; frame < end; frame += repeats?.get(frame) ?? 1) {
       batch.push(frame);
       if (batch.length === batchSize) {
         yield batch;
@@ -57,8 +60,9 @@ export function* graphicsFrameBatches(windows: readonly (readonly [number, numbe
   if (batch.length) yield batch;
 }
 
-export async function pipeGraphicsFrames({ input, from, to, width, height, batches, concurrency, limitBytes, signal, render }: {
-  input: Writable; from: number; to: number; width: number; height: number; batches: Iterable<number[]>;
+/** `repeats` must match the one given to `graphicsFrameBatches`: a delivered frame's PNG is written for its whole run. */
+export async function pipeGraphicsFrames({ input, from, to, width, height, batches, repeats, concurrency, limitBytes, signal, render }: {
+  input: Writable; from: number; to: number; width: number; height: number; batches: Iterable<number[]>; repeats?: ReadonlyMap<number, number>;
   concurrency: number; limitBytes: number; signal: AbortSignal;
   render: (frames: number[], callback: (buffer: Buffer, frame: number) => Promise<void>) => Promise<unknown>;
 }) {
@@ -87,7 +91,11 @@ export async function pipeGraphicsFrames({ input, from, to, width, height, batch
           while (pending.has(frames[index])) {
             const nextFrame = frames[index], entry = pending.get(nextFrame)!;
             pending.delete(nextFrame);
-            try { await fillGap(nextFrame); await writePng(input, entry.buffer, signal); cursor++; index++; entry.resolve(); }
+            try {
+              await fillGap(nextFrame);
+              for (let copy = repeats?.get(nextFrame) ?? 1; copy > 0; copy--) { await writePng(input, entry.buffer, signal); cursor++; }
+              index++; entry.resolve();
+            }
             catch (error) { entry.reject(error); throw error; }
             finally { bytes -= entry.buffer.length; inFlight.delete(nextFrame); }
           }

@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { trialProcesses, trialProcessGroups, stopTrialGroups } from './export-resource-processes.mjs';
+import { trialProcesses, trialProcessGroups, stopTrialGroups, classifyTrialProcess } from './export-resource-processes.mjs';
 
 it('accounts for detached Chromium descendants without including unrelated process groups', () => {
   const rows = [
@@ -11,6 +11,14 @@ it('accounts for detached Chromium descendants without including unrelated proce
     { pid: 1, ppid: 0, pgid: 1 }, // supervisor
   ];
   expect(trialProcesses(rows, 10, 1).map(row => row.pid).sort((a, b) => a - b)).toEqual([1, 10, 11, 12, 13]);
+});
+
+it('classifies all process rows and keeps unfamiliar commands explicit', () => {
+  expect(classifyTrialProcess({ pid: 1, command: 'node runner.mjs' }, 2, 1)).toBe('supervisor');
+  expect(classifyTrialProcess({ pid: 2, command: 'node runner.mjs' }, 2, 1)).toBe('render-worker');
+  expect(classifyTrialProcess({ pid: 3, command: '/opt/Chrome Helper (Renderer)' }, 2, 1)).toBe('chromium-renderer');
+  expect(classifyTrialProcess({ pid: 4, command: '/opt/ffmpeg -i x' }, 2, 1)).toBe('ffmpeg');
+  expect(classifyTrialProcess({ pid: 5, command: 'mystery-helper' }, 2, 1)).toBe('unknown');
 });
 
 it('does not signal inherited system groups or protected groups outside the job owner', () => {

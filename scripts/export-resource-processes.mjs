@@ -10,6 +10,22 @@ export function trialProcesses(rows, trialPid, supervisorPid) {
   return rows.filter(row => selected.has(row.pid) || row.pid === supervisorPid);
 }
 
+/** Classify every sampled process; unknowns stay visible in telemetry totals. */
+export function classifyTrialProcess(row, trialPid, supervisorPid) {
+  if (row.pid === supervisorPid) return 'supervisor';
+  if (row.pid === trialPid) return 'render-worker';
+  const command = String(row.command ?? '').toLowerCase();
+  if (/ffmpeg/.test(command)) return 'ffmpeg';
+  if (/chrom(e|ium)|crbrowser/.test(command)) {
+    if (/renderer/.test(command)) return 'chromium-renderer';
+    if (/gpu/.test(command)) return 'chromium-gpu';
+    if (/utility/.test(command)) return 'chromium-utility';
+    return 'chromium-browser';
+  }
+  if (/node|tsx|npm/.test(command)) return 'node';
+  return 'unknown';
+}
+
 /** Signal only dedicated groups whose leader belongs to this trial and user. */
 export function trialProcessGroups(rows, trialPid, supervisorPid, ownerUid) {
   const selected = trialProcesses(rows, trialPid, supervisorPid);

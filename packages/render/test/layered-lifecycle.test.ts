@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fingerprint } from "@splicewright/core/node";
 import type { Project } from "@splicewright/core";
-import { estimateGraphicsStagingBytes, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
+import { defaultGraphicsConcurrency, estimateGraphicsStagingBytes, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
 
 const state = vi.hoisted(() => ({ fail: false, graphicsFail: false, graphicsFailAt: 0, graphicsFailAfterFrame: -1, reverse: false, commands: [] as string[][], graphics: [] as Record<string, any>[], written: [] as string[], probes: 0, browserOpens: 0, browserCloses: 0, onRender: undefined as ((options: Record<string, any>) => Promise<void>) | undefined }));
 vi.mock("@remotion/renderer", () => ({
@@ -151,6 +151,21 @@ describe("layered output lifecycle", () => {
     expect(state.graphics.map(call => call.frames.length)).toEqual([300, 300]);
     expect(readFileSync(args.output, "utf8")).toBe("previous output");
     expect(state.browserOpens).toBe(1); expect(state.browserCloses).toBe(1);
+  });
+  it("derives the default graphics concurrency from machine size and the queue limit", () => {
+    const GiB = 1024 ** 3, frame = (w: number, h: number) => estimateGraphicsStagingBytes(w, h, 1);
+    expect(defaultGraphicsConcurrency(frame(1920, 1080), 10, 16 * GiB)).toBe(4);
+    expect(defaultGraphicsConcurrency(frame(1920, 1080), 4, 16 * GiB)).toBe(2);
+    expect(defaultGraphicsConcurrency(frame(1920, 1080), 10, 8 * GiB)).toBe(2);
+    expect(defaultGraphicsConcurrency(frame(1920, 1080), 2, 2 * GiB)).toBe(1);
+    // 5K admitted the old default of 2 but not 4; 8K never fits and is left to the admission check.
+    expect(defaultGraphicsConcurrency(frame(5120, 2880), 10, 16 * GiB)).toBe(2);
+    expect(defaultGraphicsConcurrency(frame(7680, 4320), 10, 16 * GiB)).toBe(2);
+  });
+  it("uses the derived default when the caller sets no concurrency", async () => {
+    const args = setup();
+    await renderLayered(args);
+    expect(state.graphics[0].concurrency).toBe(defaultGraphicsConcurrency(estimateGraphicsStagingBytes(1280, 720, 1)));
   });
   it("schedules sparse caption windows once without renumbering their FFmpeg inputs", async () => {
     const args = setup();

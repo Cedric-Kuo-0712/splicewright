@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Project } from "@splicewright/core";
 
-const state = vi.hoisted(() => ({ project: undefined as Project | undefined, probes: {} as Record<string, any>, bundle: vi.fn(), select: vi.fn(), layered: vi.fn() }));
+const state = vi.hoisted(() => ({ project: undefined as Project | undefined, probes: {} as Record<string, any>, bundle: vi.fn(), select: vi.fn(), layered: vi.fn(), defaultPreset: vi.fn(() => "h265-hardware") }));
 // bundleProject forks bundle-child.ts; stand in for the child and count its bundle requests.
 vi.mock("node:child_process", async (orig) => {
   const { EventEmitter } = await import("node:events");
@@ -24,8 +24,9 @@ vi.mock("@splicewright/core/node", () => ({
   fingerprint: () => "fingerprint", load: () => state.project, loadCtx: () => ({}), readAssets: () => state.probes, sizesOf: () => ({}),
 }));
 vi.mock("@splicewright/ingest", () => ({ audioFxPath: vi.fn(), ffmpeg: vi.fn(), grid: vi.fn(), measureFinalMix: vi.fn(), reverseAudioPath: vi.fn(), scratch: vi.fn(), spread: vi.fn() }));
-vi.mock("../src/layered-render.ts", () => ({ renderLayered: state.layered, setExportMemoryPhase: vi.fn(), validateLayeredMedia: vi.fn(), estimateGraphicsStagingBytes: () => 0, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES: 2 * 1024 * 1024 * 1024, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES: 4 * 1024 * 1024 * 1024 }));
+vi.mock("../src/layered-render.ts", () => ({ renderLayered: state.layered, setExportMemoryPhase: vi.fn(), validateLayeredMedia: vi.fn(), estimateGraphicsStagingBytes: () => 0, defaultGraphicsConcurrency: () => 2, defaultLayeredPreset: () => state.defaultPreset(), LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES: 2 * 1024 * 1024 * 1024, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES: 4 * 1024 * 1024 * 1024 }));
 
+import { renderMedia } from "@remotion/renderer";
 import { render } from "../src/node.ts";
 
 let root: string | undefined;
@@ -83,5 +84,72 @@ describe("layered render preparation", () => {
     expect(call.remotion.inputProps.project.assets).toHaveProperty("picture");
     expect(call.remotion.inputProps.project.assets).toHaveProperty("used_font");
     expect(call.remotion.inputProps.project.assets).not.toHaveProperty("unused_font");
+  });
+  describe("pipeline auto-selection", () => {
+    const setup = () => {
+      root = mkdtempSync(join(tmpdir(), "swr-layered-auto-"));
+      state.project = {
+        schemaVersion: 1, revision: 0, meta: { title: "cuts", fps: 30, width: 1280, height: 720 },
+        assets: { clip: { id: "clip", kind: "video", path: "clip.mp4" } },
+        tracks: [{ id: "video", name: "V1", kind: "video", items: [{ id: "v", assetId: "clip", start: 0, duration: 90, sourceIn: 0 }] }], ids: {},
+      } as Project;
+      state.probes = { clip: { path: "clip.mp4", fingerprint: "fingerprint", kind: "video", width: 1280, height: 720, duration: 5, audio: false } };
+      state.bundle.mockResolvedValue("bundle-url");
+      state.select.mockResolvedValue({ durationInFrames: 90, width: 1280, height: 720, fps: 30, props: { project: state.project } });
+      return { output: join(root, "out.mp4"), preset: "h264-cpu" };
+    };
+    it("uses the layered route by default when the project is eligible", async () => {
+      const options = setup();
+      state.layered.mockResolvedValue({ pipelineUsed: "layered" });
+      await expect(render(root!, options)).resolves.toMatchObject({ pipelineUsed: "layered" });
+      expect(renderMedia).not.toHaveBeenCalled();
+    });
+    it("falls back to Remotion and reports why when the project is not eligible", async () => {
+      const options = setup();
+      state.project!.tracks.push({ id: "video2", name: "V2", kind: "video", items: [] } as any);
+      state.project!.tracks.push({ id: "video3", name: "V3", kind: "video", items: [] } as any);
+      await expect(render(root!, options)).resolves.toMatchObject({ pipelineUsed: "remotion", fallbackReason: expect.stringContaining("requires exactly one visible video track") });
+      expect(state.layered).not.toHaveBeenCalled();
+      expect(renderMedia).toHaveBeenCalledOnce();
+    });
+    it("falls back when the layered encoder step reports it is unsupported", async () => {
+      const options = setup();
+      state.layered.mockRejectedValue(new Error("layered export unsupported: required hardware encoder is unavailable"));
+      await expect(render(root!, options)).resolves.toMatchObject({ pipelineUsed: "remotion", fallbackReason: expect.stringContaining("hardware encoder") });
+    });
+    it("does not hide a real layered failure behind a Remotion retry", async () => {
+      const options = setup();
+      state.layered.mockRejectedValue(new Error("ffmpeg exited with code 1"));
+      await expect(render(root!, options)).rejects.toThrow("ffmpeg exited");
+      expect(renderMedia).not.toHaveBeenCalled();
+    });
+    it("defaults the layered route to the detected preset and an explicit preset always wins", async () => {
+      const { output } = setup();
+      state.layered.mockResolvedValue({ pipelineUsed: "layered", preset: "x" });
+      state.defaultPreset.mockReturnValue("h265-hardware");
+      await render(root!, { output });
+      expect(state.layered).toHaveBeenLastCalledWith(expect.objectContaining({ preset: "h265-hardware" }));
+      state.defaultPreset.mockReturnValue("master");
+      await render(root!, { output });
+      expect(state.layered).toHaveBeenLastCalledWith(expect.objectContaining({ preset: "master" }));
+      await render(root!, { output, preset: "h264-cpu" });
+      expect(state.layered).toHaveBeenLastCalledWith(expect.objectContaining({ preset: "h264-cpu" }));
+    });
+    it("falls back to the software master, not the hardware default, when Remotion has to render", async () => {
+      const { output } = setup();
+      state.defaultPreset.mockReturnValue("h265-hardware");
+      state.project!.tracks.push({ id: "video2", name: "V2", kind: "video", items: [] } as any);
+      state.project!.tracks.push({ id: "video3", name: "V3", kind: "video", items: [] } as any);
+      await expect(render(root!, { output })).resolves.toMatchObject({ pipelineUsed: "remotion", preset: "master" });
+      await expect(render(root!, { output, preset: "h265-hardware" })).resolves.toMatchObject({ pipelineUsed: "remotion", preset: "h265-hardware" });
+    });
+    it("keeps an explicit layered request strict and an explicit remotion request off the layered route", async () => {
+      const options = setup();
+      state.project!.tracks.push({ id: "video2", name: "V2", kind: "video", items: [] } as any);
+      state.project!.tracks.push({ id: "video3", name: "V3", kind: "video", items: [] } as any);
+      await expect(render(root!, { ...options, pipeline: "layered" })).rejects.toThrow("layered export unsupported");
+      await expect(render(root!, { ...options, pipeline: "remotion" })).resolves.toMatchObject({ pipelineUsed: "remotion" });
+      expect(state.layered).not.toHaveBeenCalled();
+    });
   });
 });

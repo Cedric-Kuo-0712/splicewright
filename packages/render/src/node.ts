@@ -13,7 +13,7 @@ import { resolveExportPreset, withExportContainerTag } from "./export-preset.ts"
 import type { GradeLut } from "./grade-effect.ts";
 import { duckRanges } from "./duck.ts";
 import { planLayeredExport } from "./layered.ts";
-import { estimateGraphicsStagingBytes, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, setExportMemoryPhase, validateLayeredMedia, type LayeredRenderArgs, type RenderResources } from "./layered-render.ts";
+import { defaultGraphicsConcurrency, defaultLayeredPreset, estimateGraphicsStagingBytes, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, setExportMemoryPhase, validateLayeredMedia, type LayeredRenderArgs, type RenderResources } from "./layered-render.ts";
 
 export { duckRanges };
 
@@ -206,8 +206,11 @@ export async function storyboard(dir: string, { from = 0, to, n = 12 }: { from?:
 export interface RenderOptions {
   output: string;
   preset?: string;
-  /** Experimental native FFmpeg video/audio route with Remotion graphics overlays. Defaults to Remotion. */
-  pipeline?: "remotion" | "layered";
+  /**
+   * "layered" renders video/audio natively in FFmpeg and only graphics in Remotion; "auto" (default) tries it and
+   * falls back to "remotion" when the project is not eligible. SPLICEWRIGHT_PIPELINE=remotion|layered overrides the default.
+   */
+  pipeline?: "auto" | "remotion" | "layered";
   /** Explicitly bound renderer resources for repeatable comparisons; omitted values preserve defaults. */
   resources?: RenderResources;
   /** Timeline frames [from, to). */
@@ -237,48 +240,60 @@ export async function limit(file: string) {
   }
 }
 
-export async function render(dir: string, { output, preset = "master", pipeline = "remotion", resources, range, onProgress, onEncoding, cancelSignal, shouldCancel }: RenderOptions) {
+const defaultPipeline = () => (["remotion", "layered"] as const).find((name) => name === process.env.SPLICEWRIGHT_PIPELINE) ?? "auto";
+
+export async function render(dir: string, { output, preset, pipeline = defaultPipeline(), resources, range, onProgress, onEncoding, cancelSignal, shouldCancel }: RenderOptions) {
   if (shouldCancel?.()) throw new Error("render cancelled");
-  if (pipeline === "layered") {
-    setExportMemoryPhase("project-plan");
-    const project = load(dir);
-    const probes = readAssets(dir);
-    const selectedRange: [number, number] = range ?? [0, durationFrames(project)];
-    const exportPreset = resolveExportPreset(preset, undefined, { width: project.meta.width, height: project.meta.height, fps: project.meta.fps });
-    const plan = planLayeredExport(project, probes, ...selectedRange, exportPreset.scale ?? 1);
-    validateLayeredMedia(dir, project, probes, plan);
-    const outputWidth = Math.round(project.meta.width * (exportPreset.scale ?? 1));
-    const outputHeight = Math.round(project.meta.height * (exportPreset.scale ?? 1));
-    const liveFrameEstimate = estimateGraphicsStagingBytes(outputWidth, outputHeight, (resources?.concurrency ?? exportPreset.concurrency ?? 2) + 2);
-    if (plan.windows.length && liveFrameEstimate > Math.min(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES))
-      throw new Error(`layered export unsupported: estimated live graphics queue ${liveFrameEstimate} bytes exceeds ${LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES}-byte limit`);
-    if (existsSync(join(dir, "splicewright.config.ts")))
-      throw new Error("layered export unsupported: project configuration requires the Remotion route");
-    let remotion: LayeredRenderArgs["remotion"] | undefined;
-    if (plan.windows.length) {
-      const graphicsProject = projectForLayeredGraphics(project, plan);
-      const ctx = loadCtx(dir);
-      const inputProps = {
-        project: graphicsProject,
-        duck: {}, sizes: {}, durations: {}, frameRates: {}, reverseProxies: [], reverseAudioFx: {}, animated: {},
-        words: captionWords(graphicsProject, ctx), luts: {}, audioFx: {}, fontVersions: fontVersionsOf(dir, graphicsProject),
-      };
-      setExportMemoryPhase("bundle");
-      const serveUrl = await bundleProject(dir);
-      const opts = { serveUrl, inputProps, browserExecutable: browserExecutable() };
-      setExportMemoryPhase("composition");
-      const composition = await selectComposition({ ...opts, id: ID });
-      remotion = { ...opts, composition };
+  let fallbackReason: string | undefined;
+  if (pipeline !== "remotion") {
+    const layeredPreset = preset ?? defaultLayeredPreset();
+    try {
+      setExportMemoryPhase("project-plan");
+      const project = load(dir);
+      const probes = readAssets(dir);
+      const selectedRange: [number, number] = range ?? [0, durationFrames(project)];
+      const exportPreset = resolveExportPreset(layeredPreset, undefined, { width: project.meta.width, height: project.meta.height, fps: project.meta.fps });
+      const plan = planLayeredExport(project, probes, ...selectedRange, exportPreset.scale ?? 1);
+      validateLayeredMedia(dir, project, probes, plan);
+      const outputWidth = Math.round(project.meta.width * (exportPreset.scale ?? 1));
+      const outputHeight = Math.round(project.meta.height * (exportPreset.scale ?? 1));
+      const liveFrameEstimate = estimateGraphicsStagingBytes(outputWidth, outputHeight, (resources?.concurrency ?? exportPreset.concurrency ?? defaultGraphicsConcurrency(estimateGraphicsStagingBytes(outputWidth, outputHeight, 1))) + 2);
+      if (plan.windows.length && liveFrameEstimate > Math.min(LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES))
+        throw new Error(`layered export unsupported: estimated live graphics queue ${liveFrameEstimate} bytes exceeds ${LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES}-byte limit`);
+      if (existsSync(join(dir, "splicewright.config.ts")))
+        throw new Error("layered export unsupported: project configuration requires the Remotion route");
+      let remotion: LayeredRenderArgs["remotion"] | undefined;
+      if (plan.windows.length) {
+        const graphicsProject = projectForLayeredGraphics(project, plan);
+        const ctx = loadCtx(dir);
+        const inputProps = {
+          project: graphicsProject,
+          duck: {}, sizes: {}, durations: {}, frameRates: {}, reverseProxies: [], reverseAudioFx: {}, animated: {},
+          words: captionWords(graphicsProject, ctx), luts: {}, audioFx: {}, fontVersions: fontVersionsOf(dir, graphicsProject),
+        };
+        setExportMemoryPhase("bundle");
+        const serveUrl = await bundleProject(dir);
+        const opts = { serveUrl, inputProps, browserExecutable: browserExecutable() };
+        setExportMemoryPhase("composition");
+        const composition = await selectComposition({ ...opts, id: ID });
+        remotion = { ...opts, composition };
+      }
+      mkdirSync(dirname(output), { recursive: true });
+      return await renderLayered({ dir, output, preset: layeredPreset, presetOptions: exportPreset, range, project, probes,
+        remotion: remotion ?? { composition: { durationInFrames: plan.to }, inputProps: {} } as LayeredRenderArgs["remotion"],
+        resources, cancelSignal, shouldCancel, onProgress, onEncoding });
+    } catch (error) {
+      // Only a plan-time refusal falls back; a failure while exporting is real and must surface.
+      if (pipeline === "layered" || !(error instanceof Error) || !error.message.startsWith("layered export unsupported")) throw error;
+      fallbackReason = error.message;
     }
-    mkdirSync(dirname(output), { recursive: true });
-    return renderLayered({ dir, output, preset, presetOptions: exportPreset, range, project, probes,
-      remotion: remotion ?? { composition: { durationInFrames: plan.to }, inputProps: {} } as LayeredRenderArgs["remotion"],
-      resources, cancelSignal, shouldCancel, onProgress, onEncoding });
   }
+  // The software master is the only default the Remotion route has been exercised with; keep it whenever layered did not run.
+  const remotionPreset = preset ?? "master";
   const { composition, project, probes, ...opts } = await prepare(dir);
   if (shouldCancel?.()) throw new Error("render cancelled");
   const exportPreset = resolveExportPreset(
-    preset,
+    remotionPreset,
     composition.props.presets as Record<string, Preset> | undefined,
     { width: composition.width, height: composition.height, fps: composition.fps },
   );
@@ -303,7 +318,7 @@ export async function render(dir: string, { output, preset = "master", pipeline 
     },
   });
   if ((composition.props.project as Project).meta.limiter) await limit(output);
-  return { output, frames: range ? range[1] - range[0] : composition.durationInFrames, preset, pipelineUsed: "remotion" as const, fallbackReason: undefined };
+  return { output, frames: range ? range[1] - range[0] : composition.durationInFrames, preset: remotionPreset, pipelineUsed: "remotion" as const, fallbackReason };
 }
 
 /** Keep original timeline/video metadata for anchors and global frame numbers, while removing
@@ -343,6 +358,9 @@ export interface Job {
   progress: number;
   output: string;
   preset: string;
+  /** Which route actually ran, and why "auto" fell back to Remotion, once the render finishes. */
+  pipelineUsed?: "layered" | "remotion";
+  fallbackReason?: string;
   finalMix?: { status: "measuring" } | ({ status: "measured"; measuredAt: string } & Awaited<ReturnType<typeof measureFinalMix>>);
   error?: string;
 }
@@ -357,11 +375,14 @@ export function startRender(dir: string, opts: RenderOptions): Job {
   const staging = join(dirname(opts.output), `.${basename(opts.output, ext)}.partial-${id}${ext}`);
   const { cancel, cancelSignal } = makeCancelSignal();
   const control = { cancel, cancelled: false, staging };
-  const job: Job = { id, status: "running", progress: 0, output: opts.output, preset: opts.preset ?? "master" };
+  const job: Job = { id, status: "running", progress: 0, output: opts.output, preset: opts.preset ?? "default" };
   jobs.set(job.id, job);
   controls.set(id, control);
-  render(dir, { ...opts, output: staging, cancelSignal, shouldCancel: () => control.cancelled, onProgress: (p) => (job.progress = +p.toFixed(3)) }).then(async () => {
+  render(dir, { ...opts, output: staging, cancelSignal, shouldCancel: () => control.cancelled, onProgress: (p) => (job.progress = +p.toFixed(3)) }).then(async (result) => {
     if (control.cancelled) throw new Error("render cancelled");
+    job.preset = result.preset;
+    job.pipelineUsed = result.pipelineUsed;
+    job.fallbackReason = result.fallbackReason;
     if (!existsSync(staging) || !statSync(staging).size) throw new Error("render produced no output file");
     job.finalMix = { status: "measuring" };
     const finalMix = await measureFinalMix(staging);

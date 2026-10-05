@@ -154,6 +154,7 @@ it.skipIf(!available)("matches the existing graph when a video stream ends befor
     ffmpeg(["-f", "lavfi", "-i", "testsrc2=s=32x32:r=30", "-frames:v", "45", "-c:v", "libx264", "-threads", "1", first]);
     ffmpeg(["-f", "lavfi", "-i", "color=c=blue:s=32x32:r=30:d=2", "-frames:v", "60", "-c:v", "libx264", "-threads", "1", second]);
     const project = createProject({ title: "active window short source", width: 32, height: 32, fps: 30 });
+    project.meta.background = "#336699"; // padded frames must show this, not black
     project.assets = { a: { id: "a", kind: "video", path: "raw/first.mp4" }, b: { id: "b", kind: "video", path: "raw/second.mp4" } };
     project.tracks = [{ id: "v", name: "Video", kind: "video", muted: true, items: [
       { id: "a1", assetId: "a", start: 0, duration: 18, sourceIn: 1.2 },
@@ -265,7 +266,7 @@ it.skipIf(!available)("keeps the decoder pipe backpressured when the encoder rea
       remotion: { composition: { durationInFrames: 60 }, inputProps: { project } } as unknown as LayeredRenderArgs["remotion"],
     });
     expect(activeEncoderArgs).toContain("pipe:0");
-    expect(readFileSync(output, "utf8")).toBe(String(60 * 32 * 32 * 4));
+    expect(readFileSync(output, "utf8")).toBe(String(60 * 32 * 32 * 3 / 2));
     // The encoder reports progress before the first reader finishes; clip completion must not move it backwards.
     expect(progress.every((value, index) => index === 0 || value >= progress[index - 1])).toBe(true);
   } finally {

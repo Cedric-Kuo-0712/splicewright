@@ -5,7 +5,20 @@ import { join } from "node:path";
 import type { Project } from "@splicewright/core";
 
 const state = vi.hoisted(() => ({ project: undefined as Project | undefined, probes: {} as Record<string, any>, bundle: vi.fn(), select: vi.fn(), layered: vi.fn() }));
-vi.mock("@remotion/bundler", () => ({ bundle: state.bundle }));
+// bundleProject forks bundle-child.ts; stand in for the child and count its bundle requests.
+vi.mock("node:child_process", async (orig) => {
+  const { EventEmitter } = await import("node:events");
+  return {
+    ...(await orig<typeof import("node:child_process")>()),
+    fork: () => {
+      const child = Object.assign(new EventEmitter(), {
+        stderr: new EventEmitter(), kill: vi.fn(),
+        send: (msg: unknown) => { Promise.resolve(state.bundle(msg)).then((serveUrl) => child.emit("message", { serveUrl })); },
+      });
+      return child;
+    },
+  };
+});
 vi.mock("@remotion/renderer", () => ({ makeCancelSignal: vi.fn(), renderMedia: vi.fn(), renderStill: vi.fn(), selectComposition: state.select }));
 vi.mock("@splicewright/core/node", () => ({
   fingerprint: () => "fingerprint", load: () => state.project, loadCtx: () => ({}), readAssets: () => state.probes, sizesOf: () => ({}),

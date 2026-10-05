@@ -32,7 +32,7 @@ const USAGE = `usage: splicewright <command>
   edit-review show [--snapshots] | edit-review keep|dismiss <id> | edit-review revert <id> [--base <revision>]
   undo | redo [--base <revision>]
   still --at <frame|[hh:]mm:ss[.s]> [-o out/still-<frame>.jpg]
-  render [-o out/final.mp4] [--preset draft|master|h264-cpu|h264-hardware|h265-hardware] [--range a-b]
+  render [-o out/final.mp4] [--preset draft|master|h264-cpu|h264-hardware|h265-hardware] [--range a-b]   (default: h265-hardware on macOS with VideoToolbox when the native route applies, else master)
   open [--port 5190]
   mcp
   migrate video-cut <path> [--out <dir>] [--force]`;
@@ -306,7 +306,7 @@ switch (cmd) {
     const onProgress = (p: number) => {
       if (Math.floor(p * 10) > shown) console.error(`render ${Math.round(p * 100)}%`), (shown = Math.floor(p * 10));
     };
-    const r = await render(dir, { output: resolve(flags.output ?? "out/final.mp4"), preset: flags.preset ?? "master", range, onProgress }).catch(fail);
+    const r = await render(dir, { output: resolve(flags.output ?? "out/final.mp4"), preset: flags.preset, range, onProgress }).catch(fail);
     out({ ...r, output: relative(dir, r.output) });
   }
   case "open": {

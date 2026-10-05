@@ -1,5 +1,6 @@
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { availableParallelism, totalmem } from "node:os";
 import { appendFileSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import type { Writable } from "node:stream";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
@@ -69,8 +70,21 @@ export function estimateGraphicsStagingBytes(width: number, height: number, fram
   const estimate = perFrameBytes * frames;
   return Number.isSafeInteger(estimate) ? estimate : Infinity;
 }
+/**
+ * Chrome page concurrency when the caller does not pick one. Measured on one M5 / 16 GiB / 1080p caption export:
+ * 2 -> 4 pages cut render time ~47% for ~350 MiB more RSS; 5+ pages added RAM without a clear further gain.
+ * Scale with cores and RAM, and never past the PNG queue limit, so an export the old default of 2 admitted still fits.
+ */
+export function defaultGraphicsConcurrency(frameBytes: number, cores = availableParallelism(), memoryBytes = totalmem()) {
+  const byMachine = Math.min(4, cores >> 1, Math.floor(memoryBytes / (4 * 1024 ** 3)));
+  const byQueue = Math.max(2, Math.floor(LAYERED_GRAPHICS_QUEUE_LIMIT_BYTES / frameBytes) - 2);
+  return Math.max(1, Math.min(byMachine, byQueue));
+}
 // Honor source packet timestamps before establishing a continuous mix clock.
 // Resetting PTS first compresses gaps/overlaps (observed in DJI AAC sources).
+// min_hard_comp must exceed the packet-timestamp jitter: DJI sources wobble up to 21.2 ms (peak to peak) around the
+// 1024-sample grid, and a one-sample threshold turned that into ~20 ms of inserted silence about once a second.
+// 50 ms still keeps real gaps (the 100 ms case is tested) while leaving jittery-but-continuous audio untouched.
 export const audioClipFilters = (frames: number, fps: number) =>
   `aresample=48000:async=1:min_hard_comp=0.05:first_pts=0,apad,atrim=end_sample=${Math.round(frames * 48000 / fps)},asetpts=N/SR/TB`;
 const safeColor = (color: string) => {
@@ -82,9 +96,6 @@ function verifiedMediaProperties(path: string, cache: Map<string, string>) {
   const canonical = realpathSync(path);
   let output = cache.get(canonical);
   if (output === undefined) {
-// min_hard_comp must exceed the packet-timestamp jitter: DJI sources wobble up to 21.2 ms (peak to peak) around the
-// 1024-sample grid, and a one-sample threshold turned that into ~20 ms of inserted silence about once a second.
-// 50 ms still keeps real gaps (the 100 ms case is tested) while leaving jittery-but-continuous audio untouched.
     output = execFileSync("ffprobe", ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt,color_space,color_transfer,color_primaries,color_range,sample_aspect_ratio", "-of", "json", canonical], { encoding: "utf8" });
     cache.set(canonical, output);
   }
@@ -274,7 +285,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
   const outputWidth = Math.round(project.meta.width * (args.presetOptions.scale ?? 1));
   const outputHeight = Math.round(project.meta.height * (args.presetOptions.scale ?? 1));
   const frameEstimate = estimateGraphicsStagingBytes(outputWidth, outputHeight, 1);
-  const frameConcurrency = args.resources?.concurrency ?? args.presetOptions.concurrency ?? 2;
+  const frameConcurrency = args.resources?.concurrency ?? args.presetOptions.concurrency ?? defaultGraphicsConcurrency(frameEstimate);
   if (!Number.isInteger(frameConcurrency) || frameConcurrency < 1 || frameConcurrency > 4)
     throw new Error("layered graphics concurrency must be an integer from 1 to 4");
   // Include the reusable blank frame and the current pipe write, not timeline duration.
@@ -490,6 +501,18 @@ export async function renderLayered(args: LayeredRenderArgs) {
   } finally {
     rmSync(stagedOutput, { force: true });
   }
+}
+
+/**
+ * Preset for callers that name none. Hardware HEVC only where it is known to work: macOS with VideoToolbox, the one
+ * encoder measured so far. Listing nvenc/qsv in `ffmpeg -encoders` does not prove a GPU is present, and that failure
+ * would surface mid-export instead of falling back, so other platforms keep the software master.
+ */
+export function defaultLayeredPreset(): "h265-hardware" | "master" {
+  if (process.platform !== "darwin") return "master";
+  try {
+    return execFileSync("ffmpeg", ["-hide_banner", "-encoders"], { encoding: "utf8" }).includes("hevc_videotoolbox") ? "h265-hardware" : "master";
+  } catch { return "master"; }
 }
 
 function videoEncoder(preset: RenderPreset, threads: number) {

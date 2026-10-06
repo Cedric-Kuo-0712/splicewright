@@ -150,7 +150,7 @@ function activeWindowPlan(project: Project, probes: Record<string, Probe>, plan:
   if (scale !== 1 || plan.windows.length) return false;
   if (plan.video.some(segment => segment.lead || segment.tail || segment.incoming || segment.outgoing || segment.item.fadeIn || segment.item.fadeOut ||
     segment.item.speed && segment.item.speed !== 1 || segment.item.reverse || segment.item.grade || segment.item.key || segment.item.lutKeyframes?.length ||
-    segment.place || segment.item.mask || segment.item.crop || segment.item.transform?.rotation || segment.item.effects || segment.item.blend && segment.item.blend !== "normal" ||
+    segment.place || segment.item.mask || segment.shape || segment.item.effects || segment.item.blend && segment.item.blend !== "normal" ||
     Object.keys(segment.item.keyframes ?? {}).length || segment.decodeStart !== segment.renderStart ||
     probesDimensionsMismatch(project, probes, segment.item.assetId, plan.width, plan.height))) return false;
   if (!plan.video.length || plan.video[0].renderStart !== plan.from || plan.video.at(-1)!.renderEnd !== plan.to) return false;
@@ -613,8 +613,8 @@ export function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput:
       if (bottom > 0) shaped.push(clear(`x=0:y=ih*${n(1 - bottom)}:w=iw:h=ih*${n(bottom)}`));
     }
     if (shape?.turn) shaped.push(`transpose=${shape.turn === 1 ? 1 : 2}`);
-    else if (shape && Math.abs(shape.angle % 360) === 180) shaped.push("hflip", "vflip");
-    else if (shape?.angle && Math.abs(shape.angle % 360) !== 0) shaped.push(`rotate=a=${(shape.angle * Math.PI / 180).toFixed(9)}:ow=iw:oh=ih:c=black@0`);
+    else if (shape?.angle === 180) shaped.push("hflip", "vflip");
+    else if (shape?.angle) shaped.push(`rotate=a=${(shape.angle * Math.PI / 180).toFixed(9)}:ow=iw:oh=ih:c=black@0`);
     // FFmpeg's RGB fade also fades the alpha channel on RGBA input, which
     // squares dip brightness after overlay. Darken opaque RGB before fitting
     // and adding transparency for letterboxing/dissolves/clip fades.

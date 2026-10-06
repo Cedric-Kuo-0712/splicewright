@@ -267,6 +267,16 @@ describe("stacked video tracks", () => {
     expect(planLayeredExport(...Object.values(stacked({ transform: { rotation: 90 } })) as [Project, Record<string, Probe>]).video[1].shape).toMatchObject({ turn: 1, angle: 0 });
     expect(planLayeredExport(...Object.values(stacked({ transform: { rotation: -90 } })) as [Project, Record<string, Probe>]).video[1].shape).toMatchObject({ turn: 3 });
     expect(planLayeredExport(...Object.values(stacked({ transform: { rotation: 10 } })) as [Project, Record<string, Probe>]).video[1].shape).toMatchObject({ turn: 0, angle: 10 });
+    // Whole turns and empty crops are no shape at all (they must not close the active-window path); other angles normalise into 0..360.
+    const shapeOfTop = (top: Partial<VideoItem>) => planLayeredExport(...Object.values(stacked(top)) as [Project, Record<string, Probe>]).video[1].shape;
+    expect(shapeOfTop({ transform: { rotation: 360 } })).toBeUndefined();
+    expect(shapeOfTop({ transform: { rotation: -720 } })).toBeUndefined();
+    expect(shapeOfTop({ crop: {} })).toBeUndefined();
+    expect(shapeOfTop({ crop: { left: 0, top: 0 } })).toBeUndefined();
+    expect(shapeOfTop({ transform: { rotation: 450 } })).toMatchObject({ turn: 1, angle: 0 });
+    expect(shapeOfTop({ transform: { rotation: -270 } })).toMatchObject({ turn: 1, angle: 0 });
+    expect(shapeOfTop({ transform: { rotation: 540 } })).toMatchObject({ turn: 0, angle: 180 });
+    expect(shapeOfTop({ transform: { rotation: -10 } })).toMatchObject({ turn: 0, angle: 350 });
     expect(() => planLayeredExport(...Object.values(stacked({ keyframes: { opacity: [{ t: 0, v: 1 }] } } as Partial<VideoItem>)) as [Project, Record<string, Probe>])).toThrow(/unsupported video look/);
     const below = { id: "o", kind: "overlay", name: "O", items: [{ id: "t", start: 0, duration: 30, component: "Text", props: { text: "x" } }] } as unknown as Track;
     const { p, probes: probe } = stacked();

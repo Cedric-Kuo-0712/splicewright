@@ -111,14 +111,15 @@ function placement(project: Project, item: VideoItem, from: number, scale: numbe
  * A quarter turn swaps the element's width and height (mediaBox), so the picture is fitted to the swapped box and then turned.
  */
 function shapeOf(project: Project, item: VideoItem, probe: Probe): LayeredSegment["shape"] {
-  const rot = item.transform?.rotation ?? 0;
-  if (!item.crop && !rot) return undefined;
+  // Whole turns and all-zero crops change nothing, so they must not count as a shape (it would also close the active-window path).
+  const rot = (((item.transform?.rotation ?? 0) % 360) + 360) % 360;
+  const c = item.crop && (item.crop.left || item.crop.top || item.crop.right || item.crop.bottom) ? item.crop : undefined;
+  if (!c && !rot) return undefined;
   const box = mediaBox(project, item, [probe.width!, probe.height!]);
   const [ox, oy] = [(box.ew - box.vw) / 2, (box.eh - box.vh) / 2];
-  const c = item.crop;
   const crop = c && { left: (ox + (c.left ?? 0) * box.vw) / box.ew, right: (ox + (c.right ?? 0) * box.vw) / box.ew, top: (oy + (c.top ?? 0) * box.vh) / box.eh, bottom: (oy + (c.bottom ?? 0) * box.vh) / box.eh };
-  const quarter = Math.abs(rot % 180) === 90;
-  return { crop, turn: quarter ? ((((Math.round(rot / 90) % 4) + 4) % 4) as 1 | 3) : 0, angle: quarter ? 0 : rot };
+  const quarter = rot % 180 === 90;
+  return { crop, turn: quarter ? ((rot / 90) as 1 | 3) : 0, angle: quarter ? 0 : rot };
 }
 
 /** Conservative eligibility and frame mapping for the experimental native-video/Remotion-graphics path. */

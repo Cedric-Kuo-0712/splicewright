@@ -101,7 +101,8 @@ function verifiedMediaProperties(path: string, cache: Map<string, string>) {
   }
   const stream = (JSON.parse(output) as { streams?: { pix_fmt?: string; color_space?: string; color_transfer?: string; color_primaries?: string; color_range?: string; sample_aspect_ratio?: string }[] }).streams?.[0];
   if (!stream) throw new LayeredUnsupportedError(`cannot probe video stream in ${path}`);
-  if (/(?:p|gray)(?:10|12|14|16)(?:le|be)?|p0(?:10|12|16)/i.test(stream.pix_fmt ?? "")) throw new LayeredUnsupportedError(`HDR or high bit depth video (${stream.pix_fmt})`);
+  // 10-bit SDR is fine: the graph converts to rgb24 first, and HDR is refused below by its colour tags.
+  if (/(?:p|gray)(?:12|14|16)(?:le|be)?|p0(?:12|16)/i.test(stream.pix_fmt ?? "")) throw new LayeredUnsupportedError(`high bit depth video (${stream.pix_fmt})`);
   if (stream.sample_aspect_ratio && !["1:1", "N/A"].includes(stream.sample_aspect_ratio)) throw new LayeredUnsupportedError(`non-square pixel aspect ratio ${stream.sample_aspect_ratio}`);
   for (const [name, value] of [["color space", stream.color_space], ["transfer", stream.color_transfer], ["primaries", stream.color_primaries]] as const)
     if (value && !["bt709", "unknown", "reserved"].includes(value)) throw new LayeredUnsupportedError(`${name} ${value}`);

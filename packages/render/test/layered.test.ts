@@ -3,9 +3,9 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fingerprint } from "@splicewright/core/node";
-import { valueAt, type AudioItem, type Project, type Track, type VideoItem } from "@splicewright/core";
+import { valueAt, VideoItem, type AudioItem, type Project, type Track } from "@splicewright/core";
 import type { Probe } from "@splicewright/core/node";
-import { audioTransitionFades, planLayeredExport, staticRuns } from "../src/layered.ts";
+import { audioTransitionFades, LayeredUnsupportedError, planLayeredExport, staticRuns } from "../src/layered.ts";
 import { renderLayered, validateLayeredMedia, type LayeredRenderArgs } from "../src/layered-render.ts";
 
 const video = (id: string, start: number, transition?: VideoItem["transition"]): VideoItem => ({ id, assetId: `a_${id}`, start, duration: 90, sourceIn: 1, transition });
@@ -239,6 +239,42 @@ describe("stacked video tracks", () => {
     const { p, probes: probe } = stacked();
     p.tracks.splice(1, 0, below);
     expect(() => planLayeredExport(p, probe)).toThrow(/below the video track/);
+  });
+});
+
+/**
+ * Every VideoItem field must say what the layered route does with it. The planner refuses by naming fields, so a field added to the
+ * schema later would otherwise be silently dropped from layered exports while the preview and the Remotion route still apply it.
+ * `handled`: a sample value the layered route renders; `refused`: a sample value that makes it fall back to Remotion. A field may
+ * have both (a transform without rotation is handled, with rotation it is refused). Both samples are checked against the planner.
+ */
+const LAYERED_FIELDS: Record<keyof VideoItem, { handled?: unknown; refused?: unknown }> = {
+  id: { handled: "v1" }, start: { handled: 0 }, duration: { handled: 90 }, label: { handled: "x" }, note: { handled: "x" },
+  assetId: { handled: "a_v1" }, sourceIn: { handled: 1 }, role: { handled: "x" },
+  volume: { handled: 0.5 }, fit: { handled: "cover" }, fadeIn: { handled: 6 }, fadeOut: { handled: 6 },
+  transform: { handled: { x: 5, y: -5, scale: 0.5, opacity: 0.5 }, refused: { rotation: 10 } },
+  mask: { handled: { shape: "ellipse", x: 0.1, y: 0.1, w: 0.8, h: 0.8 } },
+  keyframes: { handled: { x: [{ t: 1, v: 0 }, { t: 2, v: 5 }] }, refused: { opacity: [{ t: 1, v: 1 }] } },
+  blend: { handled: "normal", refused: "multiply" },
+  speed: { handled: 1, refused: 2 }, reverse: { handled: false, refused: true },
+  transition: { refused: { kind: "wipe", duration: 6 } },
+  audioFx: { refused: {} }, effects: { refused: {} }, grade: { refused: {} }, key: { refused: {} },
+  crop: { refused: { left: 0.1 } }, lutKeyframes: { refused: [{ t: 0, assetId: "lut" }] },
+};
+describe("layered route covers every VideoItem field", () => {
+  const plan = (patch: Record<string, unknown>) => {
+    const items = [{ ...video("v1", 0), ...patch } as VideoItem, video("v2", 90)];
+    return () => planLayeredExport(project(items), probes(items));
+  };
+  it("classifies each schema field, and nothing the schema no longer has", () => {
+    expect(Object.keys(LAYERED_FIELDS).sort()).toEqual(Object.keys(VideoItem.shape).sort());
+    for (const [field, entry] of Object.entries(LAYERED_FIELDS)) expect(entry.handled !== undefined || entry.refused !== undefined, field).toBe(true);
+  });
+  it.each(Object.entries(LAYERED_FIELDS).filter(([, entry]) => entry.handled !== undefined))("renders %s", (field, entry) => {
+    expect(plan({ [field]: entry.handled })).not.toThrow();
+  });
+  it.each(Object.entries(LAYERED_FIELDS).filter(([, entry]) => entry.refused !== undefined))("falls back to Remotion for %s", (field, entry) => {
+    expect(plan({ [field]: entry.refused })).toThrow(LayeredUnsupportedError);
   });
 });
 

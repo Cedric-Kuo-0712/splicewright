@@ -9,7 +9,7 @@ import type { Project } from "@splicewright/core";
 import { LayeredUnsupportedError } from "../src/layered.ts";
 import { defaultGraphicsConcurrency,estimateGraphicsStagingBytes, LAYERED_GRAPHICS_STAGING_LIMIT_BYTES, renderLayered, type LayeredRenderArgs } from "../src/layered-render.ts";
 
-const state = vi.hoisted(() => ({ fail: false, graphicsFail: false, graphicsFailAt: 0, graphicsFailAfterFrame: -1, reverse: false, commands: [] as string[][], graphics: [] as Record<string, any>[], written: [] as string[], probes: 0, browserOpens: 0, browserCloses: 0, onRender: undefined as ((options: Record<string, any>) => Promise<void>) | undefined }));
+const state = vi.hoisted(() => ({ fail: false, graphicsFail: false, graphicsFailAt: 0, graphicsFailAfterFrame: -1, reverse: false, commands: [] as string[][], graphics: [] as Record<string, any>[], written: [] as string[], probes: 0, probe: {} as Record<string, string>, browserOpens: 0, browserCloses: 0, onRender: undefined as ((options: Record<string, any>) => Promise<void>) | undefined }));
 vi.mock("@remotion/renderer", () => ({
   openBrowser: async () => { state.browserOpens++; return { pages: async () => [], close: async () => { state.browserCloses++; } }; },
   renderFrames: async (options: Record<string, any>) => {
@@ -28,7 +28,7 @@ vi.mock("@remotion/renderer", () => ({
   },
 }));
 vi.mock("node:child_process", () => ({
-  execFileSync: () => { state.probes++; return JSON.stringify({ streams: [{ pix_fmt: "yuv420p", color_space: "bt709", color_transfer: "bt709", color_primaries: "bt709", sample_aspect_ratio: "1:1" }] }); },
+  execFileSync: () => { state.probes++; return JSON.stringify({ streams: [{ pix_fmt: "yuv420p", color_space: "bt709", color_transfer: "bt709", color_primaries: "bt709", sample_aspect_ratio: "1:1", ...state.probe }] }); },
   spawn: (_binary: string, args: string[]) => {
     state.commands.push(args);
     const child = new EventEmitter() as any;
@@ -49,7 +49,7 @@ let root: string | undefined;
 afterEach(() => {
   state.onRender = undefined;
   if (root) rmSync(root, { recursive: true, force: true });
-  root = undefined; state.fail = false; state.graphicsFail = false; state.graphicsFailAt = 0; state.graphicsFailAfterFrame = -1; state.reverse = false; state.commands.length = 0; state.graphics.length = 0; state.written.length = 0; state.probes = 0; state.browserOpens = 0; state.browserCloses = 0;
+  root = undefined; state.fail = false; state.graphicsFail = false; state.graphicsFailAt = 0; state.graphicsFailAfterFrame = -1; state.reverse = false; state.commands.length = 0; state.graphics.length = 0; state.written.length = 0; state.probes = 0; state.probe = {}; state.browserOpens = 0; state.browserCloses = 0;
 });
 function setup(): LayeredRenderArgs {
   root = mkdtempSync(join(tmpdir(), "swr-layered-lifecycle-"));
@@ -291,5 +291,13 @@ describe("layered output lifecycle", () => {
     expect(state.graphics.map(call => call.frames.length)).toEqual([300]);
     expect(state.browserOpens).toBe(1); expect(state.browserCloses).toBe(1);
     expect(readFileSync(args.output, "utf8")).toBe("previous output");
+  });
+  it("accepts 10-bit SDR sources but refuses deeper bit depths and HDR colour tags", async () => {
+    for (const probe of [{ pix_fmt: "yuv420p10le" }, { pix_fmt: "yuv422p10le" }, { pix_fmt: "p010le" }]) {
+      state.probe = probe; await renderLayered(setup());
+    }
+    for (const [probe, reason] of [[{ pix_fmt: "yuv420p12le" }, /high bit depth/], [{ pix_fmt: "yuv420p10le", color_transfer: "smpte2084", color_primaries: "bt2020", color_space: "bt2020nc" }, /color space bt2020nc/]] as const) {
+      state.probe = probe; await expect(renderLayered(setup())).rejects.toThrow(reason);
+    }
   });
 });

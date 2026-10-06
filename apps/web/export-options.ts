@@ -18,3 +18,10 @@ export function exportLabel(preset: string) {
 export function isExportPreset(value: unknown): value is ExportPreset | "master" {
   return value === "master" || EXPORT_OPTIONS.some((option) => option.value === value);
 }
+
+/** One line saying which route an export took, and why when it is the slower Remotion one. */
+export function exportRouteNote(job: { pipelineUsed?: "layered" | "remotion"; fallbackReason?: string }) {
+  if (job.fallbackReason) return `Slower Remotion route: ${job.fallbackReason.replace(/^layered export unsupported: /, "")}`;
+  if (job.pipelineUsed === "layered") return "Fast route";
+  return undefined;
+}

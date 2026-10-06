@@ -306,7 +306,8 @@ switch (cmd) {
     const onProgress = (p: number) => {
       if (Math.floor(p * 10) > shown) console.error(`render ${Math.round(p * 100)}%`), (shown = Math.floor(p * 10));
     };
-    const r = await render(dir, { output: resolve(flags.output ?? "out/final.mp4"), preset: flags.preset, range, onProgress }).catch(fail);
+    const onFallback = (reason: string) => console.error(`render: using the slower Remotion route (${reason.replace(/^layered export unsupported: /, "")})`);
+    const r = await render(dir, { output: resolve(flags.output ?? "out/final.mp4"), preset: flags.preset, range, onProgress, onFallback }).catch(fail);
     out({ ...r, output: relative(dir, r.output) });
   }
   case "open": {

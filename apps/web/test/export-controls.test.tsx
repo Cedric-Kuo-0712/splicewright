@@ -2,7 +2,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
 import { ExportControls } from "../src/ExportControls.tsx";
-import { EXPORT_OPTIONS, exportLabel, isExportPreset } from "../export-options.ts";
+import { EXPORT_OPTIONS, exportLabel, exportRouteNote, isExportPreset } from "../export-options.ts";
 
 it("offers Auto first, the three explicit encoder modes, and keeps Draft", () => {
   const markup = renderToStaticMarkup(<ExportControls preset="h264-cpu" onChange={() => {}} onRender={() => {}} />);
@@ -27,4 +27,12 @@ it.each(["auto", "h264-cpu", "h264-hardware", "h265-hardware"] as const)("sends 
     expect(request).toHaveBeenCalledWith("/api/export", expect.objectContaining({ body: JSON.stringify({ preset }) }));
     expect(app.get().exports[0].preset).toBe(preset);
   } finally { vi.unstubAllGlobals(); }
+});
+
+it("names the route an export took and, for Remotion, why the faster one was refused", () => {
+  expect(exportRouteNote({})).toBeUndefined();
+  expect(exportRouteNote({ pipelineUsed: "layered" })).toBe("Fast route");
+  expect(exportRouteNote({ fallbackReason: "layered export unsupported: wipe transition on a is unsupported" })).toBe("Slower Remotion route: wipe transition on a is unsupported");
+  // set while the Remotion render is still running, before pipelineUsed is known
+  expect(exportRouteNote({ pipelineUsed: "remotion", fallbackReason: "layered export unsupported: item b has rotated media" })).toContain("rotated media");
 });

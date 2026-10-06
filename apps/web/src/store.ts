@@ -102,6 +102,8 @@ export interface ExportJob {
   progress: number;
   output: string;
   preset: ExportPreset | "master";
+  pipelineUsed?: "layered" | "remotion";
+  fallbackReason?: string;
   finalMix?: { status: "measuring" } | {
     status: "measured"; measuredAt: string; decoded: true;
     audio: { status: "none" } | {

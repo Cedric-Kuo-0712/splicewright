@@ -35,13 +35,15 @@ describe("layered export planning", () => {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
+  // A transition the layered route still refuses: a wipe on an item that is also scaled.
+  const unsupportedTransition = () => [{ ...video("v1", 0, { kind: "wipe", duration: 30 }), transform: { scale: 0.5 } }, video("v2", 90)];
   it("rejects an unsupported transition affecting the range after its outgoing clip has ended", () => {
-    const items = [video("v1", 0, { kind: "wipe", duration: 30 }), video("v2", 90)];
-    expect(() => planLayeredExport(project(items), probes(items), 96, 100)).toThrow(/wipe transition/);
+    const items = unsupportedTransition();
+    expect(() => planLayeredExport(project(items), probes(items), 96, 100)).toThrow(/wipe transition on v1 cannot be combined/);
   });
 
   it("ignores unsupported transition phases that do not intersect the requested range", () => {
-    const items = [video("v1", 0, { kind: "wipe", duration: 30 }), video("v2", 90)];
+    const items = unsupportedTransition();
     expect(planLayeredExport(project(items), probes(items), 0, 30).video[0].outgoing).toBeUndefined();
     expect(planLayeredExport(project(items), probes(items), 120, 150).video[0].incoming).toBeUndefined();
   });
@@ -49,8 +51,8 @@ describe("layered export planning", () => {
     const items = [video("v1", 0, { kind: "dissolve", duration: 30 }), video("v2", 90)];
     const plan = planLayeredExport(project(items), probes(items), 30, 150);
     expect(plan.video.map(({ start, sourceIn, lead, tail, incoming, outgoing }) => ({ start, sourceIn, lead, tail, incoming, outgoing }))).toEqual([
-      { start: 0, sourceIn: 1, lead: 0, tail: 15, incoming: undefined, outgoing: { kind: "dissolve", before: 15, after: 15 } },
-      { start: 90, sourceIn: 1, lead: 15, tail: 0, incoming: { kind: "dissolve", before: 15, after: 15 }, outgoing: undefined },
+      { start: 0, sourceIn: 1, lead: 0, tail: 15, incoming: undefined, outgoing: { kind: "dissolve", before: 15, after: 15, direction: "left" } },
+      { start: 90, sourceIn: 1, lead: 15, tail: 0, incoming: { kind: "dissolve", before: 15, after: 15, direction: "left" }, outgoing: undefined },
     ]);
     expect(plan.from).toBe(30);
     expect(plan.to).toBe(150);
@@ -187,8 +189,7 @@ describe("layered export planning", () => {
   });
 
   it.each([
-    ["multiple visible video tracks", (p: Project) => ({ ...p, tracks: [...p.tracks, { id: "video2", kind: "video", items: [video("v3", 0)] }] })],
-    ["wipe transition", (p: Project) => ({ ...p, tracks: [{ ...p.tracks[0], items: [video("v1", 0, { kind: "wipe", duration: 30 }), video("v2", 90)] }] })],
+    ["a wipe on a scaled item", (p: Project) => ({ ...p, tracks: [{ ...p.tracks[0], items: unsupportedTransition() }] })],
     ["custom video look", (p: Project) => ({ ...p, tracks: [{ ...p.tracks[0], items: [{ ...p.tracks[0].items[0], grade: { exposure: 1 } }] }] })],
   ] as const)("refuses %s", (_name, mutate) => {
     const p = mutate(project()) as Project;
@@ -227,6 +228,32 @@ describe("stacked video tracks", () => {
     expect(worst).toBeLessThan(0.5);
     expect(planLayeredExport(p, probe, 0, 90, 0.5).video[1].place!.xExpr).not.toBe(place.xExpr);
   });
+  it("names what it cannot render so the fallback reason says which feature to build next", () => {
+    const reason = (top: Partial<VideoItem>) => { try { planLayeredExport(...Object.values(stacked(top)) as [Project, Record<string, Probe>]); } catch (error) { return (error as Error).message; } };
+    expect(reason({ transform: { rotation: 10 }, crop: { left: 0.1 } })).toMatch(/\(crop, rotation\)$/);
+    expect(reason({ keyframes: { opacity: [{ t: 1, v: 1 }], maskX: [{ t: 1, v: 0 }] } } as Partial<VideoItem>)).toMatch(/\(keyframed opacity, keyframed maskX\)$/);
+    expect(reason({ blend: "multiply" })).toMatch(/\(blend multiply\)$/);
+  });
+  it("lays wipe, slide, push and zoom over the cut like a dissolve, with the entry direction", () => {
+    const kinds = ["wipe", "slide", "push", "zoom"] as const;
+    for (const kind of kinds) {
+      const items = [video("v1", 0, { kind, duration: 30, direction: "down" }), video("v2", 90)];
+      const plan = planLayeredExport(project(items), probes(items));
+      expect(plan.video[0].outgoing).toEqual({ kind, before: 15, after: 15, direction: "down" });
+      expect(plan.video[1]).toMatchObject({ lead: 15, incoming: { kind, direction: "down" } });
+      expect(plan.video[0].tail).toBe(15);
+    }
+  });
+  it("refuses wipe, slide, push and zoom on an item that is also moved, scaled or keyframed, but not dissolve", () => {
+    for (const kind of ["wipe", "slide", "push", "zoom"] as const) {
+      for (const patch of [{ transform: { scale: 0.5 } }, { keyframes: { x: [{ t: 1, v: 0 }, { t: 2, v: 5 }] } }] as Partial<VideoItem>[]) {
+        const items = [{ ...video("v1", 0, { kind, duration: 30 }), ...patch }, video("v2", 90)];
+        expect(() => planLayeredExport(project(items), probes(items))).toThrow(/cannot be combined with a moved, scaled or keyframed item/);
+      }
+    }
+    const dissolve = [{ ...video("v1", 0, { kind: "dissolve", duration: 30 }), transform: { scale: 0.5 } }, video("v2", 90)];
+    expect(() => planLayeredExport(project(dissolve), probes(dissolve))).not.toThrow();
+  });
   it("accepts a static mask but refuses a keyframed one", () => {
     const mask = { shape: "ellipse" as const, x: 0.2, y: 0, w: 0.6, h: 1 };
     expect(planLayeredExport(...Object.values(stacked({ mask })) as [Project, Record<string, Probe>]).video[1].item.mask).toEqual(mask);
@@ -257,7 +284,7 @@ const LAYERED_FIELDS: Record<keyof VideoItem, { handled?: unknown; refused?: unk
   keyframes: { handled: { x: [{ t: 1, v: 0 }, { t: 2, v: 5 }] }, refused: { opacity: [{ t: 1, v: 1 }] } },
   blend: { handled: "normal", refused: "multiply" },
   speed: { handled: 1, refused: 2 }, reverse: { handled: false, refused: true },
-  transition: { refused: { kind: "wipe", duration: 6 } },
+  transition: { handled: { kind: "wipe", duration: 6, direction: "up" } },
   audioFx: { refused: {} }, effects: { refused: {} }, grade: { refused: {} }, key: { refused: {} },
   crop: { refused: { left: 0.1 } }, lutKeyframes: { refused: [{ t: 0, assetId: "lut" }] },
 };

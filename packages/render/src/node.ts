@@ -218,6 +218,8 @@ export interface RenderOptions {
   onProgress?: (progress: number) => void;
   /** Optional diagnostics for experiments; observes the selected encoder without changing args. */
   onEncoding?: (args: readonly string[]) => void;
+  /** Called once, before the slower Remotion export starts, when "auto" could not use the layered route. */
+  onFallback?: (reason: string) => void;
   /** Internal cancellation hook used by background export jobs. */
   cancelSignal?: Parameters<typeof renderMedia>[0]["cancelSignal"];
   /** Internal cancellation check around preparation steps that do not accept a signal. */
@@ -242,7 +244,7 @@ export async function limit(file: string) {
 
 const defaultPipeline = () => (["remotion", "layered"] as const).find((name) => name === process.env.SPLICEWRIGHT_PIPELINE) ?? "auto";
 
-export async function render(dir: string, { output, preset, pipeline = defaultPipeline(), resources, range, onProgress, onEncoding, cancelSignal, shouldCancel }: RenderOptions) {
+export async function render(dir: string, { output, preset, pipeline = defaultPipeline(), resources, range, onProgress, onEncoding, onFallback, cancelSignal, shouldCancel }: RenderOptions) {
   if (shouldCancel?.()) throw new Error("render cancelled");
   let fallbackReason: string | undefined;
   if (pipeline !== "remotion") {
@@ -286,6 +288,7 @@ export async function render(dir: string, { output, preset, pipeline = defaultPi
       // Only a plan-time refusal falls back; a failure while exporting is real and must surface.
       if (pipeline === "layered" || !(error instanceof LayeredUnsupportedError)) throw error;
       fallbackReason = error.message;
+      onFallback?.(fallbackReason);
     }
   }
   // The software master is the only default the Remotion route has been exercised with; keep it whenever layered did not run.
@@ -358,7 +361,7 @@ export interface Job {
   progress: number;
   output: string;
   preset: string;
-  /** Which route actually ran, and why "auto" fell back to Remotion, once the render finishes. */
+  /** Which route actually ran once the render finishes; `fallbackReason` is set as soon as "auto" gives up on the layered route. */
   pipelineUsed?: "layered" | "remotion";
   fallbackReason?: string;
   finalMix?: { status: "measuring" } | ({ status: "measured"; measuredAt: string } & Awaited<ReturnType<typeof measureFinalMix>>);
@@ -378,7 +381,7 @@ export function startRender(dir: string, opts: RenderOptions): Job {
   const job: Job = { id, status: "running", progress: 0, output: opts.output, preset: opts.preset ?? "default" };
   jobs.set(job.id, job);
   controls.set(id, control);
-  render(dir, { ...opts, output: staging, cancelSignal, shouldCancel: () => control.cancelled, onProgress: (p) => (job.progress = +p.toFixed(3)) }).then(async (result) => {
+  render(dir, { ...opts, output: staging, cancelSignal, shouldCancel: () => control.cancelled, onProgress: (p) => (job.progress = +p.toFixed(3)), onFallback: (reason) => (job.fallbackReason = reason) }).then(async (result) => {
     if (control.cancelled) throw new Error("render cancelled");
     job.preset = result.preset;
     job.pipelineUsed = result.pipelineUsed;

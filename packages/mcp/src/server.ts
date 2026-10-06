@@ -454,7 +454,7 @@ export function createServer(dir: string): McpServer {
   server.registerTool(
     "render",
     {
-      description: "Start rendering to an mp4 in the background → job id; poll render_status. Range is timeline frames [from, to).",
+      description: "Start rendering to an mp4 in the background → job id; poll render_status. Range is timeline frames [from, to). The job reports `pipelineUsed` (layered is the fast route, remotion about 3x slower) and, when the fast route was refused, `fallbackReason` while it is still running.",
       inputSchema: {
         output: z.string().default("out/final.mp4").describe("Path relative to the project folder."),
         preset: z.string().optional().describe("draft, master, h264-cpu, h264-hardware, h265-hardware, or one from splicewright.config.ts. Omit for h264-hardware on macOS with VideoToolbox when the native route applies, otherwise master. Hardware modes require an available encoder."),

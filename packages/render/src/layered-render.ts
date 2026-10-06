@@ -581,6 +581,8 @@ function videoEncoder(preset: RenderPreset, threads: number) {
   return { name: codec === "h264" ? "libx264" : "libx265", options: ["-preset", "medium", "-crf", String(preset.crf), ...(codec === "h265" ? ["-x265-params", `pools=${threads}:frame-threads=${threads}`] : [])] };
 }
 
+/** Unit vector from the frame centre toward the side a transition's incoming picture enters from (Composition.tsx ENTRY). */
+const ENTRY = { left: [-1, 0], right: [1, 0], up: [0, -1], down: [0, 1] } as const;
 /** `maskInputs` maps a masked item id to the ffmpeg input holding its mask image (alpha = mask coverage, at output size). */
 export function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput: number, maskInputs: ReadonlyMap<string, number> = new Map()) {
   filters.push(`color=c=${safeColor(plan.background)}:s=${plan.width}x${plan.height}:r=${plan.fps}:d=${time(plan.to - plan.from, plan.fps)},format=rgba[bg]`);
@@ -619,13 +621,46 @@ export function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput:
     const effects: string[] = place && place.opacity !== 1 ? [`colorchannelmixer=aa=${place.opacity}`] : [];
     addVideoFade(effects, { start: segment.lead - offset, duration: item.fadeIn ?? 0, alpha: true }, plan.fps, "in");
     addVideoFade(effects, { start: segment.lead + segment.duration - (item.fadeOut ?? 0) - offset, duration: item.fadeOut ?? 0, alpha: true }, plan.fps, "out");
-    if (segment.incoming?.kind === "dissolve") addVideoFade(effects, { start: -offset, duration: segment.incoming.before + segment.incoming.after, alpha: true }, plan.fps, "in");
+    if (segment.incoming && (segment.incoming.kind === "dissolve" || segment.incoming.kind === "zoom")) addVideoFade(effects, { start: -offset, duration: segment.incoming.before + segment.incoming.after, alpha: true }, plan.fps, "in");
     const label = `vc${index}`;
-    chain.push(...effects, `trim=start=${time(preroll, plan.fps)}:duration=${time(segment.renderEnd - segment.renderStart, plan.fps)}`, "setpts=PTS-STARTPTS", `setpts=PTS+${time(segment.renderStart - plan.from, plan.fps)}/TB[${label}]`);
-    filters.push(chain.join(","));
+    // slide, push and zoom, as Composition.look() sees them: progress is 0..1 across the transition, in output seconds.
+    const progress = (startFrame: number, frames: number) => `clip((t-${time(startFrame - plan.from, plan.fps)})/${time(frames, plan.fps)},0,1)`;
+    const shift = { x: [] as string[], y: [] as string[] }, zoom: string[] = [];
+    const { incoming, outgoing } = segment;
+    if (incoming && incoming.kind !== "dip") {
+      const [vx, vy] = ENTRY[incoming.direction], t = progress(clipStart, incoming.before + incoming.after);
+      if (incoming.kind === "slide" || incoming.kind === "push") { if (vx) shift.x.push(`${vx * plan.width}*(1-${t})`); if (vy) shift.y.push(`${vy * plan.height}*(1-${t})`); }
+      if (incoming.kind === "zoom") zoom.push(`(1.25-0.25*${t})`);
+    }
+    if (outgoing && outgoing.kind !== "dip") {
+      const [vx, vy] = ENTRY[outgoing.direction], t = progress(item.start + item.duration - outgoing.before, outgoing.before + outgoing.after);
+      if (outgoing.kind === "push") { if (vx) shift.x.push(`${-vx * plan.width}*${t}`); if (vy) shift.y.push(`${-vy * plan.height}*${t}`); }
+      if (outgoing.kind === "zoom") zoom.push(`(1+0.25*${t})`);
+    }
+    chain.push(...effects, `trim=start=${time(preroll, plan.fps)}:duration=${time(segment.renderEnd - segment.renderStart, plan.fps)}`, "setpts=PTS-STARTPTS", `setpts=PTS+${time(segment.renderStart - plan.from, plan.fps)}/TB`);
+    // After the pts shift `t` is timeline time. The scale is re-evaluated per frame; the overlay then centres the scaled picture.
+    const zoomScale = zoom.length ? `scale=w='round(${plan.width}*${zoom.join("*")})':h='round(${plan.height}*${zoom.join("*")})':eval=frame` : undefined;
+    if (incoming?.kind === "wipe") {
+      // The incoming picture is revealed from the entry side: a white rectangle slides in over a transparent canvas, and its alpha,
+      // multiplied with the clip's own, is the clip's new alpha (Composition.look() clips it with an inset that shrinks the opposite side).
+      const [vx, vy] = ENTRY[incoming.direction], t = progress(clipStart, incoming.before + incoming.after);
+      const canvas = (color: string) => `color=${color}:s=${plan.width}x${plan.height}:r=${plan.fps}:d=${time(plan.to - plan.from, plan.fps)},format=rgba`;
+      filters.push([...chain, `split[wv${index}][wa${index}]`].join(","));
+      filters.push(`[wa${index}]alphaextract,format=gray[wp${index}]`);
+      filters.push(`${canvas("black@0")}[wb${index}]`, `${canvas("white")}[ww${index}]`);
+      filters.push(`[wb${index}][ww${index}]overlay=x='${vx * plan.width}*(1-${t})':y='${vy * plan.height}*(1-${t})':format=auto:eof_action=pass,format=rgba,alphaextract,format=gray[wm${index}]`);
+      filters.push(`[wp${index}][wm${index}]blend=all_mode=multiply:shortest=1[wc${index}]`);
+      filters.push(`[wv${index}][wc${index}]alphamerge${zoomScale ? `,${zoomScale}` : ""}[${label}]`);
+    } else {
+      if (zoomScale) chain.push(zoomScale);
+      chain[chain.length - 1] += `[${label}]`;
+      filters.push(chain.join(","));
+    }
     const next = `base${index}`;
     const axis = (size: number, fit: number, offset: number, keyed?: string) => keyed ? `'round(${(size - fit) / 2}+${keyed})'` : Math.round((size - fit) / 2 + offset);
-    const at = place ? `:x=${axis(plan.width, fitWidth, place.x, place.xExpr)}:y=${axis(plan.height, fitHeight, place.y, place.yExpr)}` : "";
+    const moved = (size: "main_w" | "main_h", own: "overlay_w" | "overlay_h", parts: string[]) => `'round(${[...(zoom.length ? [`(${size}-${own})/2`] : []), ...parts].join("+")})'`;
+    const at = place ? `:x=${axis(plan.width, fitWidth, place.x, place.xExpr)}:y=${axis(plan.height, fitHeight, place.y, place.yExpr)}`
+      : shift.x.length || shift.y.length || zoom.length ? `:x=${moved("main_w", "overlay_w", shift.x.length ? shift.x : ["0"])}:y=${moved("main_h", "overlay_h", shift.y.length ? shift.y : ["0"])}` : "";
     filters.push(`[${videoLabel}][${label}]overlay=format=rgb:eof_action=pass:shortest=0${at}:enable='gte(t,${time(segment.renderStart - plan.from, plan.fps)})*lt(t,${time(segment.renderEnd - plan.from, plan.fps)})'[${next}]`);
     videoLabel = next;
     index++;

@@ -1,6 +1,9 @@
 import { bezier, itemSpan, keyframeFrame, transitionOf, type AudioItem, type OverlayItem, type Project, type Track, type VideoItem } from "@splicewright/core";
 import type { Probe } from "@splicewright/core/node";
 
+/** Every kind but dip lays the incoming clip over the outgoing one across the cut. */
+export type LayeredTransitionKind = "dissolve" | "dip" | "wipe" | "slide" | "push" | "zoom";
+export type Direction = "left" | "right" | "up" | "down";
 export interface LayeredSegment {
   item: VideoItem;
   start: number;
@@ -13,8 +16,8 @@ export interface LayeredSegment {
   renderEnd: number;
   /** Earliest bounded pre-roll needed to preserve an in-progress fade at renderStart. */
   decodeStart: number;
-  incoming?: { kind: "dissolve" | "dip"; before: number; after: number };
-  outgoing?: { kind: "dissolve" | "dip"; before: number; after: number };
+  incoming?: { kind: LayeredTransitionKind; before: number; after: number; direction: Direction };
+  outgoing?: { kind: LayeredTransitionKind; before: number; after: number; direction: Direction };
   videoAudio: boolean;
   /** Present when the item is scaled, moved or faded: output pixels, offsets from the canvas centre (CSS translate-then-scale). */
   place?: { width: number; height: number; x: number; y: number; opacity: number; xExpr?: string; yExpr?: string };
@@ -35,10 +38,10 @@ export interface LayeredPlan {
 /** Audio gain timing from Composition.look(): dissolve crosses the full transition, dip only its own side. */
 export function audioTransitionFades(segment: LayeredSegment) {
   const incoming = segment.incoming
-    ? segment.incoming.kind === "dissolve" ? segment.incoming.before + segment.incoming.after : segment.incoming.after
+    ? segment.incoming.kind !== "dip" ? segment.incoming.before + segment.incoming.after : segment.incoming.after
     : undefined;
   const outgoing = segment.outgoing
-    ? { start: segment.lead + segment.duration - segment.outgoing.before, duration: segment.outgoing.kind === "dissolve" ? segment.outgoing.before + segment.outgoing.after : segment.outgoing.before }
+    ? { start: segment.lead + segment.duration - segment.outgoing.before, duration: segment.outgoing.kind !== "dip" ? segment.outgoing.before + segment.outgoing.after : segment.outgoing.before }
     : undefined;
   return { incoming, outgoing };
 }
@@ -137,20 +140,23 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
     if (!probe || probe.kind !== "video" || !probe.width || !probe.height || probe.audio === undefined) fail(`item ${item.id} needs a current video probe with dimensions and audio metadata`);
     if (probe.rotation || asset.rotation) fail(`item ${item.id} has rotated media`);
     if ((item.speed ?? 1) !== 1 || item.reverse) fail(`item ${item.id} uses speed or reverse playback`);
-    if (item.grade || item.key || item.lutKeyframes?.length || item.crop || item.effects || item.blend && item.blend !== "normal" || item.transform?.rotation || Object.keys(item.keyframes ?? {}).some((key) => key !== "x" && key !== "y"))
-      fail(`item ${item.id} uses an unsupported video look or animation`);
+    const unsupportedLook = [item.grade && "grade", item.key && "chroma key", item.lutKeyframes?.length && "LUT keyframes", item.crop && "crop", item.effects && "effects",
+      item.blend && item.blend !== "normal" && `blend ${item.blend}`, item.transform?.rotation && "rotation",
+      ...Object.keys(item.keyframes ?? {}).filter((key) => key !== "x" && key !== "y").map((key) => `keyframed ${key}`)].filter(Boolean);
+    if (unsupportedLook.length) fail(`item ${item.id} uses an unsupported video look or animation (${unsupportedLook.join(", ")})`);
     if (item.audioFx) fail(`item ${item.id} uses processed audio`);
     const affectsRange = (cut: number, transition: NonNullable<ReturnType<typeof transitionOf>>) => cut - transition.before < to && cut + transition.after > from;
     const outgoingRaw = outgoingCandidate && affectsRange(item.start + item.duration, outgoingCandidate) ? outgoingCandidate : undefined;
-    if (outgoingRaw && outgoingRaw.kind !== "dissolve" && outgoingRaw.kind !== "dip") fail(`${outgoingRaw.kind} transition on ${item.id} is unsupported`);
     const previous = ordered[index - 1];
     const incomingRaw = incomingCandidate && previous && affectsRange(previous.start + previous.duration, incomingCandidate) ? incomingCandidate : undefined;
-    if (incomingRaw && incomingRaw.kind !== "dissolve" && incomingRaw.kind !== "dip") fail(`${incomingRaw.kind} transition into ${item.id} is unsupported`);
     if (incomingRaw && incomingRaw.next.id !== item.id) fail(`overlapping video items before ${item.id} are unsupported`);
-    const incoming = incomingRaw ? { kind: incomingRaw.kind as "dissolve" | "dip", before: incomingRaw.before, after: incomingRaw.after } : undefined;
-    const outgoing = outgoingRaw ? { kind: outgoingRaw.kind as "dissolve" | "dip", before: outgoingRaw.before, after: outgoingRaw.after } : undefined;
-    const lead = incoming?.kind === "dissolve" ? incoming.before : 0;
-    const tail = outgoing?.kind === "dissolve" ? outgoing.after : 0;
+    const incoming = incomingRaw ? { kind: incomingRaw.kind as LayeredTransitionKind, before: incomingRaw.before, after: incomingRaw.after, direction: incomingRaw.direction ?? "left" } : undefined;
+    const outgoing = outgoingRaw ? { kind: outgoingRaw.kind as LayeredTransitionKind, before: outgoingRaw.before, after: outgoingRaw.after, direction: outgoingRaw.direction ?? "left" } : undefined;
+    // wipe, slide, push and zoom act on the clip's own picture; combining that with the item's own transform is not rendered yet.
+    const moving = [incoming, outgoing].find((transition) => transition && ["wipe", "slide", "push", "zoom"].includes(transition.kind));
+    if (moving && (placement(project, item, from, scale) || Object.keys(item.keyframes ?? {}).length)) fail(`${moving.kind} transition on ${item.id} cannot be combined with a moved, scaled or keyframed item`);
+    const lead = incoming && incoming.kind !== "dip" ? incoming.before : 0;
+    const tail = outgoing && outgoing.kind !== "dip" ? outgoing.after : 0;
     if (item.sourceIn - lead / project.meta.fps < -1e-6 || probe.duration !== undefined && item.sourceIn + (item.duration + tail) / project.meta.fps > probe.duration + 1e-6)
       fail(`transition handles for ${item.id} exceed its probed source range`);
     if (item.fadeIn && incoming || item.fadeOut && outgoing) fail(`item ${item.id} combines clip fades with transitions`);
@@ -162,9 +168,9 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
       const phaseWindows: [number, number][] = [];
       if (item.fadeIn) phaseWindows.push([item.start, item.start + item.fadeIn]);
       if (item.fadeOut) phaseWindows.push([item.start + item.duration - item.fadeOut, item.start + item.duration]);
-      if (incoming?.kind === "dissolve") phaseWindows.push([clipStart, clipStart + incoming.before + incoming.after]);
+      if (incoming && incoming.kind !== "dip") phaseWindows.push([clipStart, clipStart + incoming.before + incoming.after]);
       if (incoming?.kind === "dip") phaseWindows.push([item.start, item.start + incoming.after]);
-      if (outgoing) phaseWindows.push([item.start + item.duration - outgoing.before, item.start + item.duration + (outgoing.kind === "dissolve" ? outgoing.after : 0)]);
+      if (outgoing) phaseWindows.push([item.start + item.duration - outgoing.before, item.start + item.duration + (outgoing.kind !== "dip" ? outgoing.after : 0)]);
       const decodeStart = Math.min(renderStart, ...phaseWindows.filter(([start, end]) => start < renderStart && end > renderStart).map(([start]) => start));
       segments.push({ item, start: item.start, duration: item.duration, sourceIn: item.sourceIn, lead, tail, renderStart, renderEnd, decodeStart, incoming, outgoing, videoAudio: !videoTrack.muted && probe.audio === true, place: placement(project, item, from, scale) });
     }

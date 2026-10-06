@@ -11,7 +11,7 @@ import { type SearchAction, type WorkspaceCategory } from "./workspace-search.ts
 import { focusControl, type ControlLocation } from "./workspace-navigation.ts";
 import { Preview } from "./Preview.tsx";
 import { ExportControls } from "./ExportControls.tsx";
-import { exportLabel, type ExportPreset } from "../export-options.ts";
+import { exportLabel, exportRouteNote, type ExportPreset } from "../export-options.ts";
 
 // Spec §7.3 panels: media bin, player, inspector, timeline.
 
@@ -240,6 +240,7 @@ function Toolbar({ p }: { p: Project }) {
               <div className="export-job-head"><b>{exportLabel(job.preset)}</b><span>{job.status === "running" ? `${Math.round(job.progress * 100)}%` : job.status}</span></div>
               {job.status === "running" && <progress max={1} value={job.progress} />}
               <small>{job.output}</small>
+              {exportRouteNote(job) && <small className="export-route">{exportRouteNote(job)}</small>}
               {job.finalMix?.status === "measuring" && <small>Checking completed render audio…</small>}
               {job.finalMix?.status === "measured" && <small title={`Full decode and audio measurement at ${job.finalMix.measuredAt}`}>
                 {job.finalMix.audio.status === "none" ? "Render audio · no audio stream · decode checked" : `Render audio · ${job.finalMix.audio.integratedLufs === null ? "LUFS unmeasured" : `${job.finalMix.audio.integratedLufs.toFixed(1)} LUFS`} · sample ${dbfs(job.finalMix.audio.samplePeak.dbfs)} dBFS · true peak ${dbfs(job.finalMix.audio.truePeak.dbfs)} dBTP`}

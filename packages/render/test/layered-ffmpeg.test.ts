@@ -94,12 +94,59 @@ describe.skipIf(!available)("layered FFmpeg numeric acceptance", () => {
       expect(columns[0]).toBe(left); expect(columns.length).toBe(4);
     }
   });
+  describe("wipe, slide, push and zoom transitions", () => {
+    // 16x8 canvas, 30 fps. The first clip is white on top and blue below (so a shift shows), the second is red with a green left edge; the 12-frame
+    // transition is centred on the cut at frame 30, so frame 30 is halfway.
+    const render = (kind: "wipe" | "slide" | "push" | "zoom", direction: "left" | "right" | "up" | "down") => {
+      const project = createProject({ title: "transition", fps: 30, width: 16, height: 8 });
+      const items: VideoItem[] = [{ id: "first", assetId: "a", start: 0, duration: 30, sourceIn: 1, transition: { kind, duration: 12, direction } },
+        { id: "second", assetId: "b", start: 30, duration: 30, sourceIn: 1 }];
+      project.assets = { a: { id: "a", kind: "video", path: "a.mp4" }, b: { id: "b", kind: "video", path: "b.mp4" } };
+      project.tracks = [{ id: "video", kind: "video", name: "Video", items }];
+      const probes = Object.fromEntries(["a", "b"].map(id => [id, { kind: "video" as const, path: `${id}.mp4`, fingerprint: "x", width: 16, height: 8, fps: 30, duration: 4, audio: false }]));
+      const plan = planLayeredExport(project, probes), filters: string[] = [], inputs: string[] = [];
+      for (const segment of plan.video) inputs.push("-f", "lavfi", "-i", segment.item.assetId === "a" ? "color=white:s=16x8:r=30:d=3,drawbox=y=4:w=16:h=4:color=blue:t=fill" : "color=red:s=16x8:r=30:d=3,drawbox=x=0:w=1:h=8:color=green:t=fill");
+      const { videoLabel } = makeVideoChain(plan, filters, 0);
+      const pixels = ffmpeg([...inputs, "-filter_complex", filters.join(";"), "-map", `[${videoLabel}]`, "-frames:v", "60", "-threads", "2", "-pix_fmt", "rgba", "-f", "rawvideo", "-"]);
+      const raw = (frame: number, x: number, y: number) => { const at = frame * 16 * 8 * 4 + (y * 16 + x) * 4; return [pixels[at], pixels[at + 1], pixels[at + 2]]; };
+      return Object.assign((frame: number, x: number, y: number) => {
+        const [r, g, b] = raw(frame, x, y);
+        return r < 100 && g > 100 && b < 100 ? "green" : r > 200 && g < 100 && b < 100 ? "red" : r > 200 && g > 200 && b > 200 ? "white" : r < 100 && g < 100 && b > 200 ? "blue" : `rgb(${r},${g},${b})`;
+      }, { raw });
+    };
+    it("slides the incoming clip in from the entry side while the outgoing one stays put", () => {
+      const at = render("slide", "left");
+      expect([at(20, 8, 1), at(20, 8, 6), at(40, 8, 1)]).toEqual(["white", "blue", "red"]);   // before, before, after the window
+      // halfway the red clip covers the left half: it entered from the left; the right half still shows the unmoved outgoing clip
+      expect([at(30, 3, 1), at(30, 3, 6), at(30, 12, 1), at(30, 12, 6)]).toEqual(["red", "red", "white", "blue"]);
+    });
+    it("wipes the incoming clip in from the entry side, leaving the outgoing clip untouched", () => {
+      const left = render("wipe", "left"), down = render("wipe", "down");
+      expect([left(20, 8, 1), left(40, 8, 1), left(40, 15, 6)]).toEqual(["white", "red", "red"]);
+      // halfway the revealed part is the entry half of the frame and the outgoing clip is exactly where it was
+      expect([left(30, 3, 1), left(30, 3, 6), left(30, 12, 1), left(30, 12, 6)]).toEqual(["red", "red", "white", "blue"]);
+      expect([down(30, 8, 1), down(30, 8, 6), down(30, 15, 1), down(30, 15, 6)]).toEqual(["white", "red", "white", "red"]);
+    });
+    it("also pushes the outgoing clip away", () => {
+      // entering from above: halfway the red clip fills the top half; below it a slide shows the outgoing clip's own bottom (blue),
+      // while a push has moved the outgoing clip down by half a frame so its top (white) is showing there
+      expect([render("slide", "up")(30, 8, 1), render("slide", "up")(30, 8, 6)]).toEqual(["red", "blue"]);
+      expect([render("push", "up")(30, 8, 1), render("push", "up")(30, 8, 6)]).toEqual(["red", "white"]);
+    });
+    it("zooms the incoming clip down to full size while it fades in, and settles on it", () => {
+      const at = render("zoom", "left");
+      expect([at(20, 8, 1), at(40, 0, 1), at(40, 8, 1), at(40, 15, 7)]).toEqual(["white", "green", "red", "red"]);
+      // halfway the picture is 1.125x and centred, so the left edge (the green stripe, two pixels wide after 4:2:0 chroma) is pushed one
+      // pixel off the frame: column 0 is still stripe, column 1 is mostly red. Without the zoom the two columns would look the same.
+      expect(at.raw(30, 1, 1)[0] - at.raw(30, 0, 1)[0]).toBeGreaterThan(50);
+    });
+  });
   it("darkens a dip once and preserves transparent letterboxing", () => {
     const plan: LayeredPlan = {
       from: 0, to: 36, fps: 30, width: 4, height: 2, background: "#123456", audio: [], windows: [],
       video: [{ item: { id: "clip", assetId: "a", start: 0, duration: 36, sourceIn: 0, fit: "contain", fadeIn: 6 },
         start: 0, duration: 36, sourceIn: 0, lead: 0, tail: 0, renderStart: 0, renderEnd: 36, decodeStart: 0, videoAudio: false,
-        incoming: undefined, outgoing: { kind: "dip", before: 9, after: 9 } }],
+        incoming: undefined, outgoing: { kind: "dip", before: 9, after: 9, direction: "left" } }],
     };
     const filters: string[] = [];
     const { videoLabel } = makeVideoChain(plan, filters, 0);

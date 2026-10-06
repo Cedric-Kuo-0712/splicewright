@@ -112,6 +112,16 @@ describe("layered render preparation", () => {
       expect(state.layered).not.toHaveBeenCalled();
       expect(renderMedia).toHaveBeenCalledOnce();
     });
+    it("tells the caller why before Remotion starts, and stays silent when layered runs", async () => {
+      const options = setup(), onFallback = vi.fn();
+      state.layered.mockResolvedValue({ pipelineUsed: "layered" });
+      await render(root!, { ...options, onFallback });
+      expect(onFallback).not.toHaveBeenCalled();
+      (state.project!.tracks[0] as any).items[0].transform = { rotation: 45 };
+      vi.mocked(renderMedia).mockImplementationOnce((async () => { expect(onFallback).toHaveBeenCalledOnce(); }) as never);
+      await render(root!, { ...options, onFallback });
+      expect(onFallback).toHaveBeenCalledWith(expect.stringContaining("unsupported video look"));
+    });
     it("falls back when the layered encoder step reports it is unsupported", async () => {
       const options = setup();
       state.layered.mockRejectedValue(new LayeredUnsupportedError("required hardware encoder is unavailable"));

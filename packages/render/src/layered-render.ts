@@ -150,7 +150,7 @@ function activeWindowPlan(project: Project, probes: Record<string, Probe>, plan:
   if (scale !== 1 || plan.windows.length) return false;
   if (plan.video.some(segment => segment.lead || segment.tail || segment.incoming || segment.outgoing || segment.item.fadeIn || segment.item.fadeOut ||
     segment.item.speed && segment.item.speed !== 1 || segment.item.reverse || segment.item.grade || segment.item.key || segment.item.lutKeyframes?.length ||
-    segment.item.mask || segment.item.crop || segment.item.effects || segment.item.blend && segment.item.blend !== "normal" ||
+    segment.place || segment.item.mask || segment.item.crop || segment.item.effects || segment.item.blend && segment.item.blend !== "normal" ||
     Object.keys(segment.item.keyframes ?? {}).length || segment.decodeStart !== segment.renderStart ||
     probesDimensionsMismatch(project, probes, segment.item.assetId, plan.width, plan.height))) return false;
   if (!plan.video.length || plan.video[0].renderStart !== plan.from || plan.video.at(-1)!.renderEnd !== plan.to) return false;
@@ -295,6 +295,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
     throw new LayeredUnsupportedError(`estimated live graphics working set ${liveEstimate} bytes exceeds the bounded ${LAYERED_GRAPHICS_STAGING_LIMIT_BYTES}-byte limit`);
   const outputExt = extname(output) || ".mp4";
   const stagedOutput = join(dirname(output), `.${basename(output, outputExt)}.layered-${randomUUID()}${outputExt}`);
+  const maskDir = join(dirname(output), `.${basename(output, outputExt)}.masks-${randomUUID()}`);
   try {
     mkdirSync(dirname(output), { recursive: true });
     let graphicsMs = 0, graphicsProgress = plan.windows.length || activeWindowUsed ? 0 : 1, encodeProgress = 0;
@@ -376,6 +377,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
       }
     };
 
+    const maskFiles = await renderMaskImages(args, plan, maskDir);
     const inputs: string[] = [];
     const verifiedMediaCache = new Map<string, string>();
     const filters: string[] = [];
@@ -421,12 +423,17 @@ export async function renderLayered(args: LayeredRenderArgs) {
       return true;
     };
     let inputIndex = 0;
+    const maskInputs = new Map<string, number>();
     if (!activeWindowUsed) {
       for (const segment of plan.video) {
         const input = segmentInput(segment);
         inputs.push(...input.args);
         if (segment.videoAudio) addVideoAudio(segment, input.offset, inputIndex);
         inputIndex++;
+      }
+      for (const [id, file] of maskFiles) {
+        inputs.push("-loop", "1", "-framerate", String(plan.fps), "-t", time(frameCount, plan.fps), "-i", file);
+        maskInputs.set(id, inputIndex++);
       }
     }
     // Active-window: input 0 is the rawvideo pipe; audio-only inputs (-vn) follow it.
@@ -443,7 +450,7 @@ export async function renderLayered(args: LayeredRenderArgs) {
         if (addTrackAudio(entry, inputIndex, ["-vn"])) inputIndex++;
       }
     }
-    const videoChain = activeWindowUsed ? { videoLabel: "", nextInput: inputIndex } : makeVideoChain(plan, filters, 0);
+    const videoChain = activeWindowUsed ? { videoLabel: "", nextInput: inputIndex } : makeVideoChain(plan, filters, 0, maskInputs);
     if (!activeWindowUsed) {
       inputIndex = videoChain.nextInput;
       for (const entry of plan.audio) {
@@ -504,7 +511,43 @@ export async function renderLayered(args: LayeredRenderArgs) {
     return { output, frames: frameCount, preset, pipelineUsed: "layered" as const, fallbackReason: undefined, timingsMs: { graphics: Math.round(graphicsMs), encode: Math.round(encodeMs) } };
   } finally {
     rmSync(stagedOutput, { force: true });
+    rmSync(maskDir, { recursive: true, force: true });
   }
+}
+
+/**
+ * One PNG per masked video item, drawn by the preview's own mask code (Composition `maskOf`) at output size: alpha is the mask coverage.
+ * Static masks only; keyframed mask geometry is refused by the planner.
+ */
+async function renderMaskImages(args: LayeredRenderArgs, plan: LayeredPlan, dir: string) {
+  const files = new Map<string, string>();
+  const ids = [...new Set(plan.video.filter((segment) => segment.item.mask).map((segment) => segment.item.id))];
+  if (!ids.length) return files;
+  mkdirSync(dir, { recursive: true });
+  const ownsBrowser = !args.remotion.puppeteerInstance;
+  const browser = args.remotion.puppeteerInstance ?? await openBrowser("chrome", {
+    browserExecutable: args.remotion.browserExecutable, chromiumOptions: args.remotion.chromiumOptions, chromeMode: args.remotion.chromeMode, logLevel: args.remotion.logLevel,
+  });
+  try {
+    for (const id of ids) {
+      let png: Buffer | undefined;
+      await renderFrames({
+        ...args.remotion,
+        inputProps: { ...args.remotion.inputProps, maskOf: id },
+        composition: { ...args.remotion.composition, props: { ...args.remotion.composition.props, maskOf: id } },
+        outputDir: null, frames: [0], imageFormat: "png", muted: true, onStart: () => {}, concurrency: 1,
+        scale: args.presetOptions.scale ?? 1, puppeteerInstance: browser, cancelSignal: args.cancelSignal,
+        onFrameUpdate: () => {}, onFrameBuffer: (buffer) => { png = buffer; },
+      });
+      if (!png) throw new Error(`mask image for ${id} was not rendered`);
+      const file = join(dir, `${files.size}.png`);
+      writeFileSync(file, png);
+      files.set(id, file);
+    }
+  } finally {
+    if (ownsBrowser) await browser.close({ silent: true });
+  }
+  return files;
 }
 
 /**
@@ -538,7 +581,8 @@ function videoEncoder(preset: RenderPreset, threads: number) {
   return { name: codec === "h264" ? "libx264" : "libx265", options: ["-preset", "medium", "-crf", String(preset.crf), ...(codec === "h265" ? ["-x265-params", `pools=${threads}:frame-threads=${threads}`] : [])] };
 }
 
-export function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput: number) {
+/** `maskInputs` maps a masked item id to the ffmpeg input holding its mask image (alpha = mask coverage, at output size). */
+export function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput: number, maskInputs: ReadonlyMap<string, number> = new Map()) {
   filters.push(`color=c=${safeColor(plan.background)}:s=${plan.width}x${plan.height}:r=${plan.fps}:d=${time(plan.to - plan.from, plan.fps)},format=rgba[bg]`);
   let videoLabel = "bg";
   let index = firstInput;
@@ -548,17 +592,31 @@ export function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput:
     const offset = segment.decodeStart - clipStart;
     const preroll = segment.renderStart - segment.decodeStart;
     const duration = segment.renderEnd - segment.decodeStart;
+    // A scaled item is fitted straight into its final size, then positioned by the overlay below.
+    const place = segment.place;
+    const [fitWidth, fitHeight] = place ? [place.width, place.height] : [plan.width, plan.height];
     const fit = item.fit === "cover"
-      ? [`scale=${plan.width}:${plan.height}:force_original_aspect_ratio=increase`, `crop=${plan.width}:${plan.height}`]
-      : [`scale=${plan.width}:${plan.height}:force_original_aspect_ratio=decrease`, "format=rgba", `pad=${plan.width}:${plan.height}:(ow-iw)/2:(oh-ih)/2:color=black@0`];
+      ? [`scale=${fitWidth}:${fitHeight}:force_original_aspect_ratio=increase`, `crop=${fitWidth}:${fitHeight}`]
+      : [`scale=${fitWidth}:${fitHeight}:force_original_aspect_ratio=decrease`, "format=rgba", `pad=${fitWidth}:${fitHeight}:(ow-iw)/2:(oh-ih)/2:color=black@0`];
     // FFmpeg's RGB fade also fades the alpha channel on RGBA input, which
     // squares dip brightness after overlay. Darken opaque RGB before fitting
     // and adding transparency for letterboxing/dissolves/clip fades.
     const brightness: string[] = [];
     if (segment.incoming?.kind === "dip") addVideoFade(brightness, { start: -offset, duration: segment.incoming.after, color: true }, plan.fps, "in");
     if (segment.outgoing?.kind === "dip") addVideoFade(brightness, { start: segment.lead + segment.duration - segment.outgoing.before - offset, duration: segment.outgoing.before, color: true }, plan.fps, "out");
-    const chain = [`[${index}:v:0]trim=duration=${time(duration, plan.fps)}`, "setpts=PTS-STARTPTS", `fps=${plan.fps}`, "format=rgb24", ...brightness, ...fit, "setsar=1", "format=rgba"];
-    const effects: string[] = [];
+    let chain = [`[${index}:v:0]trim=duration=${time(duration, plan.fps)}`, "setpts=PTS-STARTPTS", `fps=${plan.fps}`, "format=rgb24", ...brightness, ...fit, "setsar=1", "format=rgba"];
+    if (item.mask) {
+      // The mask applies to the fitted picture before it is scaled and moved, like Composition.tsx. Multiply with the picture's own
+      // alpha so letterbox padding stays transparent, then merge the product back.
+      const maskInput = maskInputs.get(item.id);
+      if (maskInput === undefined) throw new Error(`layered export has no mask image for ${item.id}`);
+      filters.push([...chain, `split[mkv${index}][mka${index}]`].join(","));
+      filters.push(`[mka${index}]alphaextract[mkp${index}]`);
+      filters.push(`[${maskInput}:v:0]scale=${fitWidth}:${fitHeight},format=rgba,alphaextract[mks${index}]`);
+      filters.push(`[mkp${index}][mks${index}]blend=all_mode=multiply[mkc${index}]`);
+      chain = [`[mkv${index}][mkc${index}]alphamerge`];
+    }
+    const effects: string[] = place && place.opacity !== 1 ? [`colorchannelmixer=aa=${place.opacity}`] : [];
     addVideoFade(effects, { start: segment.lead - offset, duration: item.fadeIn ?? 0, alpha: true }, plan.fps, "in");
     addVideoFade(effects, { start: segment.lead + segment.duration - (item.fadeOut ?? 0) - offset, duration: item.fadeOut ?? 0, alpha: true }, plan.fps, "out");
     if (segment.incoming?.kind === "dissolve") addVideoFade(effects, { start: -offset, duration: segment.incoming.before + segment.incoming.after, alpha: true }, plan.fps, "in");
@@ -566,9 +624,11 @@ export function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput:
     chain.push(...effects, `trim=start=${time(preroll, plan.fps)}:duration=${time(segment.renderEnd - segment.renderStart, plan.fps)}`, "setpts=PTS-STARTPTS", `setpts=PTS+${time(segment.renderStart - plan.from, plan.fps)}/TB[${label}]`);
     filters.push(chain.join(","));
     const next = `base${index}`;
-    filters.push(`[${videoLabel}][${label}]overlay=format=rgb:eof_action=pass:shortest=0:enable='gte(t,${time(segment.renderStart - plan.from, plan.fps)})*lt(t,${time(segment.renderEnd - plan.from, plan.fps)})'[${next}]`);
+    const axis = (size: number, fit: number, offset: number, keyed?: string) => keyed ? `'round(${(size - fit) / 2}+${keyed})'` : Math.round((size - fit) / 2 + offset);
+    const at = place ? `:x=${axis(plan.width, fitWidth, place.x, place.xExpr)}:y=${axis(plan.height, fitHeight, place.y, place.yExpr)}` : "";
+    filters.push(`[${videoLabel}][${label}]overlay=format=rgb:eof_action=pass:shortest=0${at}:enable='gte(t,${time(segment.renderStart - plan.from, plan.fps)})*lt(t,${time(segment.renderEnd - plan.from, plan.fps)})'[${next}]`);
     videoLabel = next;
     index++;
   }
-  return { nextInput: index, videoLabel };
+  return { nextInput: Math.max(index, ...[...maskInputs.values()].map((input) => input + 1)), videoLabel };
 }

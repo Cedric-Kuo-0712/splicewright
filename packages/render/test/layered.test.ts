@@ -3,9 +3,9 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fingerprint } from "@splicewright/core/node";
-import type { AudioItem, Project, Track, VideoItem } from "@splicewright/core";
+import { valueAt, VideoItem, type AudioItem, type Project, type Track } from "@splicewright/core";
 import type { Probe } from "@splicewright/core/node";
-import { audioTransitionFades, planLayeredExport, staticRuns } from "../src/layered.ts";
+import { audioTransitionFades, LayeredUnsupportedError, planLayeredExport, staticRuns } from "../src/layered.ts";
 import { renderLayered, validateLayeredMedia, type LayeredRenderArgs } from "../src/layered-render.ts";
 
 const video = (id: string, start: number, transition?: VideoItem["transition"]): VideoItem => ({ id, assetId: `a_${id}`, start, duration: 90, sourceIn: 1, transition });
@@ -193,6 +193,88 @@ describe("layered export planning", () => {
   ] as const)("refuses %s", (_name, mutate) => {
     const p = mutate(project()) as Project;
     expect(() => planLayeredExport(p, probes([video("v1", 0), video("v2", 90)]))).toThrow("layered export unsupported:");
+  });
+});
+
+describe("stacked video tracks", () => {
+  const stacked = (top: Partial<VideoItem> = {}, more: Track[] = []) => {
+    const base = video("base", 0), pip = { ...video("pip", 30), assetId: "a_pip", duration: 60, ...top };
+    const p = project([base], more);
+    p.assets.a_pip = { id: "a_pip", kind: "video", path: "raw/a_pip.mp4" } as any;
+    p.tracks.splice(1, 0, { id: "video2", name: "V2", kind: "video", items: [pip] } as any);
+    return { p, probes: probes([base, pip]) };
+  };
+  it("lists segments from the bottom track to the top so later overlays sit above earlier ones", () => {
+    const { p, probes: probe } = stacked();
+    expect(planLayeredExport(p, probe).video.map((segment) => segment.item.id)).toEqual(["base", "pip"]);
+  });
+  it("places a scaled item by its centre offset, scaling x and y with the draft scale", () => {
+    const { p, probes: probe } = stacked({ transform: { x: 10, y: -4, scale: 0.5, opacity: 0.5 } });
+    expect(planLayeredExport(p, probe).video[1].place).toEqual({ width: 32, height: 18, x: 10, y: -4, opacity: 0.5 });
+    expect(planLayeredExport(p, probe, 0, 90, 0.5).video[1].place).toEqual({ width: 16, height: 9, x: 5, y: -2, opacity: 0.5 });
+    expect(planLayeredExport(p, probe).video[0].place).toBeUndefined();
+  });
+  it("turns keyed x and y into an expression that agrees with the preview's valueAt on every frame", () => {
+    const keys = [{ t: 1, v: -40, ease: "ease" as const }, { t: 2, v: 20, ease: [0.42, 0, 0.58, 1] as [number, number, number, number] }, { t: 3, v: 60 }];
+    const { p, probes: probe } = stacked({ keyframes: { x: keys, y: [{ t: 1, v: 10 }, { t: 3, v: -30 }] } } as Partial<VideoItem>);
+    const item = p.tracks[1].items[0] as VideoItem, place = planLayeredExport(p, probe).video[1].place!;
+    const clip = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
+    const evaluate = (expression: string, frame: number) => new Function("clip", "t", `return ${expression}`)(clip, frame / 30) as number;
+    let worst = 0;
+    for (let frame = 30; frame < 90; frame++) {
+      worst = Math.max(worst, Math.abs(evaluate(place.xExpr!, frame) - valueAt(p, item, "x", frame)!), Math.abs(evaluate(place.yExpr!, frame) - valueAt(p, item, "y", frame)!));
+    }
+    expect(worst).toBeLessThan(0.5);
+    expect(planLayeredExport(p, probe, 0, 90, 0.5).video[1].place!.xExpr).not.toBe(place.xExpr);
+  });
+  it("accepts a static mask but refuses a keyframed one", () => {
+    const mask = { shape: "ellipse" as const, x: 0.2, y: 0, w: 0.6, h: 1 };
+    expect(planLayeredExport(...Object.values(stacked({ mask })) as [Project, Record<string, Probe>]).video[1].item.mask).toEqual(mask);
+    expect(() => planLayeredExport(...Object.values(stacked({ mask, keyframes: { maskX: [{ t: 1, v: 0 }, { t: 2, v: 0.2 }] } } as Partial<VideoItem>)) as [Project, Record<string, Probe>])).toThrow(/unsupported video look/);
+  });
+  it("refuses rotation, keyframed transforms and graphics below the top video track", () => {
+    expect(() => planLayeredExport(...Object.values(stacked({ transform: { rotation: 10 } })) as [Project, Record<string, Probe>])).toThrow(/unsupported video look/);
+    expect(() => planLayeredExport(...Object.values(stacked({ keyframes: { opacity: [{ t: 0, v: 1 }] } } as Partial<VideoItem>)) as [Project, Record<string, Probe>])).toThrow(/unsupported video look/);
+    const below = { id: "o", kind: "overlay", name: "O", items: [{ id: "t", start: 0, duration: 30, component: "Text", props: { text: "x" } }] } as unknown as Track;
+    const { p, probes: probe } = stacked();
+    p.tracks.splice(1, 0, below);
+    expect(() => planLayeredExport(p, probe)).toThrow(/below the video track/);
+  });
+});
+
+/**
+ * Every VideoItem field must say what the layered route does with it. The planner refuses by naming fields, so a field added to the
+ * schema later would otherwise be silently dropped from layered exports while the preview and the Remotion route still apply it.
+ * `handled`: a sample value the layered route renders; `refused`: a sample value that makes it fall back to Remotion. A field may
+ * have both (a transform without rotation is handled, with rotation it is refused). Both samples are checked against the planner.
+ */
+const LAYERED_FIELDS: Record<keyof VideoItem, { handled?: unknown; refused?: unknown }> = {
+  id: { handled: "v1" }, start: { handled: 0 }, duration: { handled: 90 }, label: { handled: "x" }, note: { handled: "x" },
+  assetId: { handled: "a_v1" }, sourceIn: { handled: 1 }, role: { handled: "x" },
+  volume: { handled: 0.5 }, fit: { handled: "cover" }, fadeIn: { handled: 6 }, fadeOut: { handled: 6 },
+  transform: { handled: { x: 5, y: -5, scale: 0.5, opacity: 0.5 }, refused: { rotation: 10 } },
+  mask: { handled: { shape: "ellipse", x: 0.1, y: 0.1, w: 0.8, h: 0.8 } },
+  keyframes: { handled: { x: [{ t: 1, v: 0 }, { t: 2, v: 5 }] }, refused: { opacity: [{ t: 1, v: 1 }] } },
+  blend: { handled: "normal", refused: "multiply" },
+  speed: { handled: 1, refused: 2 }, reverse: { handled: false, refused: true },
+  transition: { refused: { kind: "wipe", duration: 6 } },
+  audioFx: { refused: {} }, effects: { refused: {} }, grade: { refused: {} }, key: { refused: {} },
+  crop: { refused: { left: 0.1 } }, lutKeyframes: { refused: [{ t: 0, assetId: "lut" }] },
+};
+describe("layered route covers every VideoItem field", () => {
+  const plan = (patch: Record<string, unknown>) => {
+    const items = [{ ...video("v1", 0), ...patch } as VideoItem, video("v2", 90)];
+    return () => planLayeredExport(project(items), probes(items));
+  };
+  it("classifies each schema field, and nothing the schema no longer has", () => {
+    expect(Object.keys(LAYERED_FIELDS).sort()).toEqual(Object.keys(VideoItem.shape).sort());
+    for (const [field, entry] of Object.entries(LAYERED_FIELDS)) expect(entry.handled !== undefined || entry.refused !== undefined, field).toBe(true);
+  });
+  it.each(Object.entries(LAYERED_FIELDS).filter(([, entry]) => entry.handled !== undefined))("renders %s", (field, entry) => {
+    expect(plan({ [field]: entry.handled })).not.toThrow();
+  });
+  it.each(Object.entries(LAYERED_FIELDS).filter(([, entry]) => entry.refused !== undefined))("falls back to Remotion for %s", (field, entry) => {
+    expect(plan({ [field]: entry.refused })).toThrow(LayeredUnsupportedError);
   });
 });
 

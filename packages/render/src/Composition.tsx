@@ -43,6 +43,8 @@ export interface Props extends Record<string, unknown> {
   sampleItemId?: string;
   /** Internal export mode: render the existing React graphics with alpha, without media layers. */
   graphicsOnly?: boolean;
+  /** Internal export mode: draw only this video item's mask as white-on-transparent, so the layered export can reuse the preview's mask geometry. */
+  maskOf?: string;
   /** Carried through so the Node side can read config presets via selectComposition(). */
   presets?: Config["presets"];
 }
@@ -507,7 +509,17 @@ const OverlayLayer: React.FC<{ p: Project; item: OverlayItem; from: number; C: R
   return <AbsoluteFill style={{ ...style, ...(animated.mask && maskStyle(animated.mask, [p.meta.width, p.meta.height], [p.meta.width, p.meta.height])) }}>{layer}</AbsoluteFill>;
 };
 
-export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, durations = {}, frameRates = {}, reverseProxies, reverseAudioFx, animated = {}, words = {}, luts = {}, audioFx, fontVersions, sampleItemId, graphicsOnly = false, components }) => {
+export const SplicewrightProject: React.FC<Props & { components?: Config["components"] }> = ({ project: p, duck = {}, sizes = {}, durations = {}, frameRates = {}, reverseProxies, reverseAudioFx, animated = {}, words = {}, luts = {}, audioFx, fontVersions, sampleItemId, graphicsOnly = false, maskOf, components }) => {
+  if (maskOf) {
+    const item = p.tracks.flatMap((t) => (t.kind === "video" ? t.items : [])).find((v) => v.id === maskOf);
+    if (!item?.mask) throw new Error(`maskOf ${maskOf} is not a masked video item`);
+    // Same wrapper geometry as Video(): a canvas-sized box carrying maskStyle over the fitted picture.
+    return (
+      <AbsoluteFill style={{ backgroundColor: "transparent", ...center }}>
+        <div style={{ ...center, display: "flex", width: p.meta.width, height: p.meta.height, flexShrink: 0, background: "#fff", ...maskStyle(item.mask, [p.meta.width, p.meta.height], mediaBox(p, item, sizes[item.assetId]).display) }} />
+      </AbsoluteFill>
+    );
+  }
   const registry: Record<string, React.ComponentType<any>> = { Text, Image, Sticker, CaptionLayer, ...components };
   const component = (name: string, where: string) => {
     const C = registry[name];

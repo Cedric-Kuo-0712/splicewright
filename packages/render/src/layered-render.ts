@@ -150,7 +150,7 @@ function activeWindowPlan(project: Project, probes: Record<string, Probe>, plan:
   if (scale !== 1 || plan.windows.length) return false;
   if (plan.video.some(segment => segment.lead || segment.tail || segment.incoming || segment.outgoing || segment.item.fadeIn || segment.item.fadeOut ||
     segment.item.speed && segment.item.speed !== 1 || segment.item.reverse || segment.item.grade || segment.item.key || segment.item.lutKeyframes?.length ||
-    segment.place || segment.item.mask || segment.item.crop || segment.item.effects || segment.item.blend && segment.item.blend !== "normal" ||
+    segment.place || segment.item.mask || segment.shape || segment.item.effects || segment.item.blend && segment.item.blend !== "normal" ||
     Object.keys(segment.item.keyframes ?? {}).length || segment.decodeStart !== segment.renderStart ||
     probesDimensionsMismatch(project, probes, segment.item.assetId, plan.width, plan.height))) return false;
   if (!plan.video.length || plan.video[0].renderStart !== plan.from || plan.video.at(-1)!.renderEnd !== plan.to) return false;
@@ -597,16 +597,31 @@ export function makeVideoChain(plan: LayeredPlan, filters: string[], firstInput:
     // A scaled item is fitted straight into its final size, then positioned by the overlay below.
     const place = segment.place;
     const [fitWidth, fitHeight] = place ? [place.width, place.height] : [plan.width, plan.height];
+    // A quarter turn fits the picture to the swapped box first (Composition.tsx re-fits the rotated element), then turns it.
+    const shape = segment.shape;
+    const [elWidth, elHeight] = shape?.turn ? [fitHeight, fitWidth] : [fitWidth, fitHeight];
     const fit = item.fit === "cover"
-      ? [`scale=${fitWidth}:${fitHeight}:force_original_aspect_ratio=increase`, `crop=${fitWidth}:${fitHeight}`]
-      : [`scale=${fitWidth}:${fitHeight}:force_original_aspect_ratio=decrease`, "format=rgba", `pad=${fitWidth}:${fitHeight}:(ow-iw)/2:(oh-ih)/2:color=black@0`];
+      ? [`scale=${elWidth}:${elHeight}:force_original_aspect_ratio=increase`, `crop=${elWidth}:${elHeight}`]
+      : [`scale=${elWidth}:${elHeight}:force_original_aspect_ratio=decrease`, "format=rgba", `pad=${elWidth}:${elHeight}:(ow-iw)/2:(oh-ih)/2:color=black@0`];
+    // Crop clears the outer strips to transparent; CSS rotation is clockwise, like ffmpeg's rotate and transpose=1.
+    const shaped: string[] = [];
+    if (shape?.crop) {
+      const { left, right, top, bottom } = shape.crop, n = (v: number) => v.toFixed(6), clear = (box: string) => `drawbox=${box}:color=black@0:t=fill:replace=1`;
+      if (left > 0) shaped.push(clear(`x=0:y=0:w=iw*${n(left)}:h=ih`));
+      if (right > 0) shaped.push(clear(`x=iw*${n(1 - right)}:y=0:w=iw*${n(right)}:h=ih`));
+      if (top > 0) shaped.push(clear(`x=0:y=0:w=iw:h=ih*${n(top)}`));
+      if (bottom > 0) shaped.push(clear(`x=0:y=ih*${n(1 - bottom)}:w=iw:h=ih*${n(bottom)}`));
+    }
+    if (shape?.turn) shaped.push(`transpose=${shape.turn === 1 ? 1 : 2}`);
+    else if (shape?.angle === 180) shaped.push("hflip", "vflip");
+    else if (shape?.angle) shaped.push(`rotate=a=${(shape.angle * Math.PI / 180).toFixed(9)}:ow=iw:oh=ih:c=black@0`);
     // FFmpeg's RGB fade also fades the alpha channel on RGBA input, which
     // squares dip brightness after overlay. Darken opaque RGB before fitting
     // and adding transparency for letterboxing/dissolves/clip fades.
     const brightness: string[] = [];
     if (segment.incoming?.kind === "dip") addVideoFade(brightness, { start: -offset, duration: segment.incoming.after, color: true }, plan.fps, "in");
     if (segment.outgoing?.kind === "dip") addVideoFade(brightness, { start: segment.lead + segment.duration - segment.outgoing.before - offset, duration: segment.outgoing.before, color: true }, plan.fps, "out");
-    let chain = [`[${index}:v:0]trim=duration=${time(duration, plan.fps)}`, "setpts=PTS-STARTPTS", `fps=${plan.fps}`, "format=rgb24", ...brightness, ...fit, "setsar=1", "format=rgba"];
+    let chain = [`[${index}:v:0]trim=duration=${time(duration, plan.fps)}`, "setpts=PTS-STARTPTS", `fps=${plan.fps}`, "format=rgb24", ...brightness, ...fit, "setsar=1", "format=rgba", ...shaped];
     if (item.mask) {
       // The mask applies to the fitted picture before it is scaled and moved, like Composition.tsx. Multiply with the picture's own
       // alpha so letterbox padding stays transparent, then merge the product back.

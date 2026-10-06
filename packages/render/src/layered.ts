@@ -1,5 +1,6 @@
 import { bezier, itemSpan, keyframeFrame, transitionOf, type AudioItem, type OverlayItem, type Project, type Track, type VideoItem } from "@splicewright/core";
 import type { Probe } from "@splicewright/core/node";
+import { mediaBox } from "./geometry.ts";
 
 /** Every kind but dip lays the incoming clip over the outgoing one across the cut. */
 export type LayeredTransitionKind = "dissolve" | "dip" | "wipe" | "slide" | "push" | "zoom";
@@ -21,6 +22,8 @@ export interface LayeredSegment {
   videoAudio: boolean;
   /** Present when the item is scaled, moved or faded: output pixels, offsets from the canvas centre (CSS translate-then-scale). */
   place?: { width: number; height: number; x: number; y: number; opacity: number; xExpr?: string; yExpr?: string };
+  /** Crop and rotation act on the fitted picture before it is placed, as in Composition.tsx. */
+  shape?: { crop?: { left: number; top: number; right: number; bottom: number }; turn: 0 | 1 | 2 | 3; angle: number };
 }
 
 export interface LayeredPlan {
@@ -102,6 +105,23 @@ function placement(project: Project, item: VideoItem, from: number, scale: numbe
   return { width: Math.max(2, Math.round(project.meta.width * scale * zoom)), height: Math.max(2, Math.round(project.meta.height * scale * zoom)), x: x * scale, y: y * scale, opacity, xExpr, yExpr };
 }
 
+/**
+ * Composition.tsx clips the picture with `inset()` on the (possibly quarter-turned) media element, then rotates that element about
+ * its centre. Crop is returned as the fractions of the element box to clear on each side, so the filter graph needs no pixel sizes.
+ * A quarter turn swaps the element's width and height (mediaBox), so the picture is fitted to the swapped box and then turned.
+ */
+function shapeOf(project: Project, item: VideoItem, probe: Probe): LayeredSegment["shape"] {
+  // Whole turns and all-zero crops change nothing, so they must not count as a shape (it would also close the active-window path).
+  const rot = (((item.transform?.rotation ?? 0) % 360) + 360) % 360;
+  const c = item.crop && (item.crop.left || item.crop.top || item.crop.right || item.crop.bottom) ? item.crop : undefined;
+  if (!c && !rot) return undefined;
+  const box = mediaBox(project, item, [probe.width!, probe.height!]);
+  const [ox, oy] = [(box.ew - box.vw) / 2, (box.eh - box.vh) / 2];
+  const crop = c && { left: (ox + (c.left ?? 0) * box.vw) / box.ew, right: (ox + (c.right ?? 0) * box.vw) / box.ew, top: (oy + (c.top ?? 0) * box.vh) / box.eh, bottom: (oy + (c.bottom ?? 0) * box.vh) / box.eh };
+  const quarter = rot % 180 === 90;
+  return { crop, turn: quarter ? ((rot / 90) as 1 | 3) : 0, angle: quarter ? 0 : rot };
+}
+
 /** Conservative eligibility and frame mapping for the experimental native-video/Remotion-graphics path. */
 export function planLayeredExport(project: Project, probes: Record<string, Probe>, from = 0, to = timelineEnd(project), scale = 1): LayeredPlan {
   if (!Number.isFinite(scale) || scale <= 0) fail("output scale must be positive");
@@ -140,8 +160,8 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
     if (!probe || probe.kind !== "video" || !probe.width || !probe.height || probe.audio === undefined) fail(`item ${item.id} needs a current video probe with dimensions and audio metadata`);
     if (probe.rotation || asset.rotation) fail(`item ${item.id} has rotated media`);
     if ((item.speed ?? 1) !== 1 || item.reverse) fail(`item ${item.id} uses speed or reverse playback`);
-    const unsupportedLook = [item.grade && "grade", item.key && "chroma key", item.lutKeyframes?.length && "LUT keyframes", item.crop && "crop", item.effects && "effects",
-      item.blend && item.blend !== "normal" && `blend ${item.blend}`, item.transform?.rotation && "rotation",
+    const unsupportedLook = [item.grade && "grade", item.key && "chroma key", item.lutKeyframes?.length && "LUT keyframes", item.effects && "effects",
+      item.blend && item.blend !== "normal" && `blend ${item.blend}`,
       ...Object.keys(item.keyframes ?? {}).filter((key) => key !== "x" && key !== "y").map((key) => `keyframed ${key}`)].filter(Boolean);
     if (unsupportedLook.length) fail(`item ${item.id} uses an unsupported video look or animation (${unsupportedLook.join(", ")})`);
     if (item.audioFx) fail(`item ${item.id} uses processed audio`);
@@ -172,7 +192,7 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
       if (incoming?.kind === "dip") phaseWindows.push([item.start, item.start + incoming.after]);
       if (outgoing) phaseWindows.push([item.start + item.duration - outgoing.before, item.start + item.duration + (outgoing.kind !== "dip" ? outgoing.after : 0)]);
       const decodeStart = Math.min(renderStart, ...phaseWindows.filter(([start, end]) => start < renderStart && end > renderStart).map(([start]) => start));
-      segments.push({ item, start: item.start, duration: item.duration, sourceIn: item.sourceIn, lead, tail, renderStart, renderEnd, decodeStart, incoming, outgoing, videoAudio: !videoTrack.muted && probe.audio === true, place: placement(project, item, from, scale) });
+      segments.push({ item, start: item.start, duration: item.duration, sourceIn: item.sourceIn, lead, tail, renderStart, renderEnd, decodeStart, incoming, outgoing, videoAudio: !videoTrack.muted && probe.audio === true, place: placement(project, item, from, scale), shape: shapeOf(project, item, probe) });
     }
   }
   }

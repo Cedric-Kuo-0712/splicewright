@@ -230,7 +230,7 @@ describe("stacked video tracks", () => {
   });
   it("names what it cannot render so the fallback reason says which feature to build next", () => {
     const reason = (top: Partial<VideoItem>) => { try { planLayeredExport(...Object.values(stacked(top)) as [Project, Record<string, Probe>]); } catch (error) { return (error as Error).message; } };
-    expect(reason({ transform: { rotation: 10 }, crop: { left: 0.1 } })).toMatch(/\(crop, rotation\)$/);
+    expect(reason({ effects: { blur: 4 }, blend: "screen" } as Partial<VideoItem>)).toMatch(/\(effects, blend screen\)$/);
     expect(reason({ keyframes: { opacity: [{ t: 1, v: 1 }], maskX: [{ t: 1, v: 0 }] } } as Partial<VideoItem>)).toMatch(/\(keyframed opacity, keyframed maskX\)$/);
     expect(reason({ blend: "multiply" })).toMatch(/\(blend multiply\)$/);
   });
@@ -259,8 +259,24 @@ describe("stacked video tracks", () => {
     expect(planLayeredExport(...Object.values(stacked({ mask })) as [Project, Record<string, Probe>]).video[1].item.mask).toEqual(mask);
     expect(() => planLayeredExport(...Object.values(stacked({ mask, keyframes: { maskX: [{ t: 1, v: 0 }, { t: 2, v: 0.2 }] } } as Partial<VideoItem>)) as [Project, Record<string, Probe>])).toThrow(/unsupported video look/);
   });
-  it("refuses rotation, keyframed transforms and graphics below the top video track", () => {
-    expect(() => planLayeredExport(...Object.values(stacked({ transform: { rotation: 10 } })) as [Project, Record<string, Probe>])).toThrow(/unsupported video look/);
+  it("plans crop and rotation as picture shape, and refuses keyframed transforms and graphics below the top video track", () => {
+    // 1920x1080 picture in a 1920x1080 canvas: a left crop of 0.1 clears 10% of the element box; a 90 degree turn is a quarter turn.
+    const crop = planLayeredExport(...Object.values(stacked({ crop: { left: 0.1, bottom: 0.25 } })) as [Project, Record<string, Probe>]).video[1].shape!;
+    expect(crop.crop).toMatchObject({ left: expect.closeTo(0.1, 6), bottom: expect.closeTo(0.25, 6), right: 0, top: 0 });
+    expect(crop).toMatchObject({ turn: 0, angle: 0 });
+    expect(planLayeredExport(...Object.values(stacked({ transform: { rotation: 90 } })) as [Project, Record<string, Probe>]).video[1].shape).toMatchObject({ turn: 1, angle: 0 });
+    expect(planLayeredExport(...Object.values(stacked({ transform: { rotation: -90 } })) as [Project, Record<string, Probe>]).video[1].shape).toMatchObject({ turn: 3 });
+    expect(planLayeredExport(...Object.values(stacked({ transform: { rotation: 10 } })) as [Project, Record<string, Probe>]).video[1].shape).toMatchObject({ turn: 0, angle: 10 });
+    // Whole turns and empty crops are no shape at all (they must not close the active-window path); other angles normalise into 0..360.
+    const shapeOfTop = (top: Partial<VideoItem>) => planLayeredExport(...Object.values(stacked(top)) as [Project, Record<string, Probe>]).video[1].shape;
+    expect(shapeOfTop({ transform: { rotation: 360 } })).toBeUndefined();
+    expect(shapeOfTop({ transform: { rotation: -720 } })).toBeUndefined();
+    expect(shapeOfTop({ crop: {} })).toBeUndefined();
+    expect(shapeOfTop({ crop: { left: 0, top: 0 } })).toBeUndefined();
+    expect(shapeOfTop({ transform: { rotation: 450 } })).toMatchObject({ turn: 1, angle: 0 });
+    expect(shapeOfTop({ transform: { rotation: -270 } })).toMatchObject({ turn: 1, angle: 0 });
+    expect(shapeOfTop({ transform: { rotation: 540 } })).toMatchObject({ turn: 0, angle: 180 });
+    expect(shapeOfTop({ transform: { rotation: -10 } })).toMatchObject({ turn: 0, angle: 350 });
     expect(() => planLayeredExport(...Object.values(stacked({ keyframes: { opacity: [{ t: 0, v: 1 }] } } as Partial<VideoItem>)) as [Project, Record<string, Probe>])).toThrow(/unsupported video look/);
     const below = { id: "o", kind: "overlay", name: "O", items: [{ id: "t", start: 0, duration: 30, component: "Text", props: { text: "x" } }] } as unknown as Track;
     const { p, probes: probe } = stacked();
@@ -273,20 +289,20 @@ describe("stacked video tracks", () => {
  * Every VideoItem field must say what the layered route does with it. The planner refuses by naming fields, so a field added to the
  * schema later would otherwise be silently dropped from layered exports while the preview and the Remotion route still apply it.
  * `handled`: a sample value the layered route renders; `refused`: a sample value that makes it fall back to Remotion. A field may
- * have both (a transform without rotation is handled, with rotation it is refused). Both samples are checked against the planner.
+ * have both (keyframes: x/y are handled, other keys refused). Both samples are checked against the planner.
  */
 const LAYERED_FIELDS: Record<keyof VideoItem, { handled?: unknown; refused?: unknown }> = {
   id: { handled: "v1" }, start: { handled: 0 }, duration: { handled: 90 }, label: { handled: "x" }, note: { handled: "x" },
   assetId: { handled: "a_v1" }, sourceIn: { handled: 1 }, role: { handled: "x" },
   volume: { handled: 0.5 }, fit: { handled: "cover" }, fadeIn: { handled: 6 }, fadeOut: { handled: 6 },
-  transform: { handled: { x: 5, y: -5, scale: 0.5, opacity: 0.5 }, refused: { rotation: 10 } },
+  transform: { handled: { x: 5, y: -5, scale: 0.5, opacity: 0.5, rotation: 10 } },
   mask: { handled: { shape: "ellipse", x: 0.1, y: 0.1, w: 0.8, h: 0.8 } },
   keyframes: { handled: { x: [{ t: 1, v: 0 }, { t: 2, v: 5 }] }, refused: { opacity: [{ t: 1, v: 1 }] } },
   blend: { handled: "normal", refused: "multiply" },
   speed: { handled: 1, refused: 2 }, reverse: { handled: false, refused: true },
   transition: { handled: { kind: "wipe", duration: 6, direction: "up" } },
   audioFx: { refused: {} }, effects: { refused: {} }, grade: { refused: {} }, key: { refused: {} },
-  crop: { refused: { left: 0.1 } }, lutKeyframes: { refused: [{ t: 0, assetId: "lut" }] },
+  crop: { handled: { left: 0.1, top: 0.2 } }, lutKeyframes: { refused: [{ t: 0, assetId: "lut" }] },
 };
 describe("layered route covers every VideoItem field", () => {
   const plan = (patch: Record<string, unknown>) => {

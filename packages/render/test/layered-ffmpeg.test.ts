@@ -36,6 +36,64 @@ describe.skipIf(!available)("layered FFmpeg numeric acceptance", () => {
     expect(partial.length).toBe(4 * 4 * 2 * 4);
     expect(partial.equals(full.subarray(19 * 32, 23 * 32))).toBe(true);
   });
+  it("composites a scaled, offset and half-transparent upper track over the base", () => {
+    // 8x4 canvas; the red upper clip is drawn at half size (4x2), centre moved right by 2, over a white base.
+    const plan: LayeredPlan = {
+      from: 0, to: 3, fps: 30, width: 8, height: 4, background: "#000000", audio: [], windows: [],
+      video: [
+        { item: { id: "base", assetId: "a", start: 0, duration: 3, sourceIn: 0 }, start: 0, duration: 3, sourceIn: 0, lead: 0, tail: 0, renderStart: 0, renderEnd: 3, decodeStart: 0, videoAudio: false },
+        { item: { id: "pip", assetId: "b", start: 0, duration: 3, sourceIn: 0 }, start: 0, duration: 3, sourceIn: 0, lead: 0, tail: 0, renderStart: 0, renderEnd: 3, decodeStart: 0, videoAudio: false,
+          place: { width: 4, height: 2, x: 2, y: 0, opacity: 0.5 } },
+      ],
+    };
+    const filters: string[] = [];
+    const { videoLabel } = makeVideoChain(plan, filters, 0);
+    const pixels = ffmpeg(["-f", "lavfi", "-i", "color=white:s=8x4:r=30:d=1", "-f", "lavfi", "-i", "color=red:s=8x4:r=30:d=1", "-filter_complex", filters.join(";"), "-map", `[${videoLabel}]`, "-frames:v", "1", "-threads", "2", "-pix_fmt", "rgba", "-f", "rawvideo", "-"]);
+    const at = (x: number, y: number) => [...pixels.subarray((y * 8 + x) * 4, (y * 8 + x) * 4 + 3)];
+    const white = (x: number, y: number) => at(x, y).forEach((value) => expect(Math.abs(value - 255)).toBeLessThanOrEqual(3));
+    white(0, 0); white(7, 3);                            // outside the item: base only
+    // item box is x 4..7, y 1..2 (centre 4+2 = 6 across, 2 down)
+    for (const [x, y] of [[4, 1], [7, 2]]) { const [r, g, b] = at(x, y); expect(Math.abs(r - 255)).toBeLessThanOrEqual(3); expect(Math.abs(g - 128)).toBeLessThanOrEqual(2); expect(Math.abs(b - 128)).toBeLessThanOrEqual(2); }
+    white(3, 1);                                         // just left of the box
+    white(4, 0);                                         // just above the box
+  });
+  it("clips an upper track with a mask image's alpha and keeps its own transparency", () => {
+    // 8x4 canvas, red upper clip over white; the mask image is opaque on its right half only.
+    const plan: LayeredPlan = {
+      from: 0, to: 3, fps: 30, width: 8, height: 4, background: "#000000", audio: [], windows: [],
+      video: [
+        { item: { id: "base", assetId: "a", start: 0, duration: 3, sourceIn: 0 }, start: 0, duration: 3, sourceIn: 0, lead: 0, tail: 0, renderStart: 0, renderEnd: 3, decodeStart: 0, videoAudio: false },
+        { item: { id: "pip", assetId: "b", start: 0, duration: 3, sourceIn: 0, mask: { shape: "rect", x: 0.5, y: 0, w: 0.5, h: 1 } }, start: 0, duration: 3, sourceIn: 0, lead: 0, tail: 0, renderStart: 0, renderEnd: 3, decodeStart: 0, videoAudio: false },
+      ],
+    };
+    const filters: string[] = [];
+    const { videoLabel, nextInput } = makeVideoChain(plan, filters, 0, new Map([["pip", 2]]));
+    expect(nextInput).toBe(3);
+    const pixels = ffmpeg(["-f", "lavfi", "-i", "color=white:s=8x4:r=30:d=1", "-f", "lavfi", "-i", "color=red:s=8x4:r=30:d=1",
+      "-f", "lavfi", "-i", "color=black@0:s=8x4:r=30:d=1,format=rgba,drawbox=x=4:y=0:w=4:h=4:color=white@1:t=fill:replace=1",
+      "-filter_complex", filters.join(";"), "-map", `[${videoLabel}]`, "-frames:v", "1", "-threads", "2", "-pix_fmt", "rgba", "-f", "rawvideo", "-"]);
+    const at = (x: number, y: number) => [...pixels.subarray((y * 8 + x) * 4, (y * 8 + x) * 4 + 3)];
+    for (const x of [0, 3]) expect(at(x, 1)[1]).toBeGreaterThan(240);   // masked out: white base shows through
+    for (const x of [4, 7]) expect(at(x, 1)[1]).toBeLessThan(15);       // inside the mask: the red clip
+  });
+  it("moves an upper track along its keyed x position frame by frame", () => {
+    // 16x8 canvas; the red clip is a 4x2 box (scale 0.25) whose centre travels from x=-4 to x=+4 over 30 frames.
+    const project = createProject({ title: "keyed", fps: 30, width: 16, height: 8 });
+    const items: VideoItem[] = [{ id: "base", assetId: "a", start: 0, duration: 30, sourceIn: 0 },
+      { id: "pip", assetId: "b", start: 0, duration: 30, sourceIn: 0, transform: { scale: 0.25 }, keyframes: { x: [{ t: 0, v: -4 }, { t: 1, v: 4 }] } }];
+    project.assets = { a: { id: "a", kind: "video", path: "a.mp4" }, b: { id: "b", kind: "video", path: "b.mp4" } };
+    project.tracks = [{ id: "v1", kind: "video", name: "V1", items: [items[0]] }, { id: "v2", kind: "video", name: "V2", items: [items[1]] }];
+    const probes = Object.fromEntries(["a", "b"].map(id => [id, { kind: "video" as const, path: `${id}.mp4`, fingerprint: "x", width: 16, height: 8, fps: 30, duration: 4, audio: false }]));
+    const plan = planLayeredExport(project, probes), filters: string[] = [];
+    const { videoLabel } = makeVideoChain(plan, filters, 0);
+    const pixels = ffmpeg(["-f", "lavfi", "-i", "color=white:s=16x8:r=30:d=1.2", "-f", "lavfi", "-i", "color=red:s=16x8:r=30:d=1.2", "-filter_complex", filters.join(";"), "-map", `[${videoLabel}]`, "-frames:v", "30", "-threads", "2", "-pix_fmt", "rgba", "-f", "rawvideo", "-"]);
+    const redColumns = (frame: number) => { const found: number[] = []; for (let x = 0; x < 16; x++) { const at = frame * 16 * 8 * 4 + (4 * 16 + x) * 4; if (pixels[at + 1] < 100) found.push(x); } return found; };
+    // centre at 8 + x(frame); the box is 4 wide, so its left edge is centre - 2
+    for (const frame of [0, 10, 20, 29]) {
+      const left = Math.round(8 + (-4 + 8 * frame / 30) - 2), columns = redColumns(frame);
+      expect(columns[0]).toBe(left); expect(columns.length).toBe(4);
+    }
+  });
   it("darkens a dip once and preserves transparent letterboxing", () => {
     const plan: LayeredPlan = {
       from: 0, to: 36, fps: 30, width: 4, height: 2, background: "#123456", audio: [], windows: [],

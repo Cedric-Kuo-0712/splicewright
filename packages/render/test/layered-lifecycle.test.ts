@@ -76,6 +76,18 @@ describe("layered output lifecycle", () => {
     expect(state.commands).toHaveLength(0);
     expect(readFileSync(args.output, "utf8")).toBe("previous output");
   });
+  it("renders each masked item's mask image once through Composition's maskOf mode and removes it afterwards", async () => {
+    const args = setup();
+    (args.project.tracks[0].items[0] as any).mask = { shape: "ellipse", x: 0.1, y: 0.1, w: 0.8, h: 0.8 };
+    await renderLayered(args);
+    const masks = state.graphics.filter(options => options.inputProps.maskOf);
+    expect(masks).toHaveLength(1);
+    expect(masks[0].inputProps.maskOf).toBe("clip");
+    expect(masks[0].frames).toEqual([0]);
+    expect(state.graphics.indexOf(masks[0])).toBe(0);
+    expect(state.commands[0].join(" ")).toMatch(/-loop 1 -framerate 30 -t \S+ -i \S+\.masks-\S+\/0\.png/);
+    expect(readdirSync(root!).filter(name => name.includes(".masks-"))).toEqual([]);
+  });
   it("notifies every current-batch cancel listener and releases previous listeners", async () => {
     const args = setup(); const parentCallbacks: (() => void)[] = [];
     args.remotion.composition.durationInFrames = 700;

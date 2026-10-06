@@ -107,9 +107,8 @@ describe("layered render preparation", () => {
     });
     it("falls back to Remotion and reports why when the project is not eligible", async () => {
       const options = setup();
-      state.project!.tracks.push({ id: "video2", name: "V2", kind: "video", items: [] } as any);
-      state.project!.tracks.push({ id: "video3", name: "V3", kind: "video", items: [] } as any);
-      await expect(render(root!, options)).resolves.toMatchObject({ pipelineUsed: "remotion", fallbackReason: expect.stringContaining("requires exactly one visible video track") });
+      (state.project!.tracks[0] as any).items[0].transform = { rotation: 45 };
+      await expect(render(root!, options)).resolves.toMatchObject({ pipelineUsed: "remotion", fallbackReason: expect.stringContaining("unsupported video look") });
       expect(state.layered).not.toHaveBeenCalled();
       expect(renderMedia).toHaveBeenCalledOnce();
     });
@@ -145,15 +144,13 @@ describe("layered render preparation", () => {
     it("falls back to the software master, not the hardware default, when Remotion has to render", async () => {
       const { output } = setup();
       state.defaultPreset.mockReturnValue("h265-hardware");
-      state.project!.tracks.push({ id: "video2", name: "V2", kind: "video", items: [] } as any);
-      state.project!.tracks.push({ id: "video3", name: "V3", kind: "video", items: [] } as any);
+      (state.project!.tracks[0] as any).items[0].transform = { rotation: 45 };
       await expect(render(root!, { output })).resolves.toMatchObject({ pipelineUsed: "remotion", preset: "master" });
       await expect(render(root!, { output, preset: "h265-hardware" })).resolves.toMatchObject({ pipelineUsed: "remotion", preset: "h265-hardware" });
     });
     it("keeps an explicit layered request strict and an explicit remotion request off the layered route", async () => {
       const options = setup();
-      state.project!.tracks.push({ id: "video2", name: "V2", kind: "video", items: [] } as any);
-      state.project!.tracks.push({ id: "video3", name: "V3", kind: "video", items: [] } as any);
+      (state.project!.tracks[0] as any).items[0].transform = { rotation: 45 };
       await expect(render(root!, { ...options, pipeline: "layered" })).rejects.toThrow("layered export unsupported");
       await expect(render(root!, { ...options, pipeline: "remotion" })).resolves.toMatchObject({ pipelineUsed: "remotion" });
       expect(state.layered).not.toHaveBeenCalled();

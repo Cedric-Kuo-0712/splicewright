@@ -1,4 +1,4 @@
-import { itemSpan, transitionOf, type AudioItem, type OverlayItem, type Project, type Track, type VideoItem } from "@splicewright/core";
+import { bezier, itemSpan, keyframeFrame, transitionOf, type AudioItem, type OverlayItem, type Project, type Track, type VideoItem } from "@splicewright/core";
 import type { Probe } from "@splicewright/core/node";
 
 export interface LayeredSegment {
@@ -16,6 +16,8 @@ export interface LayeredSegment {
   incoming?: { kind: "dissolve" | "dip"; before: number; after: number };
   outgoing?: { kind: "dissolve" | "dip"; before: number; after: number };
   videoAudio: boolean;
+  /** Present when the item is scaled, moved or faded: output pixels, offsets from the canvas centre (CSS translate-then-scale). */
+  place?: { width: number; height: number; x: number; y: number; opacity: number; xExpr?: string; yExpr?: string };
 }
 
 export interface LayeredPlan {
@@ -55,20 +57,58 @@ const styleHasSafeBackdrop = (style: unknown, captionDefault = false) => {
   const safe = ["backdropFilter", "WebkitBackdropFilter", "webkitBackdropFilter"].every((key) => css[key] === undefined || css[key] === "none");
   return safe && (css.mixBlendMode === undefined || css.mixBlendMode === "normal") && (!captionDefault || css.backdropFilter === "none");
 };
-const isIdentityTransform = (transform: VideoItem["transform"]) => !transform || Object.entries(transform).every(([key, value]) =>
-  (key === "x" || key === "y" || key === "rotation") ? value === 0 : key === "scale" || key === "opacity" ? value === 1 : false,
-);
+const BEZIER_STEPS = 16;
+/**
+ * ffmpeg expression (in `t`, seconds on the output clock) for a keyed x or y, in output pixels. Every segment is a clipped ramp and the
+ * ramps are summed, so there is no nesting. Linear and "ease" (smoothstep) segments are exact; a cubic-bezier segment is sampled into
+ * BEZIER_STEPS linear ramps (ceiling: the error is a fraction of a percent of the segment's travel; raise BEZIER_STEPS if it shows).
+ */
+function keyedExpression(project: Project, item: VideoItem, prop: "x" | "y", from: number, scale: number) {
+  const keys = (item.keyframes as Record<string, { t: number; v: number; ease?: unknown }[]> | undefined)?.[prop];
+  if (!keys?.length) return undefined;
+  const at = (t: number) => (keyframeFrame(project, item, t) - from) / project.meta.fps;
+  const num = (value: number) => String(+value.toFixed(6));
+  const ramp = (delta: number, start: number, end: number) => `${num(delta)}*clip((t-${num(start)})/${num(end - start)},0,1)`;
+  const terms = [num(keys[0].v * scale)];
+  for (let index = 0; index + 1 < keys.length; index++) {
+    const [a, b] = [keys[index], keys[index + 1]];
+    const [start, end, delta] = [at(a.t), at(b.t), (b.v - a.v) * scale];
+    if (!(end > start)) fail(`keyframes of ${prop} on ${item.id} must be strictly increasing`);
+    if (Array.isArray(a.ease)) {
+      const [x1, y1, x2, y2] = a.ease as [number, number, number, number];
+      let previous = 0;
+      for (let step = 1; step <= BEZIER_STEPS; step++) {
+        const progress = bezier(x1, y1, x2, y2, step / BEZIER_STEPS);
+        terms.push(ramp(delta * (progress - previous), start + (end - start) * (step - 1) / BEZIER_STEPS, start + (end - start) * step / BEZIER_STEPS));
+        previous = progress;
+      }
+    } else if (a.ease === "ease") {
+      const u = `clip((t-${num(start)})/${num(end - start)},0,1)`;
+      terms.push(`${num(delta)}*${u}*${u}*(3-2*${u})`);
+    } else terms.push(ramp(delta, start, end));
+  }
+  return terms.join("+");
+}
+
+/** Composition.tsx applies `translate(x, y) scale(s)` about the canvas centre, so the item's centre moves by (x, y) unscaled. */
+function placement(project: Project, item: VideoItem, from: number, scale: number): LayeredSegment["place"] {
+  const { x = 0, y = 0, scale: zoom = 1, opacity = 1 } = item.transform ?? {};
+  const xExpr = keyedExpression(project, item, "x", from, scale), yExpr = keyedExpression(project, item, "y", from, scale);
+  if (!x && !y && zoom === 1 && opacity === 1 && !xExpr && !yExpr) return undefined;
+  if (!(zoom > 0)) fail("transform scale must be positive");
+  return { width: Math.max(2, Math.round(project.meta.width * scale * zoom)), height: Math.max(2, Math.round(project.meta.height * scale * zoom)), x: x * scale, y: y * scale, opacity, xExpr, yExpr };
+}
 
 /** Conservative eligibility and frame mapping for the experimental native-video/Remotion-graphics path. */
 export function planLayeredExport(project: Project, probes: Record<string, Probe>, from = 0, to = timelineEnd(project), scale = 1): LayeredPlan {
   if (!Number.isFinite(scale) || scale <= 0) fail("output scale must be positive");
   if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to <= from || to > timelineEnd(project)) fail(`invalid frame range [${from}, ${to})`);
   const visibleVideo = project.tracks.filter((track) => !track.hidden && track.kind === "video");
-  if (visibleVideo.length !== 1) fail("requires exactly one visible video track");
+  if (!visibleVideo.length) fail("requires at least one visible video track");
   const background = project.meta.background ?? "#000";
   if (!/^(?:#[\da-f]{3}|#[\da-f]{6}|black|transparent)$/i.test(background)) fail("project background must be a simple hex color, black, or transparent");
-  const videoTrack = visibleVideo[0] as Extract<Track, { kind: "video" }>;
-  const videoTrackIndex = project.tracks.indexOf(videoTrack);
+  // Tracks run bottom (index 0) to top; graphics are composited above every video track.
+  const videoTrackIndex = Math.max(...visibleVideo.map((track) => project.tracks.indexOf(track)));
   const intersects = (item: Parameters<typeof itemSpan>[1]) => {
     const span = itemSpan(project, item);
     if (!span) return false;
@@ -79,9 +119,9 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
     fail("graphics tracks below the video track cannot be preserved by layered composition");
   if (Math.round(project.meta.width * scale) < 2 || Math.round(project.meta.height * scale) < 2 || Math.round(project.meta.width * scale) % 2 || Math.round(project.meta.height * scale) % 2)
     fail("output dimensions must be positive and even for 4:2:0 video");
-  const ordered = [...videoTrack.items].sort((a, b) => a.start - b.start);
-  if (!ordered.length) fail("requires at least one video item");
   const segments: LayeredSegment[] = [];
+  for (const videoTrack of visibleVideo as Extract<Track, { kind: "video" }>[]) {
+  const ordered = [...videoTrack.items].sort((a, b) => a.start - b.start);
   for (let index = 0; index < ordered.length; index++) {
     const item = ordered[index];
     const outgoingCandidate = transitionOf(videoTrack, item);
@@ -97,7 +137,7 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
     if (!probe || probe.kind !== "video" || !probe.width || !probe.height || probe.audio === undefined) fail(`item ${item.id} needs a current video probe with dimensions and audio metadata`);
     if (probe.rotation || asset.rotation) fail(`item ${item.id} has rotated media`);
     if ((item.speed ?? 1) !== 1 || item.reverse) fail(`item ${item.id} uses speed or reverse playback`);
-    if (item.grade || item.key || item.lutKeyframes?.length || item.mask || item.crop || item.effects || item.blend && item.blend !== "normal" || !isIdentityTransform(item.transform) || Object.keys(item.keyframes ?? {}).length)
+    if (item.grade || item.key || item.lutKeyframes?.length || item.crop || item.effects || item.blend && item.blend !== "normal" || item.transform?.rotation || Object.keys(item.keyframes ?? {}).some((key) => key !== "x" && key !== "y"))
       fail(`item ${item.id} uses an unsupported video look or animation`);
     if (item.audioFx) fail(`item ${item.id} uses processed audio`);
     const affectsRange = (cut: number, transition: NonNullable<ReturnType<typeof transitionOf>>) => cut - transition.before < to && cut + transition.after > from;
@@ -126,9 +166,11 @@ export function planLayeredExport(project: Project, probes: Record<string, Probe
       if (incoming?.kind === "dip") phaseWindows.push([item.start, item.start + incoming.after]);
       if (outgoing) phaseWindows.push([item.start + item.duration - outgoing.before, item.start + item.duration + (outgoing.kind === "dissolve" ? outgoing.after : 0)]);
       const decodeStart = Math.min(renderStart, ...phaseWindows.filter(([start, end]) => start < renderStart && end > renderStart).map(([start]) => start));
-      segments.push({ item, start: item.start, duration: item.duration, sourceIn: item.sourceIn, lead, tail, renderStart, renderEnd, decodeStart, incoming, outgoing, videoAudio: !videoTrack.muted && probe.audio === true });
+      segments.push({ item, start: item.start, duration: item.duration, sourceIn: item.sourceIn, lead, tail, renderStart, renderEnd, decodeStart, incoming, outgoing, videoAudio: !videoTrack.muted && probe.audio === true, place: placement(project, item, from, scale) });
     }
   }
+  }
+  if (!segments.length) fail("requires at least one video item");
 
   const audio: LayeredPlan["audio"] = [];
   for (const track of project.tracks) {

@@ -107,7 +107,7 @@ describe("layered render preparation", () => {
     });
     it("falls back to Remotion and reports why when the project is not eligible", async () => {
       const options = setup();
-      (state.project!.tracks[0] as any).items[0].transform = { rotation: 45 };
+      (state.project!.tracks[0] as any).items[0].blend = "multiply";
       await expect(render(root!, options)).resolves.toMatchObject({ pipelineUsed: "remotion", fallbackReason: expect.stringContaining("unsupported video look") });
       expect(state.layered).not.toHaveBeenCalled();
       expect(renderMedia).toHaveBeenCalledOnce();
@@ -117,7 +117,7 @@ describe("layered render preparation", () => {
       state.layered.mockResolvedValue({ pipelineUsed: "layered" });
       await render(root!, { ...options, onFallback });
       expect(onFallback).not.toHaveBeenCalled();
-      (state.project!.tracks[0] as any).items[0].transform = { rotation: 45 };
+      (state.project!.tracks[0] as any).items[0].blend = "multiply";
       vi.mocked(renderMedia).mockImplementationOnce((async () => { expect(onFallback).toHaveBeenCalledOnce(); }) as never);
       await render(root!, { ...options, onFallback });
       expect(onFallback).toHaveBeenCalledWith(expect.stringContaining("unsupported video look"));
@@ -154,13 +154,13 @@ describe("layered render preparation", () => {
     it("falls back to the software master, not the hardware default, when Remotion has to render", async () => {
       const { output } = setup();
       state.defaultPreset.mockReturnValue("h265-hardware");
-      (state.project!.tracks[0] as any).items[0].transform = { rotation: 45 };
+      (state.project!.tracks[0] as any).items[0].blend = "multiply";
       await expect(render(root!, { output })).resolves.toMatchObject({ pipelineUsed: "remotion", preset: "master" });
       await expect(render(root!, { output, preset: "h265-hardware" })).resolves.toMatchObject({ pipelineUsed: "remotion", preset: "h265-hardware" });
     });
     it("keeps an explicit layered request strict and an explicit remotion request off the layered route", async () => {
       const options = setup();
-      (state.project!.tracks[0] as any).items[0].transform = { rotation: 45 };
+      (state.project!.tracks[0] as any).items[0].blend = "multiply";
       await expect(render(root!, { ...options, pipeline: "layered" })).rejects.toThrow("layered export unsupported");
       await expect(render(root!, { ...options, pipeline: "remotion" })).resolves.toMatchObject({ pipelineUsed: "remotion" });
       expect(state.layered).not.toHaveBeenCalled();

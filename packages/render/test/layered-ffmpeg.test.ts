@@ -76,6 +76,65 @@ describe.skipIf(!available)("layered FFmpeg numeric acceptance", () => {
     for (const x of [0, 3]) expect(at(x, 1)[1]).toBeGreaterThan(240);   // masked out: white base shows through
     for (const x of [4, 7]) expect(at(x, 1)[1]).toBeLessThan(15);       // inside the mask: the red clip
   });
+  describe("crop and rotation of the fitted picture", () => {
+    // 16x8 canvas, red base, an upper clip whose source has a green left half and a blue right half. The plan comes from the planner,
+    // so the planner's crop fractions and turn are what the filter graph is checked against.
+    const halves = "color=green:s=16x8:r=30:d=1,format=rgba,drawbox=x=8:y=0:w=8:h=8:color=blue:t=fill:replace=1";
+    const frame = (patch: Partial<VideoItem>) => {
+      const project = createProject({ title: "shape", fps: 30, width: 16, height: 8 });
+      project.assets = { a: { id: "a", kind: "video", path: "a.mp4" }, b: { id: "b", kind: "video", path: "b.mp4" } };
+      project.tracks = [
+        { id: "v1", kind: "video", name: "V1", items: [{ id: "base", assetId: "a", start: 0, duration: 3, sourceIn: 0 }] },
+        { id: "v2", kind: "video", name: "V2", items: [{ id: "top", assetId: "b", start: 0, duration: 3, sourceIn: 0, ...patch }] },
+      ];
+      const probes = Object.fromEntries(["a", "b"].map((id) => [id, { kind: "video" as const, path: `${id}.mp4`, fingerprint: "x", width: 16, height: 8, fps: 30, duration: 8, audio: false }]));
+      const filters: string[] = [];
+      const { videoLabel } = makeVideoChain(planLayeredExport(project, probes, 0, 3), filters, 0);
+      const pixels = ffmpeg(["-f", "lavfi", "-i", "color=red:s=16x8:r=30:d=1", "-f", "lavfi", "-i", halves, "-filter_complex", filters.join(";"), "-map", `[${videoLabel}]`, "-frames:v", "1", "-threads", "2", "-pix_fmt", "rgba", "-f", "rawvideo", "-"]);
+      return (x: number, y: number) => { const i = (y * 16 + x) * 4; const [r, g, b] = [pixels[i], pixels[i + 1], pixels[i + 2]]; return r > 200 && g < 60 && b < 60 ? "red" : b > 150 && g < 100 ? "blue" : g > 100 && b < 100 ? "green" : "other"; };
+    };
+    it("clears the cropped strips to transparent and keeps the rest", () => {
+      const at = frame({ crop: { left: 0.25, bottom: 0.5 } });
+      expect(at(1, 1)).toBe("red");   // left strip, x 0..3
+      expect(at(3, 2)).toBe("red");     // the strip is 4 px wide, not 2
+      expect(at(4, 2)).toBe("green");
+      expect(at(2, 6)).toBe("red");
+      expect(at(5, 1)).toBe("green");   // inside the crop, left half of the picture
+      expect(at(12, 2)).toBe("blue");
+      expect(at(5, 6)).toBe("red");   // bottom half cleared, y 4..7
+      expect(at(12, 5)).toBe("red");
+    });
+    it("turns a quarter clockwise after fitting to the swapped box", () => {
+      // The picture fits 8x16 as an 8x4 strip, then turns into a 4x8 column centred at x 6..9, with green (was left) on top.
+      const at = frame({ transform: { rotation: 90 } });
+      expect(at(7, 1)).toBe("green");
+      expect(at(7, 6)).toBe("blue");
+      expect(at(2, 4)).toBe("red");
+      expect(at(13, 4)).toBe("red");
+      const back = frame({ transform: { rotation: -90 } });
+      expect(back(7, 1)).toBe("blue");
+      expect(back(7, 6)).toBe("green");
+    });
+    it("swaps the picture's sides on a half turn and leaves transparent corners on a free angle", () => {
+      const half = frame({ transform: { rotation: 180 } });
+      expect(half(2, 3)).toBe("blue");
+      expect(half(13, 3)).toBe("green");
+      // 45 degrees clockwise about the centre of a 16x8 box: the top-right and bottom-left corners leave the turned picture, the
+      // top-left one stays inside it (a counter-clockwise turn would swap which corners are covered).
+      const free = frame({ transform: { rotation: 45 } });
+      expect(free(15, 0)).toBe("red");
+      expect(free(0, 7)).toBe("red");
+      expect(free(0, 0)).toBe("green");
+      expect(free(7, 3)).toBe("green");
+      expect(free(8, 4)).toBe("blue");
+    });
+    it("rotates the cropped picture, not the crop box", () => {
+      // Crop the left (green) half away, then half-turn: what remains was the right half, now on the left.
+      const at = frame({ crop: { left: 0.5 }, transform: { rotation: 180 } });
+      expect(at(3, 3)).toBe("blue");
+      expect(at(12, 3)).toBe("red");
+    });
+  });
   it("moves an upper track along its keyed x position frame by frame", () => {
     // 16x8 canvas; the red clip is a 4x2 box (scale 0.25) whose centre travels from x=-4 to x=+4 over 30 frames.
     const project = createProject({ title: "keyed", fps: 30, width: 16, height: 8 });

@@ -18,7 +18,7 @@ Requirements:
 - Python 3.10–3.12, only if you want local Kokoro text-to-speech. Kokoro setup is independent of `ingest/.venv`.
 
 ```sh
-git clone <this repo> splicewright && cd splicewright
+git clone https://github.com/Cedric-Kuo-0712/splicewright.git splicewright && cd splicewright
 npm install
 # Optional, for transcripts (faster-whisper) and beats (librosa):
 python3 -m venv ingest/.venv && ingest/.venv/bin/pip install -r ingest/requirements.txt
@@ -382,3 +382,32 @@ For a small agent overview, use `list_materials` with `view: "compact"`; use `pa
   run `splicewright ingest --only transcript,beats`.
 - **Crop or the transform box looks misaligned on a clip.** Ingest that asset so its pixel size is
   known. Until then, the editor assumes the picture fills the frame.
+
+## License
+
+Splicewright's own code is released under the [MIT License](LICENSE).
+
+**Remotion is not covered by this license.** Splicewright depends on
+[Remotion](https://www.remotion.dev), which is source-available under its own
+[license](https://remotion.dev/license). It is free for individuals, for-profit organizations with up
+to 3 employees, and non-profits. Larger for-profit organizations need a Remotion Company License.
+Remotion is installed from npm, not copied into this repository, and the MIT license here grants no
+rights to it. Check that you are eligible before you use Splicewright.
+
+## Third-party software
+
+- **Remotion** (`remotion`, `@remotion/*`): rendering and the in-browser player. Remotion License, see above.
+- **Other npm dependencies** (React, Vite, zod, `@modelcontextprotocol/sdk`, and so on) are installed
+  from npm under their own licenses, mostly MIT, Apache-2.0, ISC and BSD. `@fontsource/*` fonts are OFL-1.1.
+- **Color LUTs** in `packages/core/assets/luts/`: MIT, with the license texts beside the files
+  (`film/LICENSE.txt`, João Almeida; `native/LICENSE`, Nixua). The film LUTs are converted from the
+  `t3mujinpack` pack (the source images are not included here). Camera and film-stock names such as Kodak and Fuji
+  are trademarks of their owners and only describe the look.
+- **BreezyVoice** (optional TTS), [mtkresearch/BreezyVoice](https://github.com/mtkresearch/BreezyVoice):
+  Apache-2.0, and the model weights on Hugging Face are also tagged Apache-2.0. They are downloaded at
+  setup, not shipped here. `ingest/breezyvoice-mps.patch` modifies a file taken from CosyVoice
+  ([FunAudioLLM/CosyVoice](https://github.com/FunAudioLLM/CosyVoice), Apache-2.0) as vendored in
+  BreezyVoice. The patch is applied to the downloaded checkout and stays under that license.
+- **Kokoro** (optional TTS), `faster-whisper` and `librosa` (optional ingest) are downloaded or
+  installed by their own tooling. Check their licenses and model terms before you redistribute anything
+  generated with them.

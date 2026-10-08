@@ -12,6 +12,8 @@ const sourceFixture = resolve(rootRepo, '.codex-jobs/export-batch-memory-4g-2026
 const priorConfig = resolve(rootRepo, '.codex-jobs/export-batch-memory-4g-20261004T123148Z/comparison.json');
 const priorSuccessfulClipRun = resolve(repo, '.codex-jobs/export-memory-profile-af5cc10-retry-launchd/clip-count/result.json');
 const BASELINE = '57981f611edc7066b8b851d0dae8162654f1d26f';
+// Media folder the prior run's fingerprints were recorded under; set it to your own raw-media folder.
+const MEDIA_ROOT = process.env.SPLICEWRIGHT_BENCH_MEDIA_ROOT ?? '/path/to/test-project/raw/';
 
 export function makeSequentialProject(source, count) {
   if (![10, 100, 200].includes(count)) throw new Error('clip count must be 10, 100, or 200');
@@ -150,7 +152,7 @@ export function prepareBenchmark(outDir, { activeWindowOnly = false } = {}) {
     const runDir = join(base, name.replace(/\.json$/, ''));
     mkdirSync(runDir, { recursive: true });
     const codeFiles = stableRendererSources;
-    const sourceInputs = prior.fingerprints.filter(item => item.path.startsWith('/path/to/test-project/raw/'));
+    const sourceInputs = prior.fingerprints.filter(item => item.path.startsWith(MEDIA_ROOT));
     const fingerprints = [...new Set(codeFiles)].map(path => ({ path, sha256: sha256(path) }));
     fingerprints.push(...sourceInputs, ...fixtureProjects.filter(path => !path.endsWith('entry.tsx')).map(path => ({ path, sha256: sha256(path) })));
     const entryInputs = cases.map(testCase => {
@@ -195,7 +197,7 @@ export function prepareBenchmark(outDir, { activeWindowOnly = false } = {}) {
   if (activeWindowOnly) return { directory: base, head: currentHead, baseline: BASELINE, priorSequential10: JSON.parse(readFileSync(clipCountConfig, 'utf8')).provenance.priorSuccessful10, launches: launches.map(config => `nice -n 10 node scripts/export-comparison-runner.mjs --config ${config}`), preparedOnly: true };
   const remotionDir = join(base, 'fixtures', 'concurrent-remotion-3-track');
   const remotionCase = writeFixture(sourceProject, sourceFixture, remotionDir, makeConcurrentTrackProject(sourceProject, 3));
-  const concurrentFingerprints = [...stableRendererSources, join(remotionDir, 'project.json'), join(remotionDir, '.splicewright/assets.json'), ...prior.fingerprints.filter(item => item.path.startsWith('/path/to/test-project/raw/')).map(item => item.path)].map(path => ({ path, sha256: sha256(path) }));
+  const concurrentFingerprints = [...stableRendererSources, join(remotionDir, 'project.json'), join(remotionDir, '.splicewright/assets.json'), ...prior.fingerprints.filter(item => item.path.startsWith(MEDIA_ROOT)).map(item => item.path)].map(path => ({ path, sha256: sha256(path) }));
   const concurrentDir = join(base, 'concurrent-remotion');
   mkdirSync(concurrentDir, { recursive: true });
   const concurrentConfig = join(concurrentDir, 'comparison.json');

@@ -16,6 +16,7 @@ import threading
 import traceback
 import urllib.request
 
+# BreezyVoice and CosyVoice are Apache-2.0; breezyvoice-mps.patch stays under that license (see README).
 SOURCE_URL = "https://github.com/mtkresearch/BreezyVoice.git"
 SOURCE_COMMIT = "d592c9d3e8927a0f53f68616387060dcd32a05ea"
 MODEL_ID = "MediaTek-Research/BreezyVoice"

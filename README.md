@@ -204,6 +204,28 @@ How you and the agent share the project:
 - Anything worth remembering, such as a chosen take or a rejected idea, goes under **Notes** in
   `AGENTS.md`.
 
+## Animation
+
+Animated overlays are React components that Remotion draws, so the preview and the export look the
+same. The agent gets a bundled skill, `splicewright-animation`, which is copied into your project's
+`.agents/skills/`. The helpers live in `splicewright/animation`.
+
+| You want | The agent uses |
+|---|---|
+| Location tags, arrows, itinerary, cards | A React/SVG component you register in `splicewright.config.ts` |
+| Hand-drawn lines, hatching, sketched maps | `SketchPath` ([Rough.js](https://roughjs.com)) |
+| One shape turning into another | `MorphPath` ([Flubber](https://github.com/veltman/flubber)) |
+| A ready-made animated sticker from a local JSON file | `Lottie` |
+| A long scene with sequenced actions, or a formula | Optional [Motion Canvas](https://motioncanvas.io) or [Manim](https://github.com/ManimCommunity/manim) |
+
+Try: "Add a location tag for Kyoto at 0:12 that stays on screen for 3 seconds."
+
+Every animated value is computed from the frame number, so scrubbing backwards and rendering frames
+out of order give the same picture. Motion Canvas and Manim are set up separately and their output
+goes onto the timeline as a video, so it is not editable there afterwards. For text and timing you
+expect to revise, stay with the React/SVG route. The details are in
+[`packages/cli/src/skills/splicewright-animation`](packages/cli/src/skills/splicewright-animation/SKILL.md).
+
 ## The editor
 
 The screen has four areas: the media bin on the left, the player in the middle, the inspector on

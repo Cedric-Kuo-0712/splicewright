@@ -7,4 +7,5 @@ __pycache__/
 .code-review-graph/
 .mcp.json
 opencode.jsonc
-.claude/settings.local.json
+.claude/
+.codex/

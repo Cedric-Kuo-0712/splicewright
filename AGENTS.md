@@ -9,6 +9,10 @@ A file-first, agent-native video editor monorepo (`packages/core`, `packages/cli
 - **Typecheck**: `npm run typecheck`
 - **Web dev server**: `npm --workspace=@splicewright/web run dev`
 
+## Privacy in commits
+
+This repository is public. Commit with the GitHub noreply email already set in this repo's git config; do not change `user.email`. Never put a real name, a personal email address, or an absolute home path (`/Users/<name>/...`) in a file, a commit message, a log or a test fixture. Use a placeholder such as `/path/to/project` or an environment variable.
+
 ## Long-running commands
 
 Follow the global completion-notification policy. On this machine, use

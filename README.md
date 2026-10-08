@@ -5,6 +5,8 @@ A video editor that an AI agent and a person can work on at the same time. The e
 Remotion renders it. Both sides use the same operations, so every change can be undone, is checked
 before it is saved, and appears live on the other side.
 
+![Screenshot of the Splicewright editor](docs/images/editor.png)
+
 The data model, the list of operations and the design decisions are in [SPEC.md](SPEC.md). This
 file covers installing and using the editor.
 
